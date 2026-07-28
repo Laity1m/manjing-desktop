@@ -107,13 +107,42 @@ function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, x: number, 
   if (line && row < maxLines) ctx.fillText(line, x, y + row * lineHeight);
 }
 
-function drawCover(ctx: CanvasRenderingContext2D, media: CanvasImageSource, width: number, height: number, zoom = 1) {
+function drawCover(
+  ctx: CanvasRenderingContext2D,
+  media: CanvasImageSource,
+  width: number,
+  height: number,
+  zoom = 1,
+  panX = 0,
+  panY = 0,
+  opacity = 1,
+) {
   const sourceWidth = media instanceof HTMLVideoElement ? media.videoWidth : media instanceof HTMLImageElement ? media.naturalWidth : width;
   const sourceHeight = media instanceof HTMLVideoElement ? media.videoHeight : media instanceof HTMLImageElement ? media.naturalHeight : height;
   const scale = Math.max(width / sourceWidth, height / sourceHeight) * zoom;
   const drawWidth = sourceWidth * scale;
   const drawHeight = sourceHeight * scale;
-  ctx.drawImage(media, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+  const overflowX = Math.max(0, drawWidth - width);
+  const overflowY = Math.max(0, drawHeight - height);
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.drawImage(
+    media,
+    (width - drawWidth) / 2 + panX * overflowX * 0.46,
+    (height - drawHeight) / 2 + panY * overflowY * 0.46,
+    drawWidth,
+    drawHeight,
+  );
+  ctx.restore();
+}
+
+function drawMovingShot(ctx: CanvasRenderingContext2D, media: CanvasImageSource, width: number, height: number, index: number, progress: number, opacity = 1) {
+  const eased = 0.5 - Math.cos(Math.PI * Math.max(0, Math.min(1, progress))) / 2;
+  const direction = index % 4;
+  const panX = direction === 0 ? eased * 2 - 1 : direction === 1 ? 1 - eased * 2 : direction === 2 ? 0.35 : -0.35;
+  const panY = direction === 2 ? eased * 2 - 1 : direction === 3 ? 1 - eased * 2 : 0;
+  const zoom = direction < 2 ? 1.045 + eased * 0.075 : 1.12 - eased * 0.065;
+  drawCover(ctx, media, width, height, zoom, panX, panY, opacity);
 }
 
 export default function Home() {
@@ -136,6 +165,7 @@ export default function Home() {
   const [time, setTime] = useState(0);
   const [exportUrl, setExportUrl] = useState("");
   const [exportProgress, setExportProgress] = useState(0);
+  const [showFilm, setShowFilm] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -299,6 +329,7 @@ export default function Home() {
     runRef.current = run;
     setError("");
     setExportUrl("");
+    setShowFilm(false);
     setPlaying(false);
     setTime(0);
     setPhase("story");
@@ -320,12 +351,17 @@ export default function Home() {
       setPhase("images");
       for (let index = 0; index < work.length; index += 1) {
         const scene = work[index];
-        setStatusText(`正在生成第 ${index + 1}/${work.length} 个真实画面`);
+        setStatusText(mode === "cloud" ? `正在生成第 ${index + 1}/${work.length} 个 AI 动态镜头` : `正在生成第 ${index + 1}/${work.length} 个漫剧画面`);
         updateScene(scene.id, { status: "painting" });
-        const imageUrl = await makeImage(scene, index, run);
-        work = work.map((item) => (item.id === scene.id ? { ...item, imageUrl, status: "ready" as SceneStatus } : item));
+        if (mode === "cloud") {
+          const videoUrl = await pollinationsMedia("video", `${STYLE_PROMPTS[style]}, ${scene.visual}, expressive character acting, cinematic camera movement, coherent motion`);
+          work = work.map((item) => (item.id === scene.id ? { ...item, videoUrl, duration: 6, status: "ready" as SceneStatus } : item));
+        } else {
+          const imageUrl = await makeImage(scene, index, run);
+          work = work.map((item) => (item.id === scene.id ? { ...item, imageUrl, status: "ready" as SceneStatus } : item));
+        }
         setScenes(work);
-        setProgress(18 + Math.round(((index + 1) / work.length) * (voiceEnabled && mode === "cloud" ? 52 : 76)));
+        setProgress(18 + Math.round(((index + 1) / work.length) * (voiceEnabled && mode === "cloud" ? 48 : 62)));
       }
       if (voiceEnabled && mode === "cloud") {
         setPhase("voice");
@@ -337,12 +373,14 @@ export default function Home() {
           const audioSeconds = await mediaDuration(audioUrl);
           work = work.map((item) => item.id === scene.id ? { ...item, audioUrl, duration: Math.max(item.duration, Math.ceil(audioSeconds + 0.6)), status: "ready" as SceneStatus } : item);
           setScenes(work);
-          setProgress(70 + Math.round(((index + 1) / work.length) * 28));
+          setProgress(68 + Math.round(((index + 1) / work.length) * 18));
         }
       }
-      setProgress(100);
-      setPhase("ready");
-      setStatusText(mode === "cloud" && voiceEnabled ? "画面与配音已生成，可以播放或导出" : "真实画面已生成，可以播放或导出视频");
+      setScenes(work);
+      setProgress(88);
+      setStatusText(mode === "cloud" ? "动态镜头已完成，正在自动剪辑 AI 漫剧" : "分镜已完成，正在自动加入运镜、转场与字幕");
+      const exported = await exportFilm(work, true);
+      if (!exported) return;
     } catch (reason) {
       if (runRef.current !== run) return;
       setPhase("error");
@@ -447,19 +485,24 @@ export default function Home() {
     return image;
   }
 
-  async function exportFilm() {
-    if (!scenes.length || !scenes.every((scene) => scene.imageUrl || scene.videoUrl)) {
+  async function exportFilm(sourceScenes: Scene[] = scenes, automatic = false) {
+    const movieScenes = sourceScenes;
+    if (!movieScenes.length || !movieScenes.every((scene) => scene.imageUrl || scene.videoUrl)) {
       setError("请先为所有镜头生成画面");
-      return;
+      return false;
     }
     if (!("MediaRecorder" in window)) {
       setError("当前浏览器不支持视频导出，请使用最新版 Chrome 或 Edge");
-      return;
+      return false;
     }
+    const movieOffsets = movieScenes.map((_, index) => movieScenes.slice(0, index).reduce((sum, item) => sum + item.duration, 0));
+    const movieDuration = movieScenes.reduce((sum, item) => sum + item.duration, 0);
     setPlaying(false);
+    setShowFilm(false);
     setPhase("exporting");
     setExportProgress(0);
     setError("");
+    if (!automatic) setStatusText("正在重新剪辑漫剧成片");
     try {
       const width = aspect === "9:16" ? 720 : 1280;
       const height = aspect === "9:16" ? 1280 : 720;
@@ -468,10 +511,10 @@ export default function Home() {
       canvas.height = height;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("无法创建视频画布");
-      const visuals = await Promise.all(scenes.map(loadVisual));
+      const visuals = await Promise.all(movieScenes.map(loadVisual));
       const audioContext = new AudioContext();
       const destination = audioContext.createMediaStreamDestination();
-      const buffers = await Promise.all(scenes.map(async (scene) => {
+      const buffers = await Promise.all(movieScenes.map(async (scene) => {
         if (!scene.audioUrl) return null;
         const bytes = await (await fetch(scene.audioUrl)).arrayBuffer();
         return audioContext.decodeAudioData(bytes);
@@ -494,20 +537,20 @@ export default function Home() {
           source.connect(destination);
           source.start(audioStart + audioOffset);
         }
-        audioOffset += scenes[index].duration;
+        audioOffset += movieScenes[index].duration;
       });
       const started = performance.now() + 120;
       let visualIndex = -1;
       await new Promise<void>((resolve) => {
         const render = (now: number) => {
           const elapsed = Math.max(0, (now - started) / 1000);
-          if (elapsed >= totalDuration) {
+          if (elapsed >= movieDuration) {
             resolve();
             return;
           }
-          const index = Math.max(0, scenes.findIndex((scene, sceneIndex) => elapsed >= offsets[sceneIndex] && elapsed < offsets[sceneIndex] + scene.duration));
-          const scene = scenes[index];
-          const local = (elapsed - offsets[index]) / scene.duration;
+          const index = Math.max(0, movieScenes.findIndex((scene, sceneIndex) => elapsed >= movieOffsets[sceneIndex] && elapsed < movieOffsets[sceneIndex] + scene.duration));
+          const scene = movieScenes[index];
+          const local = (elapsed - movieOffsets[index]) / scene.duration;
           const visual = visuals[index];
           if (index !== visualIndex) {
             visuals.forEach((item, itemIndex) => {
@@ -521,7 +564,9 @@ export default function Home() {
           }
           ctx.fillStyle = "#0d0b12";
           ctx.fillRect(0, 0, width, height);
-          drawCover(ctx, visual, width, height, 1 + local * 0.055);
+          const transition = Math.min(1, local * 5);
+          if (index > 0 && transition < 1) drawMovingShot(ctx, visuals[index - 1], width, height, index - 1, 1, 1);
+          drawMovingShot(ctx, visual, width, height, index, local, transition);
           const shade = ctx.createLinearGradient(0, height * 0.48, 0, height);
           shade.addColorStop(0, "rgba(9,7,12,0)");
           shade.addColorStop(1, "rgba(9,7,12,.88)");
@@ -535,7 +580,7 @@ export default function Home() {
           ctx.font = `600 ${Math.round(width * 0.044)}px Microsoft YaHei, sans-serif`;
           wrapCanvasText(ctx, `“${scene.dialogue}”`, width / 2, height * 0.86, width * 0.78, width * 0.06, 3);
           ctx.textAlign = "left";
-          setExportProgress(Math.min(99, Math.round((elapsed / totalDuration) * 100)));
+          setExportProgress(Math.min(99, Math.round((elapsed / movieDuration) * 100)));
           requestAnimationFrame(render);
         };
         requestAnimationFrame(render);
@@ -550,12 +595,16 @@ export default function Home() {
       if (exportUrl) URL.revokeObjectURL(exportUrl);
       const url = URL.createObjectURL(blob);
       setExportUrl(url);
+      setShowFilm(true);
       setExportProgress(100);
+      setProgress(100);
       setPhase("ready");
-      setStatusText(buffers.some(Boolean) ? "成片已导出，画面、字幕和配音均已写入" : "成片已导出，免费系统配音仅用于在线播放");
+      setStatusText(buffers.some(Boolean) ? "AI 动态漫剧已生成，视频、字幕和配音均已写入" : "运镜漫剧已自动生成，可直接播放或下载");
+      return true;
     } catch (reason) {
       setPhase("error");
       setError(reason instanceof Error ? reason.message : "视频导出失败");
+      return false;
     }
   }
 
@@ -568,6 +617,7 @@ export default function Home() {
   }
 
   const busy = ["story", "images", "voice", "exporting"].includes(phase);
+  const visibleProgress = phase === "exporting" ? exportProgress : progress;
   const selectedScene = scenes[selected];
 
   return (
@@ -584,7 +634,7 @@ export default function Home() {
         <div className="hero-copy">
           <p className="eyebrow">真实生成 · 真实播放 · 真实导出</p>
           <h1>把一句故事，<br /><em>做成能播放的漫剧。</em></h1>
-          <p className="subhead">AI 改编剧本、生成分镜画面、中文配音、动态镜头与视频合成，每一步都有真实结果，不再用假进度糊弄你。</p>
+          <p className="subhead">从 AI 剧本、动态镜头、中文配音到自动剪辑，一次生成可直接播放和下载的漫剧成片。</p>
           <a className="hero-cta" href="#studio">开始创作 <span>↘</span></a>
         </div>
         <div className="hero-card" aria-hidden="true">
@@ -613,35 +663,37 @@ export default function Home() {
 
         <div id="provider" className="provider-box">
           <div className="provider-tabs">
-            <button className={mode === "community" ? "active" : ""} onClick={() => setMode("community")}><b>免费社区</b><span>无需密钥 · 真 AI 图片</span></button>
-            <button className={mode === "cloud" ? "active" : ""} onClick={() => { setMode("cloud"); setShowKey(true); }}><b>增强云端</b><span>AI 配音 · 动态视频</span></button>
+            <button className={mode === "community" ? "active" : ""} onClick={() => setMode("community")}><b>免费运镜漫剧</b><span>无需密钥 · 自动生成成片</span></button>
+            <button className={mode === "cloud" ? "active" : ""} onClick={() => { setMode("cloud"); setShowKey(true); }}><b>AI 动态漫剧</b><span>逐镜头视频 · AI 配音</span></button>
           </div>
-          {mode === "community" ? <p className="provider-note">由开源社区算力排队生成；在线播放支持系统中文配音，导出视频不含系统朗读。提示词与图片会交由社区节点处理，请勿输入隐私内容。</p> : <div className="key-panel"><div><b>Pollinations 发布密钥</b><span>只保存在你的设备，建议使用设置过预算上限的 pk_ 密钥。</span></div>{showKey && <div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">免费获取 ↗</a></div>}</div>}
+          {mode === "community" ? <p className="provider-note">AI 生成分镜后会自动加入推拉、横移、转场和字幕，直接输出可播放漫剧；免费系统朗读用于在线播放，不写入下载视频。社区算力可能排队，请勿输入隐私内容。</p> : <div className="key-panel"><div><b>Pollinations 发布密钥</b><span>将每个分镜真正生成动态视频，并制作 AI 配音成片；密钥只保存在你的设备。</span></div>{showKey && <div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">免费获取 ↗</a></div>}</div>}
         </div>
 
         <div className="generate-row">
-          <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy && phase !== "exporting" ? "正在制作漫剧" : "一键生成漫剧"}<small>{mode === "community" ? "无需登录" : "真实画面 + AI 音轨"}</small></button>
+          <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "正在制作漫剧成片" : "一键生成 AI 漫剧"}<small>{mode === "community" ? "自动运镜 + 转场 + 字幕" : "AI 动态镜头 + AI 配音"}</small></button>
           {busy && phase !== "exporting" && <button className="cancel-button" onClick={cancelGeneration}>停止</button>}
         </div>
-        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><b>{error || statusText}</b><span>{error ? "请检查设置后重新尝试，页面不会伪装成已完成。" : `${progress}%`}</span></div><div className="status-bar"><i style={{ width: `${progress}%` }} /></div><div className="status-steps"><span className={["story", "images", "voice", "ready"].includes(phase) ? "active" : ""}>剧本</span><span className={["images", "voice", "ready"].includes(phase) ? "active" : ""}>画面</span><span className={["voice", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={phase === "ready" ? "active" : ""}>成片</span></div></div>}
+        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><b>{error || statusText}</b><span>{error ? "请检查设置后重新尝试，页面不会伪装成已完成。" : `${visibleProgress}%`}</span></div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "images", "voice", "exporting", "ready"].includes(phase) ? "active" : ""}>剧本</span><span className={["images", "voice", "exporting", "ready"].includes(phase) ? "active" : ""}>动态镜头</span><span className={["voice", "exporting", "ready"].includes(phase) ? "active" : ""}>声音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>漫剧成片</span></div></div>}
       </section>
 
       <section id="works" className="works section-shell">
         <div className="section-heading"><span>02</span><div><p>剪辑工作台</p><h2>{scenes.length ? projectTitle : "生成后在这里剪辑"}</h2></div><aside>{scenes.length ? `${scenes.length} 个镜头 · ${formatTime(totalDuration)}` : "尚无作品"}</aside></div>
-        {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成漫剧”。生成结果会包含可编辑分镜和真实图片。</p></div> : <div className="workbench">
+        {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成 AI 漫剧”，完成后这里会直接出现可播放成片。</p></div> : <div className="workbench">
           <div className="preview-column">
-            <div className={`stage ${aspect === "9:16" ? "portrait" : "landscape"}`}>
-              {current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline /> : current?.imageUrl ? <img key={current.imageUrl} src={current.imageUrl} alt={current.visual} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "painting" ? "AI 正在绘制这个镜头" : "等待生成画面"}</p></div>}
-              {current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div><div className="subtitle">“{current.dialogue}”</div></>}
+            <div className={`stage ${aspect === "9:16" ? "portrait" : "landscape"} ${showFilm && exportUrl ? "film-ready" : ""}`}>
+              {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={mode === "community" || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline /> : current?.imageUrl ? <img key={current.imageUrl} src={current.imageUrl} alt={current.visual} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "painting" ? (mode === "cloud" ? "AI 正在生成动态镜头" : "AI 正在绘制漫剧画面") : "等待生成镜头"}</p></div>}
+              {showFilm && exportUrl ? <div className="film-corner">AI 漫剧成片</div> : current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div><div className="subtitle">“{current.dialogue}”</div></>}
             </div>
-            <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
-            <div className="export-panel"><div><b>合成成片</b><span>{mode === "cloud" && voiceEnabled ? "画面、动态镜头、字幕和 AI 配音将合成到视频" : "画面、运镜和字幕将合成到视频"}</span></div><button onClick={exportFilm} disabled={phase === "exporting"}>{phase === "exporting" ? `正在录制 ${exportProgress}%` : "生成可播放视频"}</button></div>
-            {exportUrl && <div className="export-result"><video src={exportUrl} controls playsInline /><div><b>成片已经生成</b><span>先播放检查，再下载到设备。</span><button onClick={downloadFilm}>下载视频</button></div></div>}
+            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>漫剧成片已生成</b><span>{mode === "cloud" ? "逐镜头 AI 动画、字幕与配音已经合成" : "运镜、转场与字幕已经自动合成"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={downloadFilm}>下载成片</button></div> : <>
+              <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
+              <div className="export-panel"><div><b>重新合成漫剧</b><span>{mode === "cloud" && voiceEnabled ? "动态镜头、字幕和 AI 配音将写入视频" : "运镜、转场和字幕将写入视频"}</span></div><button onClick={() => void exportFilm()} disabled={phase === "exporting"}>{phase === "exporting" ? `正在录制 ${exportProgress}%` : "生成漫剧成片"}</button></div>
+              {exportUrl && <div className="export-result"><video src={exportUrl} controls playsInline /><div><b>已有漫剧成片</b><span>可以返回成片模式播放，或重新剪辑。</span><button onClick={() => setShowFilm(true)}>播放成片</button><button onClick={downloadFilm}>下载成片</button></div></div>}
+            </>}
           </div>
 
           <div className="timeline-panel">
             <div className="timeline-title"><div><b>智能分镜</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
-            <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); }}><div className="scene-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{scene.status === "painting" ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.visual}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "动态镜头" : scene.imageUrl ? "AI 画面" : "待生成"}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
+            <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{scene.status === "painting" ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.visual}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态镜头" : scene.imageUrl ? "运镜素材" : "待生成"}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
             {selectedScene && <div className="scene-editor"><div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")}</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div><label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label><label>画面描述<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label><label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label><label>镜头时长<input type="number" min={3} max={20} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(3, Math.min(20, Number(event.target.value))) })} /></label><div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>重新生成画面</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>生成 AI 动态镜头</button></div></div>}
           </div>
         </div>}
@@ -649,7 +701,7 @@ export default function Home() {
 
       <section id="capabilities" className="capabilities section-shell">
         <div className="section-heading"><span>03</span><div><p>能力说明</p><h2>每个按钮背后，都有真实结果</h2></div></div>
-        <div className="capability-grid"><article><i>文</i><b>AI 剧本改编</b><p>调用真实语言模型输出结构化分镜，不再复读输入。</p></article><article><i>画</i><b>真实图片生成</b><p>每个镜头调用图片模型，完成后才显示成功。</p></article><article><i>声</i><b>中文配音</b><p>免费模式可朗读；增强模式生成音频并写入成片。</p></article><article><i>影</i><b>视频生成与剪辑</b><p>可生成 AI 动态镜头，也可将全部分镜合成为可播放视频。</p></article></div>
+        <div className="capability-grid"><article><i>文</i><b>AI 剧本改编</b><p>调用真实语言模型输出结构化分镜，不再复读输入。</p></article><article><i>动</i><b>动态镜头生成</b><p>免费版自动运镜与转场；增强版逐镜头生成 AI 视频。</p></article><article><i>声</i><b>中文配音</b><p>免费模式可朗读；增强模式生成音频并写入成片。</p></article><article><i>片</i><b>自动剪辑成片</b><p>一键完成字幕、镜头衔接、视频播放与文件下载。</p></article></div>
       </section>
 
       <footer><div className="brand"><span>漫</span><strong>漫镜</strong></div><p>让每一个好故事，都真正被看见。</p><small>生成服务可能排队或限流，失败会如实提示。</small></footer>
