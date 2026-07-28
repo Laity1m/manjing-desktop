@@ -57,8 +57,8 @@ export async function POST(request: Request) {
         "You are a professional Chinese motion-comic storyboard writer.",
         `Turn the following story into exactly ${count} connected scenes in the visual style: ${style}.`,
         "Return ONLY one valid JSON object. Every string value must be Simplified Chinese.",
-        "Do not repeat the user's wording. Add concrete actions, camera framing, lighting and a short natural line of dialogue.",
-        'Schema: {"title":"作品标题","scenes":[{"title":"镜头标题","visual":"可直接用于图像模型的详细画面描述","dialogue":"角色台词","duration":7}]}',
+        "Do not repeat the user's wording. Establish consistent characters, dramatic conflict, concrete acting, camera language and a closing hook.",
+        'Schema: {"title":"作品标题","music":"配乐气质","characters":[{"name":"姓名","role":"身份","appearance":"固定五官发型服装","voice":"nova"}],"scenes":[{"title":"镜头标题","characters":["姓名"],"shot":"景别","visual":"场景构图灯光","action":"动作表情互动","camera":"运镜","speaker":"姓名","emotion":"情绪","dialogue":"台词","sfx":"音效","duration":6}]}',
         `故事：${story}`,
       ].join("\n");
       const selectedModel = await chooseChineseTextModel();

@@ -17,8 +17,10 @@ test("renders the Simplified Chinese motion-comic studio", async () => {
   const html = await response.text();
   assert.match(html, /<title>漫镜 · AI 一键生成漫剧<\/title>/);
   assert.match(html, /一键生成 AI 漫剧/);
-  assert.match(html, /免费社区模式/);
-  assert.match(html, /动态镜头生成/);
+  assert.match(html, /免费流程体验/);
+  assert.match(html, /完整 AI 漫剧/);
+  assert.match(html, /角色资产锁定/);
+  assert.match(html, /分镜级动态表演/);
   assert.match(html, /自动剪辑成片/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/);
 });
