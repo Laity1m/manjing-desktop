@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "漫镜 · AI 一键生成漫剧",
     description: "一句话，拍成一部会呼吸的漫剧。",
-    images: [{ url: "/og.png", width: 1744, height: 916 }],
+    images: [{ url: "/og-v2.png", width: 1744, height: 916 }],
     locale: "zh_CN",
     type: "website",
   },
@@ -16,7 +16,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "漫镜 · AI 一键生成漫剧",
     description: "一句话，拍成一部会呼吸的漫剧。",
-    images: ["/og.png"],
+    images: ["/og-v2.png"],
   },
 };
 
