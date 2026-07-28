@@ -40,7 +40,7 @@ export default function Home() {
       </nav>
 
       <section id="top" className="hero">
-        <div className="eyebrow"><span>✦</span> AI NATIVE COMIC STUDIO</div>
+        <div className="eyebrow"><span>✦</span> AI 原生漫剧创作平台</div>
         <h1>一句话，拍成一部<span>会呼吸的漫剧。</span></h1>
         <p>从灵感到成片，AI 为你完成剧本、分镜、角色、配音与剪辑。</p>
         <div className="trust"><span>无需剪辑经验</span><span>角色全程一致</span><span>最快 3 分钟成片</span></div>
@@ -78,7 +78,7 @@ export default function Home() {
       </section>
 
       <section id="templates" className="workflow"><span>一个故事，五步成片</span>{["理解剧本", "角色定妆", "智能分镜", "动态演绎", "配音成片"].map((x,i)=><div key={x}><i>{String(i+1).padStart(2,"0")}</i><b>{x}</b>{i<4&&<em>→</em>}</div>)}</section>
-      <footer><span>漫镜 MANJING</span><p>让每一个好故事，都值得被看见。</p><small>AI 生成内容仅供创作参考</small></footer>
+      <footer><span>漫镜创作平台</span><p>让每一个好故事，都值得被看见。</p><small>AI 生成内容仅供创作参考</small></footer>
     </main>
   );
 }
