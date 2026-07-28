@@ -110,8 +110,8 @@ export async function POST(request: Request) {
           prompt: fullPrompt,
           params: {
             n: 1,
-            width: aspect === "9:16" ? 512 : 768,
-            height: aspect === "9:16" ? 768 : 512,
+            width: aspect === "9:16" ? 384 : 576,
+            height: aspect === "9:16" ? 576 : 320,
             steps: 22,
             sampler_name: "k_euler_a",
             cfg_scale: 7,
