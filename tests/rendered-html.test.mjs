@@ -20,6 +20,9 @@ test("renders the Simplified Chinese motion-comic studio", async () => {
   assert.match(html, /一键生成 AI 漫剧/);
   assert.match(html, /免费多 AI 流程/);
   assert.match(html, /推荐 AI 制片组/);
+  assert.match(html, /LibTV 一键漫剧/);
+  assert.match(html, /即梦 · Seedance/);
+  assert.match(html, /一键生成完整 AI 漫剧/);
   assert.match(html, /AI 制片组/);
   assert.match(html, /六个岗位，各自调用自己的模型/);
   assert.match(html, /导演 AI/);
@@ -98,6 +101,40 @@ test("connects self-hosted ComfyUI, Wan, CosyVoice and MuseTalk nodes", async ()
   assert.match(source, /\/v1\/lipsync/);
   assert.match(source, /createLipSyncedVideo/);
   assert.match(source, /validAgentEndpoint/);
+});
+
+test("connects official LibTV orchestration and Volcengine Seedance jobs", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const libtv = await readFile(new URL("../app/api/libtv/route.ts", import.meta.url), "utf8");
+  const seedance = await readFile(new URL("../app/api/seedance/route.ts", import.meta.url), "utf8");
+  assert.match(page, /generateWithLibTv/);
+  assert.match(page, /applySeedanceEngine/);
+  assert.match(page, /LibTV 正在建立完整漫剧项目/);
+  assert.match(libtv, /https:\/\/im\.liblib\.tv/);
+  assert.match(libtv, /Authorization: `Bearer \$\{accessKey\}`/);
+  assert.match(seedance, /contents\/generations\/tasks/);
+  assert.match(seedance, /return_last_frame: true/);
+});
+
+test("cloud engine proxies reject missing credentials and untrusted media hosts", async () => {
+  const libtvMissingKey = await worker.fetch(new Request("http://localhost/api/libtv", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "create", message: "生成一部完整的 AI 漫剧" }),
+  }), env, ctx);
+  assert.equal(libtvMissingKey.status, 400);
+
+  const seedanceMissingKey = await worker.fetch(new Request("http://localhost/api/seedance", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "create", prompt: "让人物自然地走向镜头" }),
+  }), env, ctx);
+  assert.equal(seedanceMissingKey.status, 400);
+
+  const untrustedLibtv = await worker.fetch(new Request("http://localhost/api/libtv?url=https%3A%2F%2Fexample.com%2Fvideo.mp4"), env, ctx);
+  const untrustedSeedance = await worker.fetch(new Request("http://localhost/api/seedance?url=https%3A%2F%2Fexample.com%2Fvideo.mp4"), env, ctx);
+  assert.equal(untrustedLibtv.status, 403);
+  assert.equal(untrustedSeedance.status, 403);
 });
 
 test("ships a downloadable local bridge with unified media endpoints", async () => {

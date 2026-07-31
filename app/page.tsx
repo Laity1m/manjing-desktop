@@ -6,7 +6,7 @@ type Mode = "community" | "cloud";
 type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "music" | "ready" | "exporting" | "error";
 type SceneStatus = "queued" | "writing" | "painting" | "animating" | "voicing" | "ready" | "error";
 type AgentRole = "director" | "writer" | "image" | "video" | "voice" | "editor";
-type AgentAdapter = "horde" | "pollinations" | "browser" | "webhook";
+type AgentAdapter = "horde" | "pollinations" | "seedance" | "browser" | "webhook";
 type MotionPreset = "push" | "pull" | "pan-left" | "pan-right" | "float";
 type TransitionPreset = "fade" | "cut" | "flash";
 type VisualFilter = "none" | "warm" | "cool" | "mono";
@@ -55,6 +55,7 @@ type Scene = {
   subtitlePosition?: SubtitlePosition;
 };
 type Storyboard = { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] };
+type LibTvResult = { kind: "image" | "video"; url: string };
 
 const SAMPLE_STORY = "雨夜，女孩在即将关门的旧书店前，遇见了消失三年的恋人。他带着一封从未寄出的信，藏着两人错过彼此的真相。";
 const STYLE_PROMPTS: Record<string, string> = {
@@ -111,6 +112,7 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
   video: [
     { id: "browser-video", adapter: "browser", name: "本地 2.5D 运镜", model: "Depth Motion", note: "免费默认 · 推拉/横移/景深光效，人物不会生成新动作", badge: "免费" },
     { id: "pollinations-video", adapter: "pollinations", name: "Pollinations 视频", model: "seedance-2.0", note: "推荐 · 文/图/参考图生视频", badge: "推荐" },
+    { id: "volc-seedance", adapter: "seedance", name: "即梦 Seedance 官方", model: "doubao-seedance-1-0-pro-250528", note: "火山方舟官方 API · 文生视频与图生视频", badge: "官方" },
     { id: "wan22-video", adapter: "webhook", name: "本地 Wan2.2 视频", model: "Wan2.2 / ComfyUI", note: "开源节点 · 真实图生视频，需要本机 GPU" },
     { id: "webhook-video", adapter: "webhook", name: "自定义视频接口", model: "veo-3.1", note: "可接 Veo、Sora、Seedance" },
   ],
@@ -445,6 +447,13 @@ export default function Home() {
   const [bridgeToken, setBridgeToken] = useState("");
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealth>({ state: "idle", message: "尚未检测" });
   const [lipsyncEnabled, setLipsyncEnabled] = useState(false);
+  const [libtvAccessKey, setLibtvAccessKey] = useState("");
+  const [libtvSessionId, setLibtvSessionId] = useState("");
+  const [libtvProjectUrl, setLibtvProjectUrl] = useState("");
+  const [libtvResults, setLibtvResults] = useState<LibTvResult[]>([]);
+  const [libtvRunning, setLibtvRunning] = useState(false);
+  const [seedanceApiKey, setSeedanceApiKey] = useState("");
+  const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-1-0-pro-250528");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const runRef = useRef(0);
@@ -465,6 +474,7 @@ export default function Home() {
       const savedDraft = window.localStorage.getItem("manjing-text-draft");
       const savedAgents = window.localStorage.getItem("manjing-agent-team");
       const savedBridge = window.localStorage.getItem("manjing-local-bridge");
+      const savedCloudEngines = window.localStorage.getItem("manjing-cloud-engines");
       if (savedKey.startsWith("pk_")) setApiKey(savedKey);
       if (savedDraft) setStory(savedDraft);
       if (savedAgents) {
@@ -472,7 +482,7 @@ export default function Home() {
           const parsed = JSON.parse(savedAgents) as Partial<Record<AgentRole, AgentConfig>>;
           const merged = { ...makeTeam("free"), ...parsed };
           setAgentConfigs(merged);
-          setMode(AGENT_ROLES.some(({ id }) => merged[id].adapter === "pollinations" || merged[id].adapter === "webhook") ? "cloud" : "community");
+          setMode(AGENT_ROLES.some(({ id }) => !["horde", "browser"].includes(merged[id].adapter)) ? "cloud" : "community");
         } catch {
           window.localStorage.removeItem("manjing-agent-team");
         }
@@ -485,6 +495,16 @@ export default function Home() {
           setLipsyncEnabled(Boolean(parsed.lipsync));
         } catch {
           window.localStorage.removeItem("manjing-local-bridge");
+        }
+      }
+      if (savedCloudEngines) {
+        try {
+          const parsed = JSON.parse(savedCloudEngines) as { libtvKey?: string; seedanceKey?: string; seedanceModel?: string };
+          setLibtvAccessKey(parsed.libtvKey || "");
+          setSeedanceApiKey(parsed.seedanceKey || "");
+          setSeedanceModel(parsed.seedanceModel || "doubao-seedance-1-0-pro-250528");
+        } catch {
+          window.localStorage.removeItem("manjing-cloud-engines");
         }
       }
       setAgentTeamLoaded(true);
@@ -507,6 +527,10 @@ export default function Home() {
   useEffect(() => {
     if (agentTeamLoaded) window.localStorage.setItem("manjing-local-bridge", JSON.stringify({ url: bridgeUrl, token: bridgeToken, lipsync: lipsyncEnabled }));
   }, [bridgeUrl, bridgeToken, lipsyncEnabled, agentTeamLoaded]);
+
+  useEffect(() => {
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: libtvAccessKey, seedanceKey: seedanceApiKey, seedanceModel }));
+  }, [libtvAccessKey, seedanceApiKey, seedanceModel, agentTeamLoaded]);
 
   useEffect(() => {
     if (!playing || !totalDuration) return;
@@ -583,12 +607,34 @@ export default function Home() {
       next.apiKey = previous.apiKey;
       if (previous.adapter === "webhook") next.model = previous.model;
     }
+    if (next.adapter === "seedance") {
+      next.apiKey = previous.adapter === "seedance" ? previous.apiKey : seedanceApiKey;
+      next.model = previous.adapter === "seedance" ? previous.model : seedanceModel;
+    }
     setAgentConfigs((current) => ({ ...current, [role]: next }));
     if (next.adapter !== "horde" && next.adapter !== "browser") setMode("cloud");
   }
 
   function updateAgentConfig(role: AgentRole, patch: Partial<AgentConfig>) {
     setAgentConfigs((current) => ({ ...current, [role]: { ...current[role], ...patch } }));
+  }
+
+  function applySeedanceEngine() {
+    if (seedanceApiKey.trim().length < 8) {
+      setError("请先填写火山方舟 API Key");
+      return;
+    }
+    if (!/^(?:doubao-seedance-[a-z0-9-]+|ep-[a-z0-9-]+)$/i.test(seedanceModel.trim())) {
+      setError("请填写正确的 Seedance 模型 ID 或 Endpoint ID");
+      return;
+    }
+    setAgentConfigs((current) => ({
+      ...current,
+      video: { preset: "volc-seedance", adapter: "seedance", model: seedanceModel.trim(), endpoint: "", apiKey: seedanceApiKey.trim() },
+    }));
+    setMode("cloud");
+    setConfiguringRole(null);
+    setError("");
   }
 
   function agentName(role: AgentRole) {
@@ -808,6 +854,48 @@ export default function Home() {
     return pollinationsText("director", system, user);
   }
 
+  async function seedanceVideo(prompt: string, options: { references?: string[]; duration?: number } = {}) {
+    const config = agentConfigs.video;
+    if (config.apiKey.trim().length < 8) throw new Error("即梦 Seedance 需要火山方舟 API Key");
+    const created = await fetch("/api/seedance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "create",
+        apiKey: config.apiKey.trim(),
+        model: config.model,
+        prompt,
+        ratio: aspect,
+        duration: options.duration,
+        imageUrl: options.references?.[0] || "",
+      }),
+    });
+    if (!created.ok) throw new Error(await responseError(created));
+    const task = await created.json() as { id?: string };
+    if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
+    const activeRun = runRef.current;
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      if (runRef.current !== activeRun) throw new Error("任务已取消");
+      await wait(attempt === 0 ? 2500 : 6000);
+      const checked = await fetch("/api/seedance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "status", apiKey: config.apiKey.trim(), id: task.id }),
+      });
+      if (!checked.ok) throw new Error(await responseError(checked));
+      const status = await checked.json() as { done?: boolean; status?: string; videoUrl?: string };
+      setStatusText(`即梦 Seedance 正在生成动态镜头（${status.status === "running" ? "生成中" : "排队中"}）`);
+      if (!status.done) continue;
+      if (!status.videoUrl) throw new Error("即梦 Seedance 任务完成但没有返回视频");
+      const media = await fetch(`/api/seedance?url=${encodeURIComponent(status.videoUrl)}`);
+      if (!media.ok) throw new Error(await responseError(media));
+      const blob = await media.blob();
+      if (!blob.type.startsWith("video/")) throw new Error("即梦 Seedance 返回的文件不是视频");
+      return { url: URL.createObjectURL(blob), blob, remoteUrl: status.videoUrl };
+    }
+    throw new Error("即梦 Seedance 生成等待超时，请稍后重试");
+  }
+
   async function pollinationsMedia(
     kind: "image" | "audio" | "video",
     prompt: string,
@@ -816,6 +904,10 @@ export default function Home() {
   ) {
     const role: "image" | "video" | "voice" = kind === "image" ? "image" : kind === "video" ? "video" : "voice";
     const config = agentConfigs[role];
+    if (config.adapter === "seedance") {
+      if (kind !== "video") throw new Error("即梦 Seedance 只能用于视频岗位");
+      return seedanceVideo(prompt, options);
+    }
     if (config.adapter === "webhook") return webhookMedia(role, { task: kind, prompt, index, aspect, ...options });
     if (config.adapter !== "pollinations") throw new Error(`${agentName(role)}不支持当前云端媒体任务`);
     const key = agentKey(role);
@@ -909,11 +1001,133 @@ export default function Home() {
     }
   }
 
+  async function generateWithLibTv() {
+    if (story.trim().length < 8 || libtvRunning || !["idle", "ready", "error"].includes(phase)) return;
+    if (libtvAccessKey.trim().length < 8) {
+      setError("请先填写 LibTV Access Key");
+      return;
+    }
+    const run = Date.now();
+    runRef.current = run;
+    setLibtvRunning(true);
+    setLibtvSessionId("");
+    setLibtvProjectUrl("");
+    setLibtvResults([]);
+    setError("");
+    setShowFilm(false);
+    setPlaying(false);
+    setTime(0);
+    setActivityLog([]);
+    setPhase("story");
+    setProgress(4);
+    setStatusText("LibTV 正在建立完整漫剧项目");
+    recordActivity("director", "LibTV 总控开始拆解故事与制作目标");
+    recordActivity("writer", "LibTV 编剧开始生成剧本、分镜和提示词");
+    const message = [
+      "请生成一部完整、真正会动的 AI 漫剧，不要只生成静态漫画。",
+      `项目标题：${projectTitle || "漫镜作品"}`,
+      `故事：${story.trim()}`,
+      `视觉风格：${style}`,
+      `画面比例：${aspect}`,
+      `目标总时长：${productionDuration} 秒`,
+      "请完成剧本、固定角色设定、连续分镜、角色一致性图片、人物动态视频、中文配音、字幕、配乐和剪辑成片。镜头必须有动作、表情、运镜和连续表演。输出完整视频，并保留可下载的中间图片和视频素材。",
+    ].join("\n");
+    try {
+      const created = await fetch("/api/libtv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create", accessKey: libtvAccessKey.trim(), message }),
+      });
+      if (!created.ok) throw new Error(await responseError(created));
+      const task = await created.json() as { sessionId?: string; projectUrl?: string };
+      if (!task.sessionId) throw new Error("LibTV 没有返回任务编号");
+      setLibtvSessionId(task.sessionId);
+      setLibtvProjectUrl(task.projectUrl || "");
+      setProgress(8);
+      recordActivity("director", "LibTV 项目已建立，可随时打开云端画布查看", "done");
+      recordActivity("image", "LibTV 正在锁定角色形象并绘制连续关键帧");
+      recordActivity("video", "LibTV 已排入动态视频与镜头表演任务");
+      recordActivity("voice", "LibTV 将在视频完成后生成配音和声音");
+      recordActivity("editor", "LibTV 剪辑代理等待上游素材交付");
+
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        if (runRef.current !== run) throw new Error("任务已取消");
+        await wait(attempt === 0 ? 3500 : 10000);
+        const checked = await fetch("/api/libtv", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "status", accessKey: libtvAccessKey.trim(), sessionId: task.sessionId }),
+        });
+        if (!checked.ok) throw new Error(await responseError(checked));
+        const status = await checked.json() as { done?: boolean; failed?: boolean; summary?: string; messageCount?: number; results?: LibTvResult[] };
+        if (status.failed && !(status.results || []).length) throw new Error(status.summary || "LibTV 生成失败，请在项目画布中查看原因");
+        const results = status.results || [];
+        setLibtvResults(results);
+        const hasImages = results.some((item) => item.kind === "image");
+        setPhase(hasImages ? "video" : attempt > 2 ? "characters" : "story");
+        setProgress(Math.min(94, 8 + Math.min(28, Number(status.messageCount || 0) * 2) + Math.round((attempt / 180) * 56)));
+        setStatusText(status.summary || (hasImages ? "LibTV 已生成分镜素材，正在制作动态视频" : "LibTV 正在编写剧本并建立角色"));
+        if (!status.done) continue;
+
+        const videos = results.filter((item) => item.kind === "video");
+        const images = results.filter((item) => item.kind === "image");
+        const imported: Scene[] = videos.map((item, index) => ({
+          id: uid(),
+          title: `LibTV 成片 ${index + 1}`,
+          visual: "LibTV 完整 AI 漫剧输出",
+          action: "已由 LibTV 完成动态表演、配音与剪辑",
+          shot: "成片",
+          camera: "LibTV 自动导演",
+          dialogue: "",
+          speaker: "",
+          emotion: "",
+          sfx: "",
+          characters: [],
+          duration: Math.max(4, Math.round(productionDuration / Math.max(1, videos.length))),
+          imageUrl: images[index]?.url ? `/api/libtv?url=${encodeURIComponent(images[index].url)}` : undefined,
+          videoUrl: `/api/libtv?url=${encodeURIComponent(item.url)}`,
+          status: "ready",
+          model: "LibTV",
+        }));
+        setScenes(imported);
+        setCharacters([]);
+        setSelected(0);
+        if (imported[0]?.videoUrl) {
+          setExportUrl(imported[0].videoUrl);
+          setShowFilm(true);
+        }
+        setPhase("ready");
+        setProgress(100);
+        setStatusText("LibTV 完整 AI 漫剧已生成，并已导入剪辑台");
+        recordActivity("writer", "剧本与分镜已交付", "done");
+        recordActivity("image", `${images.length} 项角色与分镜素材已交付`, "done");
+        recordActivity("video", `${videos.length} 项动态视频已交付`, "done");
+        recordActivity("voice", "配音与声音已写入 LibTV 成片", "done");
+        recordActivity("editor", "最终成片已导入漫镜剪辑台", "done");
+        return;
+      }
+      throw new Error("LibTV 仍在制作中，请通过项目画布继续查看；任务不会丢失");
+    } catch (reason) {
+      if (runRef.current !== run) return;
+      setPhase("error");
+      setError(reason instanceof Error ? reason.message : "LibTV 生成失败，请重试");
+      setStatusText("LibTV 制作中断");
+      recordActivity("director", reason instanceof Error ? `LibTV 中断：${reason.message}` : "LibTV 制作中断", "error");
+    } finally {
+      setLibtvRunning(false);
+    }
+  }
+
   async function generateAll() {
     if (story.trim().length < 8 || !["idle", "ready", "error"].includes(phase)) return;
     const missingPollinationsKey = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "pollinations" && !agentKey(id).startsWith("pk_"));
     if (missingPollinationsKey) {
       setError(`${missingPollinationsKey.title}需要填写以 pk_ 开头的 Pollinations 发布密钥`);
+      return;
+    }
+    if (agentConfigs.video.adapter === "seedance" && agentConfigs.video.apiKey.trim().length < 8) {
+      setConfiguringRole("video");
+      setError("即梦 Seedance 需要填写火山方舟 API Key");
       return;
     }
     const missingWebhook = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "webhook" && !validAgentEndpoint(agentConfigs[id].endpoint));
@@ -1117,6 +1331,7 @@ export default function Home() {
 
   function cancelGeneration() {
     runRef.current = Date.now();
+    setLibtvRunning(false);
     setPhase(scenes.length ? "ready" : "idle");
     setStatusText("已停止当前任务");
   }
@@ -1165,6 +1380,11 @@ export default function Home() {
     }
     if (agentConfigs.video.adapter === "pollinations" && !agentKey("video").startsWith("pk_")) {
       setError("视频 AI 需要发布密钥");
+      return;
+    }
+    if (agentConfigs.video.adapter === "seedance" && agentConfigs.video.apiKey.trim().length < 8) {
+      setConfiguringRole("video");
+      setError("即梦 Seedance 需要火山方舟 API Key");
       return;
     }
     if (agentConfigs.video.adapter === "webhook" && !validAgentEndpoint(agentConfigs.video.endpoint)) {
@@ -1554,7 +1774,7 @@ export default function Home() {
     anchor.click();
   }
 
-  const busy = !["idle", "ready", "error"].includes(phase);
+  const busy = libtvRunning || !["idle", "ready", "error"].includes(phase);
   const visibleProgress = phase === "exporting" ? exportProgress : progress;
   const selectedScene = scenes[selected];
   const nativeVideoEnabled = agentConfigs.video.adapter !== "browser";
@@ -1617,7 +1837,7 @@ export default function Home() {
               const config = agentConfigs[role.id];
               const presets = AGENT_PRESETS[role.id];
               return <article key={role.id} className={`agent-card ${config.adapter}`}>
-                <div className="agent-card-top"><i>{role.icon}</i><div><b>{role.title}</b><span>{role.duty}</span></div><em>{config.adapter === "horde" || config.adapter === "browser" ? "免费" : config.adapter === "webhook" ? "自定义" : "已托管"}</em></div>
+                <div className="agent-card-top"><i>{role.icon}</i><div><b>{role.title}</b><span>{role.duty}</span></div><em>{config.adapter === "horde" || config.adapter === "browser" ? "免费" : config.adapter === "webhook" ? "自定义" : config.adapter === "seedance" ? "官方" : "已托管"}</em></div>
                 <select aria-label={`选择${role.title}`} value={config.preset} onChange={(event) => selectAgentPreset(role.id, event.target.value)}>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}</select>
                 <div className="agent-model"><span>当前模型</span><b>{config.model}</b><small>{presets.find((item) => item.id === config.preset)?.note}</small></div>
                 <div className="recommend-row"><span>推荐</span>{role.recommends.map((item) => <i key={item}>{item}</i>)}</div>
@@ -1625,8 +1845,9 @@ export default function Home() {
                 {configuringRole === role.id && <div className="agent-config-panel">
                   <label>模型 ID<input value={config.model} onChange={(event) => updateAgentConfig(role.id, { model: event.target.value })} placeholder="模型名称或 ID" /></label>
                   {config.adapter === "webhook" && <label>Webhook 地址<input value={config.endpoint} onChange={(event) => updateAgentConfig(role.id, { endpoint: event.target.value.trim() })} placeholder="https://..." /></label>}
-                  {(config.adapter === "pollinations" || config.adapter === "webhook") && <label>岗位专用 API 密钥（可选）<input type="password" value={config.apiKey} onChange={(event) => updateAgentConfig(role.id, { apiKey: event.target.value.trim() })} placeholder={config.adapter === "pollinations" ? "留空则使用下方统一密钥" : "Bearer token，可留空"} /></label>}
+                  {(config.adapter === "pollinations" || config.adapter === "webhook" || config.adapter === "seedance") && <label>{config.adapter === "seedance" ? "火山方舟 API Key（必填）" : "岗位专用 API 密钥（可选）"}<input type="password" value={config.apiKey} onChange={(event) => updateAgentConfig(role.id, { apiKey: event.target.value.trim() })} placeholder={config.adapter === "pollinations" ? "留空则使用下方统一密钥" : config.adapter === "seedance" ? "火山方舟控制台生成的 API Key" : "Bearer token，可留空"} /></label>}
                   {config.adapter === "webhook" && <small>漫镜会 POST role、model、task 和输入内容；接口返回 text，或可下载的 url。需允许浏览器跨域访问。</small>}
+                  {config.adapter === "seedance" && <small>通过漫镜的安全代理提交异步任务并轮询结果；密钥不写入网站服务器，只保存在当前浏览器。</small>}
                 </div>}
               </article>;
             })}
@@ -1639,6 +1860,32 @@ export default function Home() {
             <button className={recommendedTeamActive ? "active" : ""} onClick={() => applyTeamProfile("pollinations")}><b>推荐 AI 制片组</b><span>独立导演 · 编剧 · 生图 · 视频 · 配音 · 剪辑</span></button>
           </div>
           {freeTeamActive ? <p className="provider-note"><b>免费边界：</b>语言和生图岗位使用社区算力，画质与一致性会随在线模型变化；视频岗位只做 2.5D 推拉、横移、景深和光影动画，人物本身不会产生走路、口型等新动作。可只替换“生图 AI”或“视频 AI”，不必整套更换。</p> : <div className="key-panel"><div><b>统一备用密钥</b><span>未填写岗位专用密钥时使用这里的 Pollinations 密钥；所有密钥只保存在当前设备。</span></div><div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">获取密钥 ↗</a></div></div>}
+        </div>
+
+        <div className="cloud-engine-hub">
+          <div className="cloud-engine-heading"><div><span>PRODUCTION ENGINES</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；即梦 Seedance 负责把单个分镜变成真正会动的视频。</p></div><em>密钥仅存当前浏览器</em></div>
+          <div className="cloud-engine-grid">
+            <article className="cloud-engine-card libtv-card">
+              <div className="engine-title"><i>剧</i><div><b>LibTV 一键漫剧</b><span>剧本 → 角色 → 分镜 → 视频 → 配音 → 成片</span></div><em>全流程</em></div>
+              <p>直接调用 LibTV 官方 Agent 接口创建完整项目。生成过程可在漫镜查看，也可打开 LibTV 无限画布继续精修。</p>
+              <label>LibTV Access Key<input type="password" value={libtvAccessKey} onChange={(event) => setLibtvAccessKey(event.target.value.trim())} placeholder="填写 LIBTV_ACCESS_KEY" /></label>
+              <div className="engine-actions"><button onClick={() => void generateWithLibTv()} disabled={busy || story.trim().length < 8}>{libtvRunning ? "LibTV 正在制作…" : "一键生成完整 AI 漫剧"}</button>{libtvProjectUrl && <a href={libtvProjectUrl} target="_blank" rel="noreferrer">打开项目画布 ↗</a>}<a href="https://github.com/libtv-labs/libtv-skills" target="_blank" rel="noreferrer">官方接口说明 ↗</a></div>
+              {libtvSessionId && <div className="engine-task"><b>云端任务已建立</b><span>{libtvSessionId}</span></div>}
+              {!!libtvResults.length && <div className="engine-results">{libtvResults.slice(0, 8).map((item, index) => {
+                const source = `/api/libtv?url=${encodeURIComponent(item.url)}`;
+                return <a key={`${item.url}-${index}`} href={source} download={`libtv-${index + 1}.${item.kind === "video" ? "mp4" : "png"}`} title="下载素材">{item.kind === "video" ? <video src={source} muted playsInline /> : <img src={source} alt={`LibTV 生成素材 ${index + 1}`} />}<span>{item.kind === "video" ? "视频" : "图片"} {index + 1}</span></a>;
+              })}</div>}
+            </article>
+            <article className="cloud-engine-card seedance-card">
+              <div className="engine-title"><i>梦</i><div><b>即梦 · Seedance</b><span>官方文生视频 / 图生视频异步接口</span></div><em>镜头级</em></div>
+              <p>应用到“视频 AI”岗位后，漫镜会把每张关键帧、人物动作和运镜提示逐镜提交给火山方舟。</p>
+              <label>火山方舟 API Key<input type="password" value={seedanceApiKey} onChange={(event) => setSeedanceApiKey(event.target.value.trim())} placeholder="填写 ARK_API_KEY" /></label>
+              <label>模型 ID 或 Endpoint ID<input value={seedanceModel} onChange={(event) => setSeedanceModel(event.target.value.trim())} placeholder="doubao-seedance-… 或 ep-…" /></label>
+              <div className="engine-actions"><button onClick={applySeedanceEngine}>{agentConfigs.video.adapter === "seedance" ? "更新即梦视频岗位" : "应用到视频 AI 岗位"}</button><a href="https://www.volcengine.com/docs/82379/1520757" target="_blank" rel="noreferrer">官方 API 文档 ↗</a></div>
+              <div className={`engine-active ${agentConfigs.video.adapter === "seedance" ? "on" : ""}`}><i />{agentConfigs.video.adapter === "seedance" ? `已启用：${agentConfigs.video.model}` : "尚未应用，当前视频岗位保持不变"}</div>
+            </article>
+          </div>
+          <p className="cloud-engine-note"><b>真实能力边界：</b>LibTV 和即梦的接口代码可以接入，但云端生成需要平台有效额度；漫镜不会伪装成免费算力，也不会把访问密钥写进部署配置。</p>
         </div>
 
         <div className="opensource-hub">
