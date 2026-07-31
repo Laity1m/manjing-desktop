@@ -140,6 +140,49 @@ select:focus, .key-input input:focus, .scene-editor input:focus, .scene-editor t
 .key-input { display: flex; min-width: 360px; }
 .key-input input { min-width: 240px; border-radius: 9px 0 0 9px; }
 .key-input a { display: grid; place-items: center; background: var(--ink); color: #fff; padding: 0 13px; border-radius: 0 9px 9px 0; font-size: 10px; }
+.opensource-hub { margin-top: 15px; overflow: hidden; border: 1px solid #bfcfc9; border-radius: 17px; background: #f3f7f5; box-shadow: 0 12px 30px rgba(35,70,59,.07); }
+.opensource-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 17px; border-bottom: 1px solid #d2ded9; background: linear-gradient(110deg, #eef8f3, #f8f6fb); }
+.opensource-heading > div:first-child > span { color: #347d66; font-size: 7px; font-weight: 800; letter-spacing: .18em; }
+.opensource-heading h3 { margin: 4px 0; font: 500 18px "Noto Serif SC", serif; }
+.opensource-heading p { margin: 0; color: var(--muted); font-size: 8px; }
+.opensource-heading > div:last-child { display: flex; gap: 6px; }
+.opensource-heading a, .opensource-heading button { border: 1px solid #9bbbae; border-radius: 8px; padding: 9px 11px; background: #fff; color: #28664f; font-size: 8px; text-decoration: none; white-space: nowrap; }
+.opensource-heading button { border-color: #276f57; background: #276f57; color: #fff; }
+.bridge-config { display: grid; grid-template-columns: 1.35fr 1fr auto auto; gap: 8px; align-items: end; padding: 13px 15px; border-bottom: 1px solid #d7e1dd; background: #fff; }
+.bridge-config label { color: #6d7e77; font-size: 8px; }
+.bridge-config input { display: block; width: 100%; margin-top: 4px; border: 1px solid #cbd8d3; border-radius: 8px; padding: 9px; background: #f9fbfa; color: var(--ink); font-size: 8px; outline: none; }
+.bridge-config input:focus { border-color: #4c9b83; box-shadow: 0 0 0 3px rgba(76,155,131,.1); }
+.bridge-config > button { min-height: 34px; border: 0; border-radius: 8px; padding: 0 12px; background: var(--ink); color: #fff; font-size: 8px; }
+.bridge-config > em { align-self: center; padding: 6px 8px; border-radius: 999px; background: #eee; color: #817a84; font-size: 7px; font-style: normal; white-space: nowrap; }
+.bridge-config > em.ready { background: #dff2e9; color: #237251; }
+.bridge-config > em.partial { background: #f5edd2; color: #82671d; }
+.bridge-config > em.error { background: #f8e4e6; color: #a0444e; }
+.bridge-config > em.testing { background: #eee7fb; color: var(--purple-dark); }
+.opensource-nodes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: #d5dfdb; }
+.opensource-nodes article { min-width: 0; padding: 13px; background: #fbfdfc; }
+.node-top { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 8px; }
+.node-top > i { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #e3ebe8; color: #59736a; font: normal 10px "Noto Serif SC", serif; }
+.opensource-nodes article.online .node-top > i { background: #347d66; color: #fff; }
+.node-top > div { min-width: 0; }
+.node-top b, .node-top span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.node-top b { font-size: 10px; }
+.node-top span { margin-top: 3px; color: var(--muted); font-size: 7px; }
+.node-top > em { color: #9a949d; font-size: 7px; font-style: normal; }
+.opensource-nodes article.online .node-top > em { color: #2c825f; }
+.node-checks { display: flex; gap: 5px; margin-top: 11px; }
+.node-checks span { padding: 5px 7px; border-radius: 999px; background: #ecefed; color: #8b958f; font-size: 7px; }
+.node-checks span:before { content: "○"; margin-right: 4px; }
+.node-checks span.ready { background: #e0f1e9; color: #2b7658; }
+.node-checks span.ready:before { content: "✓"; }
+.node-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 11px; }
+.node-actions button, .node-actions a { border: 1px solid #b8cac3; border-radius: 6px; padding: 6px 7px; background: #fff; color: #316b56; font-size: 7px; text-decoration: none; }
+.node-actions a { margin-left: auto; border-color: transparent; background: transparent; color: #8a948f; }
+.lipsync-toggle { display: flex; align-items: center; justify-content: space-between; margin-top: 11px; padding: 8px 9px; border-radius: 8px; background: #eef3f1; }
+.lipsync-toggle b, .lipsync-toggle span { display: block; }
+.lipsync-toggle b { font-size: 8px; }
+.lipsync-toggle span { margin-top: 2px; color: var(--muted); font-size: 7px; }
+.opensource-note { margin: 0; padding: 11px 15px; border-top: 1px solid #d4dfda; color: #718079; font-size: 8px; line-height: 1.6; }
+.opensource-note b { color: #376956; }
 
 .generate-row { display: flex; gap: 10px; margin-top: 15px; }
 .generate-button { flex: 1; position: relative; min-height: 64px; border: 0; border-radius: 13px; background: linear-gradient(105deg, #211e27, #34283e); color: #fff; font-weight: 700; letter-spacing: .08em; box-shadow: 0 11px 26px rgba(31,27,37,.2); }
@@ -407,6 +450,9 @@ footer p { flex: 1; }
   .nle-actions { width: 100%; flex-wrap: wrap; }
   .nle-actions label { margin-left: auto; }
   .provider-box { grid-template-columns: 1fr; }
+  .opensource-heading { align-items: flex-start; flex-direction: column; }
+  .bridge-config { grid-template-columns: 1fr 1fr; }
+  .opensource-nodes { grid-template-columns: 1fr; }
   .agent-grid { grid-template-columns: 1fr 1fr; }
   .workflow-roles { grid-template-columns: repeat(2, 1fr); }
   .delivery-actions { grid-template-columns: 1fr 1fr; }
@@ -433,6 +479,9 @@ footer p { flex: 1; }
   .choice-grid, .setting-pair { grid-template-columns: 1fr 1fr; }
   .provider-tabs { grid-template-columns: 1fr; }
   .agent-grid { grid-template-columns: 1fr; }
+  .opensource-heading > div:last-child { width: 100%; flex-wrap: wrap; }
+  .opensource-heading a, .opensource-heading button { flex: 1; text-align: center; }
+  .bridge-config { grid-template-columns: 1fr; }
   .workflow-heading, .delivery-heading { align-items: flex-start; flex-direction: column; }
   .workflow-roles { grid-template-columns: 1fr; }
   .workflow-log { grid-template-columns: 1fr; gap: 8px; }

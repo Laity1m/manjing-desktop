@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import test from "node:test";
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -87,6 +87,27 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /function drawMovingShot/);
   assert.match(horde, /width: aspect === "9:16" \? 448 : 704/);
   assert.match(horde, /height: aspect === "9:16" \? 704 : 384/);
+});
+
+test("connects self-hosted ComfyUI, Wan, CosyVoice and MuseTalk nodes", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /开源本地节点中心/);
+  assert.match(source, /\/v1\/image/);
+  assert.match(source, /\/v1\/video/);
+  assert.match(source, /\/v1\/audio/);
+  assert.match(source, /\/v1\/lipsync/);
+  assert.match(source, /createLipSyncedVideo/);
+  assert.match(source, /validAgentEndpoint/);
+});
+
+test("ships a downloadable local bridge with unified media endpoints", async () => {
+  const bridge = await readFile(new URL("../tools/manjing-local-bridge/app.py", import.meta.url), "utf8");
+  assert.match(bridge, /@app\.post\("\/v1\/image"\)/);
+  assert.match(bridge, /@app\.post\("\/v1\/video"\)/);
+  assert.match(bridge, /@app\.post\("\/v1\/audio"\)/);
+  assert.match(bridge, /@app\.post\("\/v1\/lipsync"\)/);
+  const archive = await stat(new URL("../public/manjing-local-bridge.zip", import.meta.url));
+  assert.ok(archive.size > 1000);
 });
 
 test("rejects invalid generation requests before contacting providers", async () => {

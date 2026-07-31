@@ -13,6 +13,7 @@ type VisualFilter = "none" | "warm" | "cool" | "mono";
 type SubtitlePosition = "top" | "center" | "bottom";
 type ActivityState = "running" | "done" | "warning" | "error";
 type ActivityEvent = { id: string; role: AgentRole; state: ActivityState; message: string; time: string };
+type BridgeHealth = { state: "idle" | "testing" | "ready" | "partial" | "error"; message: string; nodes?: Record<string, boolean>; workflows?: Record<string, boolean> };
 type AgentConfig = { preset: string; adapter: AgentAdapter; model: string; endpoint: string; apiKey: string };
 type AgentPreset = { id: string; adapter: AgentAdapter; name: string; model: string; note: string; badge?: string; endpoint?: string };
 type CharacterAsset = {
@@ -104,16 +105,19 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
   image: [
     { id: "horde-image", adapter: "horde", name: "AI Horde 生图", model: "Stable Horde", note: "免费默认 · 需要排队", badge: "免费" },
     { id: "pollinations-image", adapter: "pollinations", name: "Pollinations 生图", model: "kontext", note: "推荐 · 支持角色参考图", badge: "推荐" },
+    { id: "comfyui-image", adapter: "webhook", name: "本地 ComfyUI 生图", model: "ComfyUI Image Workflow", note: "开源节点 · 通过漫镜桥接服务调用" },
     { id: "webhook-image", adapter: "webhook", name: "自定义生图接口", model: "gpt-image-2", note: "可接 GPT Image、FLUX 等" },
   ],
   video: [
     { id: "browser-video", adapter: "browser", name: "本地 2.5D 运镜", model: "Depth Motion", note: "免费默认 · 推拉/横移/景深光效，人物不会生成新动作", badge: "免费" },
     { id: "pollinations-video", adapter: "pollinations", name: "Pollinations 视频", model: "seedance-2.0", note: "推荐 · 文/图/参考图生视频", badge: "推荐" },
+    { id: "wan22-video", adapter: "webhook", name: "本地 Wan2.2 视频", model: "Wan2.2 / ComfyUI", note: "开源节点 · 真实图生视频，需要本机 GPU" },
     { id: "webhook-video", adapter: "webhook", name: "自定义视频接口", model: "veo-3.1", note: "可接 Veo、Sora、Seedance" },
   ],
   voice: [
     { id: "browser-voice", adapter: "browser", name: "系统中文语音", model: "Web Speech", note: "免费默认 · 使用本机音色", badge: "免费" },
     { id: "pollinations-voice", adapter: "pollinations", name: "Pollinations 配音", model: "tts", note: "推荐 · 分角色生成音轨", badge: "推荐" },
+    { id: "cosyvoice-voice", adapter: "webhook", name: "本地 CosyVoice", model: "CosyVoice", note: "开源节点 · 中文情绪配音与声音复刻" },
     { id: "webhook-voice", adapter: "webhook", name: "自定义配音接口", model: "eleven-v3", note: "可接 ElevenLabs、Gemini TTS" },
   ],
   editor: [
@@ -151,6 +155,15 @@ async function responseError(response: Response) {
     return data.error || data.message || `请求失败（${response.status}）`;
   } catch {
     return `请求失败（${response.status}）`;
+  }
+}
+
+function validAgentEndpoint(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname));
+  } catch {
+    return false;
   }
 }
 
@@ -428,6 +441,10 @@ export default function Home() {
   const [subtitleColor, setSubtitleColor] = useState("#ffffff");
   const [musicVolume, setMusicVolume] = useState(0.16);
   const [activityLog, setActivityLog] = useState<ActivityEvent[]>([]);
+  const [bridgeUrl, setBridgeUrl] = useState("");
+  const [bridgeToken, setBridgeToken] = useState("");
+  const [bridgeHealth, setBridgeHealth] = useState<BridgeHealth>({ state: "idle", message: "尚未检测" });
+  const [lipsyncEnabled, setLipsyncEnabled] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const runRef = useRef(0);
@@ -447,6 +464,7 @@ export default function Home() {
       const savedKey = window.localStorage.getItem("manjing-pollinations-key") || "";
       const savedDraft = window.localStorage.getItem("manjing-text-draft");
       const savedAgents = window.localStorage.getItem("manjing-agent-team");
+      const savedBridge = window.localStorage.getItem("manjing-local-bridge");
       if (savedKey.startsWith("pk_")) setApiKey(savedKey);
       if (savedDraft) setStory(savedDraft);
       if (savedAgents) {
@@ -457,6 +475,16 @@ export default function Home() {
           setMode(AGENT_ROLES.some(({ id }) => merged[id].adapter === "pollinations" || merged[id].adapter === "webhook") ? "cloud" : "community");
         } catch {
           window.localStorage.removeItem("manjing-agent-team");
+        }
+      }
+      if (savedBridge) {
+        try {
+          const parsed = JSON.parse(savedBridge) as { url?: string; token?: string; lipsync?: boolean };
+          setBridgeUrl(parsed.url || "");
+          setBridgeToken(parsed.token || "");
+          setLipsyncEnabled(Boolean(parsed.lipsync));
+        } catch {
+          window.localStorage.removeItem("manjing-local-bridge");
         }
       }
       setAgentTeamLoaded(true);
@@ -475,6 +503,10 @@ export default function Home() {
   useEffect(() => {
     if (agentTeamLoaded) window.localStorage.setItem("manjing-agent-team", JSON.stringify(agentConfigs));
   }, [agentConfigs, agentTeamLoaded]);
+
+  useEffect(() => {
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-local-bridge", JSON.stringify({ url: bridgeUrl, token: bridgeToken, lipsync: lipsyncEnabled }));
+  }, [bridgeUrl, bridgeToken, lipsyncEnabled, agentTeamLoaded]);
 
   useEffect(() => {
     if (!playing || !totalDuration) return;
@@ -568,9 +600,89 @@ export default function Home() {
     return agentConfigs[role].apiKey.trim() || apiKey.trim();
   }
 
+  function normalizedBridgeUrl() {
+    return bridgeUrl.trim().replace(/\/+$/, "");
+  }
+
+  function applyBridgeRole(role: "image" | "video" | "voice") {
+    const base = normalizedBridgeUrl();
+    if (!validAgentEndpoint(base)) {
+      setError("请先填写有效的 HTTPS 桥接地址，或本机 localhost 地址");
+      return;
+    }
+    const definitions = {
+      image: { preset: "comfyui-image", model: "ComfyUI Image Workflow", path: "/v1/image" },
+      video: { preset: "wan22-video", model: "Wan2.2 / ComfyUI", path: "/v1/video" },
+      voice: { preset: "cosyvoice-voice", model: "CosyVoice", path: "/v1/audio" },
+    } as const;
+    const selected = definitions[role];
+    setAgentConfigs((current) => ({ ...current, [role]: { preset: selected.preset, adapter: "webhook", model: selected.model, endpoint: `${base}${selected.path}`, apiKey: bridgeToken.trim() } }));
+    setMode("cloud");
+    setConfiguringRole(null);
+    setError("");
+  }
+
+  function applyBridgeStack() {
+    const base = normalizedBridgeUrl();
+    if (!validAgentEndpoint(base)) {
+      setError("请先填写有效的漫镜桥接地址");
+      return;
+    }
+    setAgentConfigs((current) => ({
+      ...current,
+      image: { preset: "comfyui-image", adapter: "webhook", model: "ComfyUI Image Workflow", endpoint: `${base}/v1/image`, apiKey: bridgeToken.trim() },
+      video: { preset: "wan22-video", adapter: "webhook", model: "Wan2.2 / ComfyUI", endpoint: `${base}/v1/video`, apiKey: bridgeToken.trim() },
+      voice: { preset: "cosyvoice-voice", adapter: "webhook", model: "CosyVoice", endpoint: `${base}/v1/audio`, apiKey: bridgeToken.trim() },
+    }));
+    setMode("cloud");
+    setLipsyncEnabled(true);
+    setConfiguringRole(null);
+    setError("");
+  }
+
+  async function testBridgeConnection() {
+    const base = normalizedBridgeUrl();
+    if (!validAgentEndpoint(base)) {
+      setBridgeHealth({ state: "error", message: "地址格式不正确" });
+      return;
+    }
+    setBridgeHealth({ state: "testing", message: "正在检测本地节点" });
+    try {
+      const response = await fetch(`${base}/health`, { headers: bridgeToken.trim() ? { Authorization: `Bearer ${bridgeToken.trim()}` } : {} });
+      if (!response.ok) throw new Error(await responseError(response));
+      const data = await response.json() as { nodes?: Record<string, boolean>; workflows?: Record<string, boolean> };
+      const nodes = data.nodes || {};
+      const workflows = data.workflows || {};
+      const readyCount = Object.values(nodes).filter(Boolean).length;
+      setBridgeHealth({ state: readyCount === 3 && workflows.image && workflows.video ? "ready" : "partial", message: readyCount ? `${readyCount}/3 个模型节点在线` : "桥接服务在线，但模型节点未启动", nodes, workflows });
+    } catch (reason) {
+      setBridgeHealth({ state: "error", message: reason instanceof Error ? reason.message : "无法连接桥接服务" });
+    }
+  }
+
+  async function createLipSyncedVideo(scene: Scene) {
+    const base = normalizedBridgeUrl();
+    if (!validAgentEndpoint(base) || !scene.audioUrl || (!scene.videoUrl && !scene.imageUrl)) return "";
+    const [sourceResponse, audioResponse] = await Promise.all([fetch(scene.videoUrl || scene.imageUrl as string), fetch(scene.audioUrl)]);
+    if (!sourceResponse.ok || !audioResponse.ok) throw new Error("口型增强无法读取镜头画面或配音");
+    const sourceBlob = await sourceResponse.blob();
+    const audioBlob = await audioResponse.blob();
+    const form = new FormData();
+    form.append("source", sourceBlob, `scene.${scene.videoUrl ? "mp4" : "png"}`);
+    form.append("audio", audioBlob, "voice.wav");
+    const response = await fetch(`${base}/v1/lipsync`, { method: "POST", headers: bridgeToken.trim() ? { Authorization: `Bearer ${bridgeToken.trim()}` } : {}, body: form });
+    if (!response.ok) throw new Error(await responseError(response));
+    if ((response.headers.get("content-type") || "").startsWith("video/")) return URL.createObjectURL(await response.blob());
+    const data = await response.json() as { url?: string };
+    if (!data.url) throw new Error("MuseTalk 没有返回口型视频");
+    const output = await fetch(data.url, { headers: bridgeToken.trim() ? { Authorization: `Bearer ${bridgeToken.trim()}` } : {} });
+    if (!output.ok) throw new Error("MuseTalk 输出视频无法读取");
+    return URL.createObjectURL(await output.blob());
+  }
+
   async function callAgentWebhook(role: AgentRole, payload: Record<string, unknown>) {
     const config = agentConfigs[role];
-    if (!config.endpoint.startsWith("https://")) throw new Error(`${agentName(role)}需要填写 HTTPS 接口地址`);
+    if (!validAgentEndpoint(config.endpoint)) throw new Error(`${agentName(role)}需要填写 HTTPS 地址或本机 localhost 地址`);
     const response = await fetch(config.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}) },
@@ -598,7 +710,7 @@ export default function Home() {
       const data = await response.json() as { url?: string; dataUrl?: string };
       remoteUrl = data.url || data.dataUrl || "";
       if (!remoteUrl) throw new Error(`${agentName(role)}没有返回媒体地址`);
-      const mediaResponse = await fetch(remoteUrl);
+      const mediaResponse = await fetch(remoteUrl, { headers: agentConfigs[role].apiKey ? { Authorization: `Bearer ${agentConfigs[role].apiKey}` } : {} });
       if (!mediaResponse.ok) throw new Error(`${agentName(role)}返回的媒体无法读取`);
       blob = await mediaResponse.blob();
     }
@@ -804,7 +916,7 @@ export default function Home() {
       setError(`${missingPollinationsKey.title}需要填写以 pk_ 开头的 Pollinations 发布密钥`);
       return;
     }
-    const missingWebhook = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "webhook" && !agentConfigs[id].endpoint.startsWith("https://"));
+    const missingWebhook = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "webhook" && !validAgentEndpoint(agentConfigs[id].endpoint));
     if (missingWebhook) {
       setConfiguringRole(missingWebhook.id);
       setError(`${missingWebhook.title}需要填写 HTTPS Webhook 地址`);
@@ -949,6 +1061,35 @@ export default function Home() {
         recordActivity("voice", "用户已关闭自动配音", "warning");
       }
 
+      if (lipsyncEnabled) {
+        const eligible = work.filter((scene) => scene.audioUrl && (scene.videoUrl || scene.imageUrl));
+        if (!eligible.length) {
+          recordActivity("video", "已启用 MuseTalk，但当前没有可用的生成配音；跳过口型增强", "warning");
+        } else {
+          try {
+            setPhase("video");
+            recordActivity("video", `MuseTalk 开始为 ${eligible.length} 个镜头生成中文口型`);
+            for (let index = 0; index < eligible.length; index += 1) {
+              const scene = eligible[index];
+              setStatusText(`MuseTalk 正在生成口型 ${index + 1}/${eligible.length}：${scene.title}`);
+              work = work.map((item) => item.id === scene.id ? { ...item, status: "animating" as SceneStatus } : item);
+              setScenes(work);
+              const lipVideo = await createLipSyncedVideo(scene);
+              if (lipVideo) {
+                if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
+                work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: lipVideo, status: "ready" as SceneStatus, model: "MuseTalk 1.5" } : item);
+                setScenes(work);
+              }
+            }
+            recordActivity("video", "MuseTalk 口型增强已完成", "done");
+          } catch (reason) {
+            work = work.map((item) => item.status === "animating" ? { ...item, status: "ready" as SceneStatus } : item);
+            setScenes(work);
+            recordActivity("video", reason instanceof Error ? `口型增强跳过：${reason.message}` : "口型增强暂时不可用", "warning");
+          }
+        }
+      }
+
       let generatedMusicUrl = "";
       if (bgmEnabled && agentConfigs.voice.adapter !== "browser") {
         setPhase("music");
@@ -985,7 +1126,7 @@ export default function Home() {
       setError("生图 AI 需要先填写发布密钥");
       return;
     }
-    if (agentConfigs.image.adapter === "webhook" && !agentConfigs.image.endpoint.startsWith("https://")) {
+    if (agentConfigs.image.adapter === "webhook" && !validAgentEndpoint(agentConfigs.image.endpoint)) {
       setConfiguringRole("image");
       setError("请先配置生图 AI 的 Webhook");
       return;
@@ -1026,7 +1167,7 @@ export default function Home() {
       setError("视频 AI 需要发布密钥");
       return;
     }
-    if (agentConfigs.video.adapter === "webhook" && !agentConfigs.video.endpoint.startsWith("https://")) {
+    if (agentConfigs.video.adapter === "webhook" && !validAgentEndpoint(agentConfigs.video.endpoint)) {
       setConfiguringRole("video");
       setError("请先配置视频 AI 的 Webhook");
       return;
@@ -1498,6 +1639,17 @@ export default function Home() {
             <button className={recommendedTeamActive ? "active" : ""} onClick={() => applyTeamProfile("pollinations")}><b>推荐 AI 制片组</b><span>独立导演 · 编剧 · 生图 · 视频 · 配音 · 剪辑</span></button>
           </div>
           {freeTeamActive ? <p className="provider-note"><b>免费边界：</b>语言和生图岗位使用社区算力，画质与一致性会随在线模型变化；视频岗位只做 2.5D 推拉、横移、景深和光影动画，人物本身不会产生走路、口型等新动作。可只替换“生图 AI”或“视频 AI”，不必整套更换。</p> : <div className="key-panel"><div><b>统一备用密钥</b><span>未填写岗位专用密钥时使用这里的 Pollinations 密钥；所有密钥只保存在当前设备。</span></div><div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">获取密钥 ↗</a></div></div>}
+        </div>
+
+        <div className="opensource-hub">
+          <div className="opensource-heading"><div><span>OPEN SOURCE NODES</span><h3>开源本地节点中心</h3><p>用一个统一桥接地址，把你自己的 ComfyUI/Wan2.2、CosyVoice 和 MuseTalk 接入漫镜。</p></div><div><a href="/manjing-local-bridge.zip" download>下载本地桥接服务</a><button onClick={applyBridgeStack}>一键应用开源三节点</button></div></div>
+          <div className="bridge-config"><label>桥接服务地址<input value={bridgeUrl} onChange={(event) => { setBridgeUrl(event.target.value.trim()); setBridgeHealth({ state: "idle", message: "地址已修改，等待检测" }); }} placeholder="https://你的桥接地址 或 http://127.0.0.1:8765" /></label><label>桥接密钥<input type="password" value={bridgeToken} onChange={(event) => setBridgeToken(event.target.value.trim())} placeholder="与本地 .env 中的 BRIDGE_TOKEN 相同" /></label><button onClick={() => void testBridgeConnection()} disabled={bridgeHealth.state === "testing"}>{bridgeHealth.state === "testing" ? "检测中…" : "检测连接"}</button><em className={bridgeHealth.state}>{bridgeHealth.message}</em></div>
+          <div className="opensource-nodes">
+            <article className={bridgeHealth.nodes?.comfyui ? "online" : "offline"}><div className="node-top"><i>影</i><div><b>ComfyUI · Wan2.2</b><span>生图、角色一致性、图生视频与人物动画</span></div><em>{bridgeHealth.nodes?.comfyui ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.workflows?.image ? "ready" : ""}>生图工作流</span><span className={bridgeHealth.workflows?.video ? "ready" : ""}>视频工作流</span></div><div className="node-actions"><button onClick={() => applyBridgeRole("image")}>用于生图岗位</button><button onClick={() => applyBridgeRole("video")}>用于视频岗位</button><a href="https://github.com/Wan-Video/Wan2.2" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
+            <article className={bridgeHealth.nodes?.cosyvoice ? "online" : "offline"}><div className="node-top"><i>声</i><div><b>CosyVoice</b><span>中文角色配音、情绪指令与声音复刻</span></div><em>{bridgeHealth.nodes?.cosyvoice ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.nodes?.cosyvoice ? "ready" : ""}>FastAPI 服务</span><span>本机生成音轨</span></div><div className="node-actions"><button onClick={() => applyBridgeRole("voice")}>用于配音岗位</button><a href="https://github.com/FunAudioLLM/CosyVoice" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
+            <article className={bridgeHealth.nodes?.musetalk ? "online" : "offline"}><div className="node-top"><i>口</i><div><b>MuseTalk 1.5</b><span>在配音完成后，为人物镜头生成中文口型</span></div><em>{bridgeHealth.nodes?.musetalk ? "在线" : "未检测"}</em></div><div className="lipsync-toggle"><div><b>生成后自动做口型</b><span>失败时保留原视频，不中断整片</span></div><button className={`toggle ${lipsyncEnabled ? "on" : ""}`} onClick={() => setLipsyncEnabled((value) => !value)}><i /></button></div><div className="node-actions"><a href="https://github.com/TMElyralab/MuseTalk" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
+          </div>
+          <p className="opensource-note"><b>免费指的是代码和模型可自托管，不代表显卡免费。</b>Wan2.2 需要 NVIDIA GPU；网站不能替你在普通浏览器里运行大型视频模型。桥接服务只保存在你的电脑，接口与密钥仍由你控制。</p>
         </div>
 
         <div className="generate-row">
