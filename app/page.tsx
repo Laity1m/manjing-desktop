@@ -485,17 +485,24 @@ export default function Home() {
     return (await response.json()) as { id: string; kind: "text" | "image" };
   }
 
-  async function pollHorde(kind: "text" | "image", id: string, run: number) {
-    for (let attempt = 0; attempt < 160; attempt += 1) {
+  async function pollHorde(
+    kind: "text" | "image",
+    id: string,
+    run: number,
+    options: { maxAttempts?: number; onPending?: (attempt: number, data: Record<string, unknown>) => void; timeoutMessage?: string } = {},
+  ) {
+    const maxAttempts = options.maxAttempts || 160;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (runRef.current !== run) throw new Error("任务已取消");
       const response = await fetch(`/api/horde?kind=${kind}&id=${encodeURIComponent(id)}`, { cache: "no-store" });
       const data = (await response.json()) as Record<string, unknown>;
       if (!response.ok || data.error) throw new Error(String(data.error || `生成失败（${response.status}）`));
       if (data.done) return data;
+      options.onPending?.(attempt + 1, data);
       if (kind === "image" && typeof data.wait_time === "number") setStatusText(`社区队列处理中，预计等待 ${data.wait_time} 秒`);
       await wait(kind === "image" ? 4200 : 3000);
     }
-    throw new Error("生成等待超时，请稍后重试");
+    throw new Error(options.timeoutMessage || "生成等待超时，请稍后重试");
   }
 
   async function pollinationsText(role: "director" | "writer" | "editor", system: string, user: string) {
@@ -541,7 +548,14 @@ export default function Home() {
     setStatusText(`${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
     if (config.adapter === "horde") {
       const task = await startHorde("director", { story: story.trim(), style, draft, count: Math.max(3, Math.min(4, Math.ceil(productionDuration / 30))), model: config.model });
-      const result = await pollHorde("text", task.id, run);
+      const result = await pollHorde("text", task.id, run, {
+        maxAttempts: 6,
+        timeoutMessage: "导演复核排队超时",
+        onPending: (attempt) => {
+          setProgress(Math.min(14, 10 + Math.ceil(attempt / 2)));
+          setStatusText(`免费导演 AI 正在排队复核（已等待 ${attempt * 3} 秒），超过 18 秒将自动采用编剧初稿`);
+        },
+      });
       return String(result.text || draft);
     }
     const system = "你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜，修复格式、人物一致性、时长、节奏和结尾钩子。保留同一 JSON 结构，只返回修订后的完整 JSON，不要解释。";
@@ -684,8 +698,10 @@ export default function Home() {
         parseStoryboard(reviewed, productionDuration);
         raw = reviewed;
       } catch {
+        if (runRef.current !== run) throw new Error("任务已取消");
         setStatusText("导演复核暂时不可用，保留编剧初稿继续制作");
       }
+      setProgress(15);
       const storyboard = parseStoryboard(raw, productionDuration);
       setProjectTitle(storyboard.title);
       setMusicPrompt(storyboard.music);
