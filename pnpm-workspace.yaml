@@ -1,4 +1,12 @@
+packages:
+  - windows-app
+
+overrides:
+  "@electron/get": 3.1.0
+
 allowBuilds:
+  electron: true
+  electron-winstaller: true
   esbuild: true
   sharp: true
   workerd: true

@@ -1,0 +1,51 @@
+{
+  "name": "manjing-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "漫镜 AI 漫剧工作室 Windows 桌面客户端",
+  "main": "main.js",
+  "author": "漫镜 AI Motion Studio",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "electron .",
+    "smoke": "electron . --smoke-test",
+    "pack": "electron-builder --dir --win --x64",
+    "dist": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "43.2.0",
+    "electron-builder": "26.11.1"
+  },
+  "build": {
+    "appId": "com.manjing.desktop",
+    "productName": "漫镜",
+    "artifactName": "漫镜-Windows-${version}-${arch}.${ext}",
+    "asar": true,
+    "compression": "maximum",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "shell.html",
+      "styles.css",
+      "assets/**/*",
+      "build/icon.svg",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "executableName": "漫镜"
+    }
+  }
+}

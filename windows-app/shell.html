@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src https://manjing-ai-comic-studio.lingxiangniao03.chatgpt.site; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <title>漫镜 · AI 漫剧工作室</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="titlebar">
+    <div class="titlebar-brand">
+      <span>漫</span>
+      <div><b>漫镜</b><small>AI MOTION STUDIO</small></div>
+    </div>
+    <div class="titlebar-drag"><span id="pageTitle">创作首页</span><i></i><em id="networkLabel">正在连接云端</em></div>
+    <div class="window-controls">
+      <button id="minimizeButton" title="最小化" aria-label="最小化">—</button>
+      <button id="maximizeButton" title="最大化" aria-label="最大化">□</button>
+      <button id="closeButton" class="close" title="关闭" aria-label="关闭">×</button>
+    </div>
+  </header>
+
+  <main class="app-shell">
+    <nav class="rail" aria-label="软件主导航">
+      <button class="rail-item active" data-route="/" data-title="创作首页"><i>首</i><span>首页</span></button>
+      <button class="rail-item" data-route="/studio" data-title="AI 工作台"><i>创</i><span>工作台</span></button>
+      <button class="rail-item" data-route="/editor" data-title="专业剪辑台"><i>剪</i><span>剪辑台</span></button>
+      <button class="rail-item" data-route="/models" data-title="模型与 Key"><i>模</i><span>模型</span></button>
+      <button class="rail-item" data-route="/projects" data-title="项目与资产"><i>库</i><span>项目</span></button>
+      <div class="rail-spacer"></div>
+      <button class="rail-item" id="welcomeButton"><i>景</i><span>灵感</span></button>
+      <button class="rail-item" id="downloadButton"><i>下</i><span>下载</span></button>
+    </nav>
+
+    <section class="workspace">
+      <div class="workspace-toolbar">
+        <div class="workspace-location"><span id="routeEyebrow">MANJING / HOME</span><b id="routeName">创作首页</b></div>
+        <div class="workspace-actions">
+          <span class="network-pill" id="networkPill"><i></i><b>云端已连接</b></span>
+          <button id="reloadButton" title="刷新当前页面">↻ 刷新</button>
+          <button id="browserButton" title="在系统浏览器打开">↗ 浏览器</button>
+        </div>
+      </div>
+      <div class="web-surface">
+        <div class="loading-bar" id="loadingBar"></div>
+        <iframe id="appFrame" title="漫镜 AI 漫剧工作区" src="https://manjing-ai-comic-studio.lingxiangniao03.chatgpt.site/" allow="autoplay; clipboard-write" referrerpolicy="strict-origin-when-cross-origin"></iframe>
+        <div class="offline-card" id="offlineCard" hidden>
+          <i>离</i><h2>暂时无法连接云端</h2><p>漫镜桌面版需要联网调用 AI 模型。请检查网络后重新连接。</p><button id="retryButton">重新连接</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="welcome" id="welcomePanel" aria-label="漫镜欢迎页">
+    <div class="welcome-backdrop"></div>
+    <div class="welcome-card">
+      <button class="welcome-close" id="welcomeClose" aria-label="关闭欢迎页">×</button>
+      <header class="welcome-copy">
+        <span>MANJING WINDOWS · 1.0</span>
+        <h1>让每一个故事，<br />真正动起来。</h1>
+        <p>从剧本、分镜、画面和视频生成，到配音、AI 粗剪与人工精剪，全流程留在一个桌面工作室里。</p>
+        <div><button class="primary" data-welcome-route="/studio">开始制作漫剧 <b>→</b></button><button data-welcome-route="/editor">打开剪辑台</button></div>
+      </header>
+      <div class="visual-gallery" aria-label="漫镜视觉作品">
+        <button class="visual-card visual-main" data-welcome-route="/studio"><img src="assets/visual-3.png" alt="漫镜 AI 漫剧视觉作品三" /><span><b>AI 漫剧工作流</b><small>导演统筹 · 多模型协作</small></span></button>
+        <button class="visual-card" data-welcome-route="/editor"><img src="assets/visual-2.png" alt="漫镜 AI 漫剧视觉作品二" /><span><b>专业后期工作台</b><small>时间线 · 字幕 · 配音</small></span></button>
+        <button class="visual-card" data-welcome-route="/projects"><img src="assets/visual-1.png" alt="漫镜 AI 漫剧视觉作品一" /><span><b>完整资产交付</b><small>剧本 · 分镜 · 图片 · 视频</small></span></button>
+      </div>
+      <footer class="welcome-footer"><span><i></i> Windows 桌面客户端</span><span id="versionLabel">版本 1.0.0</span><span>快捷键 Ctrl + 1～5 切换页面</span></footer>
+    </div>
+  </section>
+
+  <div class="download-toast" id="downloadToast" hidden><i>↓</i><span><b id="downloadTitle">正在下载</b><small id="downloadDetail">正在准备文件…</small></span><button id="showDownloadButton">查看</button></div>
+  <script src="renderer.js"></script>
+</body>
+</html>

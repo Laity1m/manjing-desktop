@@ -651,7 +651,7 @@ footer p { flex: 1; }
 
 /* Shared subpages */
 .portal-page { min-height: 100vh; background: #f3f0ea; }
-.subpage-hero { width: min(1240px, 92vw); padding: 74px 0 42px; border-bottom: 1px solid #d9d2ca; }
+.subpage-hero { width: min(1240px, 92vw); margin: 0 auto; padding: 74px 0 42px; border-bottom: 1px solid #d9d2ca; }
 .subpage-hero > p, .subpage-hero > div > p { margin: 0; color: #7556aa; font-size: 8px; font-weight: 700; letter-spacing: .2em; }
 .subpage-hero h1 { margin: 13px 0 12px; font: 500 clamp(34px, 4vw, 52px) "Noto Serif SC", serif; letter-spacing: -.04em; }
 .subpage-hero > span, .subpage-hero > div > span { color: #7d7680; font-size: 10px; }
@@ -744,6 +744,11 @@ footer p { flex: 1; }
 
 /* Professional editor */
 .editor-page { height: 100vh; overflow: hidden; background: #111015; color: #eae6ed; }
+.editor-page * { scrollbar-color: #4e4656 #1b181f; scrollbar-width: thin; }
+.editor-page ::-webkit-scrollbar { width: 8px; height: 8px; }
+.editor-page ::-webkit-scrollbar-track { background: #1b181f; }
+.editor-page ::-webkit-scrollbar-thumb { border: 2px solid #1b181f; border-radius: 999px; background: #514859; }
+.editor-page ::-webkit-scrollbar-thumb:hover { background: #6a5a76; }
 .editor-page .global-nav { position: relative; height: 64px; border-color: #302d35; background: #19171d; }
 .editor-page .global-brand > span { background: #7657ad; }
 .editor-page .global-brand b { color: #fff; }
@@ -1040,4 +1045,115 @@ footer p { flex: 1; }
   .libtv-canvas-head { align-items: flex-start; flex-direction: column; }
   .libtv-node-flow, .libtv-canvas-grid { grid-template-columns: 1fr; }
   .libtv-message-stream { border-right: 0; border-bottom: 1px solid #332e38; }
+}
+
+/* Windows desktop and wide-screen layout refinement */
+@media (min-width: 1280px) {
+  .global-nav { height: 68px; grid-template-columns: 245px 1fr 210px; padding: 0 max(2.5vw, 34px); }
+  .global-nav-links { gap: 5px; }
+  .global-nav-links a { padding: 10px 17px; font-size: 12px; }
+  .global-start { justify-self: end; min-width: 122px; justify-content: center; }
+
+  .portal-hero, .portal-route-grid { width: min(1440px, 94vw); }
+  .portal-hero { min-height: 620px; grid-template-columns: minmax(500px, .92fr) minmax(560px, 1.08fr); gap: clamp(42px, 5vw, 88px); padding: 60px 0 76px; }
+  .portal-hero-copy > p:nth-of-type(2) { font-size: 15px; }
+  .portal-actions a { padding: 15px 20px; font-size: 12px; }
+  .portal-stage { min-height: 510px; }
+  .portal-route-grid { margin-bottom: 94px; }
+  .portal-route-grid > a { min-height: 220px; padding: 24px 26px; }
+  .portal-route-grid b { font-size: 14px; }
+  .portal-route-grid p { font-size: 10px; }
+  .portal-pipeline, .portal-banner, .portal-footer { padding-left: max(3vw, calc((100vw - 1440px) / 2)); padding-right: max(3vw, calc((100vw - 1440px) / 2)); }
+
+  .section-shell { width: min(1420px, 95vw); }
+  .studio-surface > .studio { margin-top: 40px; }
+  .studio { border-radius: 24px; padding: 28px; }
+  .creation-grid { grid-template-columns: minmax(0, 1.35fr) minmax(370px, .65fr); }
+  .story-panel { min-height: 350px; }
+  .story-panel textarea { font-size: 19px; }
+  .ai-team { padding: 20px; }
+  .agent-grid { gap: 12px; }
+  .agent-card { padding: 14px; }
+  .agent-card-top b { font-size: 12px; }
+  .agent-card select, .agent-model b, .agent-config-button { font-size: 9px; }
+  .provider-box { grid-template-columns: 390px minmax(0, 1fr); padding: 15px; }
+  .key-panel { min-width: 0; }
+  .key-input { min-width: 430px; }
+  .key-input input { flex: 1; min-width: 0; }
+  .cloud-engine-card, .local-model-card { padding: 18px; }
+  .delivery-actions > button { min-height: 66px; }
+  .delivery-actions b { font-size: 10px; }
+  .delivery-actions small { font-size: 8px; }
+
+  .subpage-hero, .keys-layout, .project-toolbar, .project-grid, .project-empty, .custom-model-builder { width: min(1420px, 94vw); }
+  .subpage-hero { padding-top: 62px; }
+  .keys-layout { grid-template-columns: 350px minmax(0, 1fr); margin-top: 24px; }
+  .provider-list { padding: 18px; }
+  .provider-list > button { min-height: 62px; padding: 11px; }
+  .provider-list button b { font-size: 11px; }
+  .provider-list button small { font-size: 8px; }
+  .provider-detail { padding: 34px 38px; }
+  .provider-detail-head h2 { font-size: 31px; }
+  .provider-detail-head p, .key-walkthrough li p { font-size: 10px; }
+  .key-spec-grid article { min-height: 100px; padding: 17px; }
+  .key-spec-grid b { font-size: 11px; }
+  .custom-model-form, .custom-model-list { padding: 30px 34px 34px; }
+  .custom-role-tabs button, .custom-form-fields label, .custom-form-fields input, .custom-form-fields select, .save-custom-model { font-size: 9px; }
+
+  .project-grid { gap: 18px; }
+  .project-grid article { border-radius: 16px; }
+  .project-card-copy { padding: 18px; }
+  .project-card-copy b { font-size: 12px; }
+  .project-card-copy p { height: 40px; font-size: 9px; }
+  .project-card-copy a, .project-card-copy button { padding: 8px 11px; font-size: 8px; }
+
+  .editor-page .global-nav { height: 60px; }
+  .pro-editor { height: calc(100vh - 60px); grid-template-rows: 58px minmax(320px, 1fr) minmax(250px, 37vh); }
+  .pro-editor.has-handoff { grid-template-rows: 58px 50px minmax(320px, 1fr) minmax(250px, 37vh); }
+  .editor-topbar { padding: 0 18px; }
+  .editor-project-name input { width: 220px; font-size: 11px; }
+  .editor-export-actions button { padding: 9px 13px; font-size: 9px; }
+  .editor-main-grid { grid-template-columns: 68px 292px minmax(360px, 1fr) 280px; }
+  .editor-toolrail { padding: 10px 6px; }
+  .editor-toolrail button, .editor-toolrail a { padding: 9px 3px; }
+  .editor-toolrail span, .editor-panel-head span, .properties-head span { font-size: 8px; }
+  .editor-toolrail i, .editor-panel-head b, .properties-head b { font-size: 10px; }
+  .editor-panel-head { padding: 17px; }
+  .editor-upload { height: 108px; margin: 14px; }
+  .editor-upload b, .properties-body input:not([type="range"]), .properties-body textarea, .properties-body select { font-size: 9px; }
+  .editor-upload span, .properties-body > label, .property-pair label { font-size: 8px; }
+  .editor-viewer { padding: 20px; }
+  .editor-canvas.portrait { height: min(50vh, 500px); }
+  .editor-canvas.landscape { width: min(55vw, 760px); }
+  .timeline-toolbar { height: 44px; padding: 0 13px; }
+  .timeline-toolbar button { font-size: 8px; }
+  .timeline-body { height: calc(100% - 72px); grid-template-columns: 78px minmax(0, 1fr); }
+  .timeline-body > aside span, .timeline-body > aside b, .timeline-editor-clip b, .timeline-text-clip, .timeline-audio-clip b { font-size: 8px; }
+}
+
+@media (min-width: 721px) and (max-width: 1279px) {
+  .section-shell { width: min(1180px, 95vw); }
+  .studio { padding: 22px; }
+  .creation-grid { grid-template-columns: minmax(0, 1.12fr) minmax(330px, .88fr); }
+  .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-box { grid-template-columns: 1fr; }
+  .key-panel { flex-wrap: wrap; }
+  .key-input { flex: 1; min-width: min(420px, 100%); }
+  .cloud-engine-grid { grid-template-columns: 1fr; }
+  .bridge-config { grid-template-columns: 1fr 1fr; }
+  .bridge-config > button, .bridge-config > em { min-height: 34px; }
+  .delivery-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .keys-layout { grid-template-columns: 285px minmax(0, 1fr); }
+  .provider-detail { padding: 25px; }
+  .key-spec-grid { grid-template-columns: 1fr 1fr; }
+  .key-spec-grid article:first-child { grid-column: 1 / -1; }
+  .editor-main-grid { grid-template-columns: 58px 220px minmax(320px, 1fr); }
+}
+
+@media (min-width: 1001px) and (max-width: 1279px) {
+  .editor-main-grid { grid-template-columns: 58px 230px minmax(320px, 1fr) 220px; }
+}
+
+@media (min-width: 1540px) {
+  .project-grid { grid-template-columns: repeat(4, 1fr); }
 }

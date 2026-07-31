@@ -41,3 +41,5 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+/windows-app/node_modules/
+/windows-app/release/
