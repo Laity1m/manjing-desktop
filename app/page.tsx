@@ -122,7 +122,7 @@ function parseStoryboard(raw: string, targetSeconds: number): { title: string; c
   }
   const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
   if (sceneSource.length < 2) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
-  const picked = sceneSource.slice(0, 6) as Array<Record<string, unknown>>;
+  const picked = sceneSource.slice(0, 8) as Array<Record<string, unknown>>;
   const seconds = Math.max(4, Math.round(targetSeconds / picked.length));
   const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
   const rawCharacters = characterSource.slice(0, 4) as Array<Record<string, unknown>>;
@@ -151,7 +151,7 @@ function parseStoryboard(raw: string, targetSeconds: number): { title: string; c
       emotion: String(item.emotion || item.e || "克制").slice(0, 24),
       sfx: String(item.sfx || item.x || "环境氛围声").slice(0, 80),
       characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
-      duration: Math.max(4, Math.min(15, Number(item.duration || item.u) || seconds)),
+      duration: Math.max(4, Math.min(30, Number(item.duration || item.u) || seconds)),
       status: "queued",
     })),
   };
@@ -247,22 +247,28 @@ export default function Home() {
   const [exportProgress, setExportProgress] = useState(0);
   const [showFilm, setShowFilm] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [timelineZoom, setTimelineZoom] = useState(1);
+  const [draggingScene, setDraggingScene] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const runRef = useRef(0);
 
   const totalDuration = useMemo(() => scenes.reduce((sum, item) => sum + item.duration, 0), [scenes]);
   const offsets = useMemo(() => scenes.map((_, index) => scenes.slice(0, index).reduce((sum, item) => sum + item.duration, 0)), [scenes]);
+  const timelineWidth = Math.max(720, totalDuration * 34 * timelineZoom);
   const currentIndex = scenes.length
     ? Math.max(0, scenes.findIndex((scene, index) => time >= offsets[index] && time < offsets[index] + scene.duration))
     : 0;
   const current = scenes[currentIndex] || scenes[selected];
 
   useEffect(() => {
-    const savedKey = window.localStorage.getItem("manjing-pollinations-key") || "";
-    const savedDraft = window.localStorage.getItem("manjing-text-draft");
-    if (savedKey.startsWith("pk_")) setApiKey(savedKey);
-    if (savedDraft) setStory(savedDraft);
+    const frame = window.requestAnimationFrame(() => {
+      const savedKey = window.localStorage.getItem("manjing-pollinations-key") || "";
+      const savedDraft = window.localStorage.getItem("manjing-text-draft");
+      if (savedKey.startsWith("pk_")) setApiKey(savedKey);
+      if (savedDraft) setStory(savedDraft);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
@@ -320,6 +326,9 @@ export default function Home() {
 
   function updateScene(id: string, patch: Partial<Scene>) {
     setScenes((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    setExportUrl("");
+    setShowFilm(false);
   }
 
   async function startHorde(action: "story" | "image", payload: Record<string, unknown>) {
@@ -346,7 +355,7 @@ export default function Home() {
   }
 
   async function pollinationsStoryboard() {
-    const count = Math.max(3, Math.min(6, Math.ceil(targetDuration / 10)));
+    const count = Math.max(3, Math.min(8, Math.ceil(targetDuration / 15)));
     const response = await fetch("https://gen.pollinations.ai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
@@ -623,28 +632,69 @@ export default function Home() {
 
   function moveScene(index: number, direction: -1 | 1) {
     const nextIndex = index + direction;
-    if (nextIndex < 0 || nextIndex >= scenes.length) return;
+    reorderScene(index, nextIndex);
+  }
+
+  function reorderScene(from: number, to: number) {
+    if (from === to || from < 0 || to < 0 || from >= scenes.length || to >= scenes.length) return;
     setScenes((items) => {
       const next = [...items];
-      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      setTime(next.slice(0, to).reduce((sum, item) => sum + item.duration, 0));
       return next;
     });
-    setSelected(nextIndex);
+    setSelected(to);
+    setPlaying(false);
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    setExportUrl("");
+    setShowFilm(false);
   }
 
   function deleteScene(index: number) {
     const item = scenes[index];
-    if (item?.imageUrl) URL.revokeObjectURL(item.imageUrl);
-    if (item?.audioUrl) URL.revokeObjectURL(item.audioUrl);
-    if (item?.videoUrl) URL.revokeObjectURL(item.videoUrl);
+    if (item?.imageUrl && !scenes.some((scene, sceneIndex) => sceneIndex !== index && scene.imageUrl === item.imageUrl)) URL.revokeObjectURL(item.imageUrl);
+    if (item?.audioUrl && !scenes.some((scene, sceneIndex) => sceneIndex !== index && scene.audioUrl === item.audioUrl)) URL.revokeObjectURL(item.audioUrl);
+    if (item?.videoUrl && !scenes.some((scene, sceneIndex) => sceneIndex !== index && scene.videoUrl === item.videoUrl)) URL.revokeObjectURL(item.videoUrl);
     setScenes((items) => items.filter((_, itemIndex) => itemIndex !== index));
     setSelected(Math.max(0, Math.min(selected, scenes.length - 2)));
+    setPlaying(false);
+    setTime(0);
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    setExportUrl("");
+    setShowFilm(false);
+  }
+
+  function splitAtPlayhead() {
+    const index = scenes.findIndex((scene, sceneIndex) => {
+      const localTime = time - offsets[sceneIndex];
+      return localTime >= 2 && localTime <= scene.duration - 2;
+    });
+    if (index < 0) {
+      setError("请把播放头移到镜头内部，且距离片段两端至少 2 秒后再分割");
+      return;
+    }
+    const scene = scenes[index];
+    const firstDuration = Number((time - offsets[index]).toFixed(1));
+    const secondDuration = Number((scene.duration - firstDuration).toFixed(1));
+    const first = { ...scene, duration: firstDuration };
+    const second = { ...scene, id: uid(), title: `${scene.title} · 后段`, duration: secondDuration };
+    setScenes((items) => [...items.slice(0, index), first, second, ...items.slice(index + 1)]);
+    setSelected(index + 1);
+    setPlaying(false);
+    setError("");
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    setExportUrl("");
+    setShowFilm(false);
   }
 
   function addScene() {
     const lead = characters[0]?.name || "主角";
     setScenes((items) => [...items, { id: uid(), title: "新镜头", visual: "描述场景、构图和光线", action: "描述角色连续动作和表情变化", shot: "中景", camera: "缓慢推进", dialogue: "输入角色台词", speaker: lead, emotion: "自然", sfx: "环境氛围声", characters: [lead], duration: 6, status: "queued" }]);
     setSelected(scenes.length);
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    setExportUrl("");
+    setShowFilm(false);
   }
 
   function seek(value: number) {
@@ -857,7 +907,12 @@ export default function Home() {
           <div className="settings-panel">
             <label>视觉风格</label>
             <div className="choice-grid">{Object.keys(STYLE_PROMPTS).map((item) => <button key={item} className={style === item ? "active" : ""} onClick={() => setStyle(item)}>{item}</button>)}</div>
-            <div className="setting-pair"><div><label>目标时长</label><select value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))}><option value={30}>约 30 秒</option><option value={60}>约 60 秒</option><option value={90}>约 90 秒</option></select></div><div><label>画面比例</label><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")}><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option></select></div></div>
+            <div className="duration-setting">
+              <div><label htmlFor="target-duration">目标时长</label><b>{formatTime(targetDuration)}</b></div>
+              <input id="target-duration" type="range" min={15} max={120} step={15} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} />
+              <small><span>15 秒</span><span>拖动选择成片长度</span><span>120 秒</span></small>
+            </div>
+            <div className="aspect-setting"><label>画面比例</label><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")}><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option></select></div>
             <div className="voice-row"><div><label>自动配音</label><small>{mode === "cloud" ? "生成音轨并写入成片" : "使用设备中文语音播放"}</small></div><button className={`toggle ${voiceEnabled ? "on" : ""}`} aria-label="切换自动配音" onClick={() => setVoiceEnabled((value) => !value)}><i /></button></div>
             {mode === "cloud" && <div className="voice-row"><div><label>剧情配乐</label><small>生成无歌词 BGM 并自动混音</small></div><button className={`toggle ${bgmEnabled ? "on" : ""}`} aria-label="切换剧情配乐" onClick={() => setBgmEnabled((value) => !value)}><i /></button></div>}
             {mode === "cloud" && voiceEnabled && <select aria-label="配音音色" value={voice} onChange={(event) => setVoice(event.target.value)}>{VOICES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}
@@ -896,7 +951,7 @@ export default function Home() {
             <span className={!!exportUrl ? "passed" : ""}>最终成片</span>
           </div>
         </div>}
-        {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成 AI 漫剧”，完成后这里会直接出现可播放成片。</p></div> : <div className="workbench">
+        {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成 AI 漫剧”，完成后这里会直接出现可播放成片。</p></div> : <><div className="workbench">
           <div className="preview-column">
             <div className={`stage ${aspect === "9:16" ? "portrait" : "landscape"} ${showFilm && exportUrl ? "film-ready" : ""}`}>
               {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={mode === "community" || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline /> : current?.imageUrl ? <img key={current.imageUrl} src={current.imageUrl} alt={current.visual} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "AI 正在生成角色动态表演" : current?.status === "painting" ? "AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
@@ -912,9 +967,46 @@ export default function Home() {
           <div className="timeline-panel">
             <div className="timeline-title"><div><b>智能分镜</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
             <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.imageUrl ? "一致性关键帧" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
-            {selectedScene && <div className="scene-editor"><div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")}</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div><label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label><div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>运镜<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div><label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label><label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label><label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label><div className="editor-grid"><label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label><label>镜头时长<input type="number" min={3} max={20} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(3, Math.min(20, Number(event.target.value))) })} /></label></div><div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>重做一致性关键帧</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{mode === "cloud" ? "重做 AI 动态表演" : "转为 AI 动态镜头"}</button></div></div>}
+            {selectedScene && <div className="scene-editor"><div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")}</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div><label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label><div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>运镜<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div><label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label><label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label><label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label><div className="editor-grid"><label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label></div><div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>重做一致性关键帧</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{mode === "cloud" ? "重做 AI 动态表演" : "转为 AI 动态镜头"}</button></div></div>}
           </div>
-        </div>}
+        </div>
+
+        <div className="nle-workspace">
+          <div className="nle-toolbar">
+            <div><b>多轨剪辑台</b><span>像剪映一样拖动片段排序，移动播放头后可以分割</span></div>
+            <div className="nle-actions">
+              <button onClick={() => setPlaying((value) => !value)}>{playing ? "暂停" : "播放"}</button>
+              <button onClick={splitAtPlayhead}>分割</button>
+              <button onClick={() => deleteScene(selected)} disabled={!selectedScene}>删除片段</button>
+              <label>缩放<input type="range" aria-label="时间轴缩放" min={0.6} max={2.4} step={0.2} value={timelineZoom} onChange={(event) => setTimelineZoom(Number(event.target.value))} /></label>
+            </div>
+          </div>
+          <div className="nle-grid">
+            <div className="track-labels"><span className="ruler-label">时间</span><span>视频</span><span>配音</span><span>字幕</span><span>配乐</span></div>
+            <div className="timeline-scroll">
+              <div className="timeline-canvas" style={{ width: timelineWidth }}>
+                <div className="time-ruler">
+                  {Array.from({ length: Math.floor(totalDuration / 5) + 1 }, (_, index) => <i key={index} style={{ left: `${totalDuration ? (index * 5 / totalDuration) * 100 : 0}%` }}><span>{formatTime(index * 5)}</span></i>)}
+                </div>
+                <input className="timeline-scrubber" type="range" aria-label="时间轴播放头" min={0} max={totalDuration || 1} step={0.1} value={Math.min(time, totalDuration)} onChange={(event) => { setPlaying(false); setTime(Number(event.target.value)); setShowFilm(false); }} />
+                <div className="playhead" style={{ left: totalDuration ? (time / totalDuration) * timelineWidth : 0 }}><i /></div>
+                <div className="timeline-track video-track">
+                  {scenes.map((scene, index) => <button type="button" draggable key={scene.id} className={`video-clip ${selected === index ? "selected" : ""} ${draggingScene === index ? "dragging" : ""}`} style={{ width: Math.max(50, (scene.duration / Math.max(totalDuration, 1)) * timelineWidth) }} onDragStart={() => setDraggingScene(index)} onDragEnd={() => setDraggingScene(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (draggingScene !== null) reorderScene(draggingScene, index); setDraggingScene(null); }} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }} aria-label={`选择并拖动镜头 ${scene.title}`}>
+                    <span className="clip-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <i>{String(index + 1).padStart(2, "0")}</i>}</span><b>{scene.title}</b><small>{scene.duration} 秒</small>
+                  </button>)}
+                </div>
+                <div className="timeline-track voice-track">
+                  {scenes.map((scene, index) => <button type="button" key={scene.id} className={`audio-clip ${selected === index ? "selected" : ""} ${!scene.audioUrl ? "device-voice" : ""}`} style={{ width: Math.max(50, (scene.duration / Math.max(totalDuration, 1)) * timelineWidth) }} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); }}><i><span /><span /><span /><span /><span /><span /></i><b>{scene.speaker || "旁白"}</b></button>)}
+                </div>
+                <div className="timeline-track subtitle-track">
+                  {scenes.map((scene, index) => <button type="button" key={scene.id} className={`subtitle-clip ${selected === index ? "selected" : ""}`} style={{ width: Math.max(50, (scene.duration / Math.max(totalDuration, 1)) * timelineWidth) }} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); }} title={scene.dialogue}>{scene.dialogue || "（无台词）"}</button>)}
+                </div>
+                <div className="timeline-track music-track"><div className={`music-clip ${musicUrl ? "ready" : ""}`}><i>♪</i><span>{musicUrl ? musicPrompt || "剧情配乐" : bgmEnabled ? "配乐将在生成后进入这里" : "配乐已关闭"}</span></div></div>
+              </div>
+            </div>
+          </div>
+          <div className="nle-footer"><span>播放头 <b>{formatTime(time)}</b></span><span>选中 <b>{selectedScene?.title}</b></span><span>成片 <b>{formatTime(totalDuration)}</b></span><button onClick={() => void exportFilm()} disabled={phase === "exporting"}>{phase === "exporting" ? `正在合成 ${exportProgress}%` : "重新合成成片"}</button></div>
+        </div></>}
       </section>
 
       <section id="capabilities" className="capabilities section-shell">
