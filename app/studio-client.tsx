@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import SiteNav from "./components/SiteNav";
+import { persistEditorProject, type EditorProjectClip } from "./lib/editor-project";
+import { loadCustomModels, type CustomModel } from "./lib/custom-models";
 
 type Mode = "community" | "cloud";
 type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "music" | "ready" | "exporting" | "error";
@@ -57,6 +59,7 @@ type Scene = {
 };
 type Storyboard = { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] };
 type LibTvResult = { kind: "image" | "video"; url: string };
+type LibTvMessage = { id: string; seq: number; role: "user" | "assistant"; content: string };
 
 const SAMPLE_STORY = "雨夜，女孩在即将关门的旧书店前，遇见了消失三年的恋人。他带着一封从未寄出的信，藏着两人错过彼此的真相。";
 const STYLE_PROMPTS: Record<string, string> = {
@@ -453,11 +456,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [libtvProjectUrl, setLibtvProjectUrl] = useState("");
   const [libtvResults, setLibtvResults] = useState<LibTvResult[]>([]);
   const [libtvRunning, setLibtvRunning] = useState(false);
+  const [libtvMessages, setLibtvMessages] = useState<LibTvMessage[]>([]);
+  const [libtvInstruction, setLibtvInstruction] = useState("");
+  const [libtvCanvasOpen, setLibtvCanvasOpen] = useState(false);
+  const [libtvPollingPaused, setLibtvPollingPaused] = useState(false);
+  const [libtvSending, setLibtvSending] = useState(false);
+  const [customModels, setCustomModels] = useState<CustomModel[]>([]);
+  const [editorSyncState, setEditorSyncState] = useState<"idle" | "saving" | "ready" | "error">("idle");
   const [seedanceApiKey, setSeedanceApiKey] = useState("");
   const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-1-0-pro-250528");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const runRef = useRef(0);
+  const libtvPauseRef = useRef(false);
 
   const totalDuration = useMemo(() => scenes.reduce((sum, item) => sum + item.duration, 0), [scenes]);
   const productionDuration = targetDuration || 30;
@@ -500,17 +511,30 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       if (savedCloudEngines) {
         try {
-          const parsed = JSON.parse(savedCloudEngines) as { libtvKey?: string; seedanceKey?: string; seedanceModel?: string };
+          const parsed = JSON.parse(savedCloudEngines) as { libtvKey?: string; libtvSessionId?: string; libtvProjectUrl?: string; seedanceKey?: string; seedanceModel?: string };
           setLibtvAccessKey(parsed.libtvKey || "");
+          setLibtvSessionId(parsed.libtvSessionId || "");
+          setLibtvProjectUrl(parsed.libtvProjectUrl || "");
           setSeedanceApiKey(parsed.seedanceKey || "");
           setSeedanceModel(parsed.seedanceModel || "doubao-seedance-1-0-pro-250528");
         } catch {
           window.localStorage.removeItem("manjing-cloud-engines");
         }
       }
+      setCustomModels(loadCustomModels());
       setAgentTeamLoaded(true);
     });
     return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setCustomModels(loadCustomModels());
+    window.addEventListener("manjing-custom-models-changed", refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener("manjing-custom-models-changed", refresh);
+      window.removeEventListener("storage", refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -530,8 +554,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }, [bridgeUrl, bridgeToken, lipsyncEnabled, agentTeamLoaded]);
 
   useEffect(() => {
-    if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: libtvAccessKey, seedanceKey: seedanceApiKey, seedanceModel }));
-  }, [libtvAccessKey, seedanceApiKey, seedanceModel, agentTeamLoaded]);
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceKey: seedanceApiKey, seedanceModel }));
+  }, [libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, agentTeamLoaded]);
 
   useEffect(() => {
     if (!playing || !totalDuration) return;
@@ -601,6 +625,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   function selectAgentPreset(role: AgentRole, presetId: string) {
+    const custom = customModels.find((item) => item.role === role && item.id === presetId);
+    if (custom) {
+      setAgentConfigs((current) => ({ ...current, [role]: { preset: custom.id, adapter: custom.adapter, model: custom.model, endpoint: custom.endpoint, apiKey: custom.apiKey } }));
+      if (custom.adapter !== "browser") setMode("cloud");
+      return;
+    }
     const previous = agentConfigs[role];
     const next = configFromPreset(role, presetId);
     if (next.adapter === "webhook") {
@@ -640,7 +670,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   function agentName(role: AgentRole) {
     const config = agentConfigs[role];
-    return AGENT_PRESETS[role].find((item) => item.id === config.preset)?.name || config.model;
+    return AGENT_PRESETS[role].find((item) => item.id === config.preset)?.name || customModels.find((item) => item.id === config.preset)?.name || config.model;
   }
 
   function agentKey(role: AgentRole) {
@@ -1002,6 +1032,62 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
   }
 
+  async function syncScenesToEditor(sourceScenes: Scene[], finalVideoUrl = "", source: "studio" | "libtv" = "studio", openEditor = false) {
+    if (!sourceScenes.length) {
+      setError("还没有可导入剪辑台的镜头");
+      return false;
+    }
+    setEditorSyncState("saving");
+    let start = 0;
+    const clips: EditorProjectClip[] = [];
+    for (const scene of sourceScenes) {
+      const visualType = scene.videoUrl ? "video" : scene.imageUrl ? "image" : null;
+      if (visualType) clips.push({
+        id: `${scene.id}-visual`, name: scene.title, type: visualType, url: scene.videoUrl || scene.imageUrl,
+        duration: scene.duration, sourceDuration: scene.duration, trimStart: 0, trimEnd: scene.duration, start,
+        volume: scene.volume ?? 1, speed: scene.speed || 1, filter: scene.filter || "none", transition: scene.transition || "fade",
+      });
+      if (scene.audioUrl) clips.push({
+        id: `${scene.id}-audio`, name: `${scene.speaker || "旁白"} · ${scene.title}`, type: "audio", url: scene.audioUrl,
+        duration: scene.duration, sourceDuration: scene.duration, trimStart: 0, trimEnd: scene.duration, start,
+        volume: scene.volume ?? 1, speed: 1, filter: "none", transition: "cut",
+      });
+      if (scene.dialogue && scene.subtitleEnabled !== false) clips.push({
+        id: `${scene.id}-subtitle`, name: `字幕 · ${scene.title}`, type: "text", text: scene.dialogue,
+        duration: scene.duration, sourceDuration: scene.duration, trimStart: 0, trimEnd: scene.duration, start,
+        volume: 1, speed: 1, filter: "none", transition: "cut",
+      });
+      start += scene.duration;
+    }
+    try {
+      await persistEditorProject({
+        id: `studio-${Date.now().toString(36)}`,
+        name: projectTitle || "未命名漫剧",
+        aspect,
+        source,
+        clips,
+        finalVideo: finalVideoUrl ? { url: finalVideoUrl } : undefined,
+        editorNote: `${agentName("editor")}已完成镜头顺序、节奏、字幕与混音方案，可继续人工精剪。`,
+      });
+      const savedProjects = localStorage.getItem("manjing-projects");
+      let projects: Array<Record<string, unknown>> = [];
+      try { projects = savedProjects ? JSON.parse(savedProjects) as Array<Record<string, unknown>> : []; } catch { projects = []; }
+      const projectCard = { id: `studio-${projectTitle || "current"}`, title: projectTitle || "未命名漫剧", story: story.trim().slice(0, 120), updatedAt: "刚刚", duration: formatTime(sourceScenes.reduce((sum, scene) => sum + scene.duration, 0)), status: finalVideoUrl ? "已完成" : "剪辑中" };
+      localStorage.setItem("manjing-projects", JSON.stringify([projectCard, ...projects.filter((item) => item.id !== projectCard.id)].slice(0, 20)));
+      setEditorSyncState("ready");
+      if (openEditor) window.location.assign("/editor");
+      return true;
+    } catch (reason) {
+      setEditorSyncState("error");
+      setError(reason instanceof Error ? `导入剪辑台失败：${reason.message}` : "导入剪辑台失败");
+      return false;
+    }
+  }
+
+  async function openInProfessionalEditor() {
+    await syncScenesToEditor(scenes, exportUrl, libtvSessionId && scenes.every((scene) => scene.model === "LibTV") ? "libtv" : "studio", true);
+  }
+
   async function generateWithLibTv() {
     if (story.trim().length < 8 || libtvRunning || !["idle", "ready", "error"].includes(phase)) return;
     if (libtvAccessKey.trim().length < 8) {
@@ -1014,6 +1100,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setLibtvSessionId("");
     setLibtvProjectUrl("");
     setLibtvResults([]);
+    setLibtvMessages([]);
+    libtvPauseRef.current = false;
+    setLibtvPollingPaused(false);
     setError("");
     setShowFilm(false);
     setPlaying(false);
@@ -1044,6 +1133,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (!task.sessionId) throw new Error("LibTV 没有返回任务编号");
       setLibtvSessionId(task.sessionId);
       setLibtvProjectUrl(task.projectUrl || "");
+      setLibtvCanvasOpen(true);
       setProgress(8);
       recordActivity("director", "LibTV 项目已建立，可随时打开云端画布查看", "done");
       recordActivity("image", "LibTV 正在锁定角色形象并绘制连续关键帧");
@@ -1053,6 +1143,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
       for (let attempt = 0; attempt < 180; attempt += 1) {
         if (runRef.current !== run) throw new Error("任务已取消");
+        while (libtvPauseRef.current) {
+          if (runRef.current !== run) throw new Error("任务已取消");
+          await wait(700);
+        }
         await wait(attempt === 0 ? 3500 : 10000);
         const checked = await fetch("/api/libtv", {
           method: "POST",
@@ -1060,10 +1154,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           body: JSON.stringify({ action: "status", accessKey: libtvAccessKey.trim(), sessionId: task.sessionId }),
         });
         if (!checked.ok) throw new Error(await responseError(checked));
-        const status = await checked.json() as { done?: boolean; failed?: boolean; summary?: string; messageCount?: number; results?: LibTvResult[] };
+        const status = await checked.json() as { done?: boolean; failed?: boolean; summary?: string; messageCount?: number; results?: LibTvResult[]; events?: LibTvMessage[] };
         if (status.failed && !(status.results || []).length) throw new Error(status.summary || "LibTV 生成失败，请在项目画布中查看原因");
         const results = status.results || [];
         setLibtvResults(results);
+        setLibtvMessages(status.events || []);
         const hasImages = results.some((item) => item.kind === "image");
         setPhase(hasImages ? "video" : attempt > 2 ? "characters" : "story");
         setProgress(Math.min(94, 8 + Math.min(28, Number(status.messageCount || 0) * 2) + Math.round((attempt / 180) * 56)));
@@ -1105,6 +1200,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         recordActivity("video", `${videos.length} 项动态视频已交付`, "done");
         recordActivity("voice", "配音与声音已写入 LibTV 成片", "done");
         recordActivity("editor", "最终成片已导入漫镜剪辑台", "done");
+        await syncScenesToEditor(imported, imported[0]?.videoUrl || "", "libtv");
         return;
       }
       throw new Error("LibTV 仍在制作中，请通过项目画布继续查看；任务不会丢失");
@@ -1116,6 +1212,80 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       recordActivity("director", reason instanceof Error ? `LibTV 中断：${reason.message}` : "LibTV 制作中断", "error");
     } finally {
       setLibtvRunning(false);
+    }
+  }
+
+  async function refreshLibTvCanvas() {
+    if (!libtvSessionId || libtvAccessKey.trim().length < 8 || libtvSending) return;
+    setLibtvSending(true);
+    try {
+      const response = await fetch("/api/libtv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "status", accessKey: libtvAccessKey.trim(), sessionId: libtvSessionId }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const status = await response.json() as { summary?: string; results?: LibTvResult[]; events?: LibTvMessage[] };
+      setLibtvResults(status.results || []);
+      setLibtvMessages(status.events || []);
+      if (status.summary) setStatusText(status.summary);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "刷新 LibTV 画布失败");
+    } finally {
+      setLibtvSending(false);
+    }
+  }
+
+  async function sendLibTvInstruction() {
+    const message = libtvInstruction.trim();
+    if (message.length < 8 || !libtvSessionId || libtvSending) return;
+    setLibtvSending(true);
+    setError("");
+    try {
+      const response = await fetch("/api/libtv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "message", accessKey: libtvAccessKey.trim(), sessionId: libtvSessionId, message }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      setLibtvInstruction("");
+      setLibtvMessages((items) => [...items, { id: uid(), seq: (items.at(-1)?.seq || 0) + 1, role: "user", content: message }]);
+      recordActivity("director", `用户向 LibTV 画布追加指令：${message.slice(0, 60)}`);
+      window.setTimeout(() => { void refreshLibTvCanvas(); }, 1800);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "发送 LibTV 指令失败");
+    } finally {
+      setLibtvSending(false);
+    }
+  }
+
+  function toggleLibTvPolling() {
+    const next = !libtvPauseRef.current;
+    libtvPauseRef.current = next;
+    setLibtvPollingPaused(next);
+  }
+
+  async function createLibTvCanvas() {
+    if (libtvAccessKey.trim().length < 8 || libtvSending) return setError("请先填写 LibTV Access Key");
+    setLibtvSending(true);
+    try {
+      const response = await fetch("/api/libtv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "change-project", accessKey: libtvAccessKey.trim() }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const project = await response.json() as { projectUrl?: string };
+      setLibtvProjectUrl(project.projectUrl || "");
+      setLibtvSessionId("");
+      setLibtvMessages([]);
+      setLibtvResults([]);
+      setLibtvCanvasOpen(true);
+      setStatusText("已创建新的 LibTV 空白画布，可开始一键制作");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "创建 LibTV 画布失败");
+    } finally {
+      setLibtvSending(false);
     }
   }
 
@@ -1759,6 +1929,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setProgress(100);
       setPhase("ready");
       setStatusText(buffers.some(Boolean) ? `AI 漫剧已生成，动态镜头、字幕、配音${soundtrackBuffer ? "和配乐" : ""}均已写入` : "免费流程样片已生成，可直接播放或下载");
+      await syncScenesToEditor(movieScenes, url, "studio");
       return true;
     } catch (reason) {
       setPhase("error");
@@ -1831,10 +2002,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             {AGENT_ROLES.map((role) => {
               const config = agentConfigs[role.id];
               const presets = AGENT_PRESETS[role.id];
+              const roleCustomModels = customModels.filter((item) => item.role === role.id);
               return <article key={role.id} className={`agent-card ${config.adapter}`}>
                 <div className="agent-card-top"><i>{role.icon}</i><div><b>{role.title}</b><span>{role.duty}</span></div><em>{config.adapter === "horde" || config.adapter === "browser" ? "免费" : config.adapter === "webhook" ? "自定义" : config.adapter === "seedance" ? "官方" : "已托管"}</em></div>
-                <select aria-label={`选择${role.title}`} value={config.preset} onChange={(event) => selectAgentPreset(role.id, event.target.value)}>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}</select>
-                <div className="agent-model"><span>当前模型</span><b>{config.model}</b><small>{presets.find((item) => item.id === config.preset)?.note}</small></div>
+                <select aria-label={`选择${role.title}`} value={config.preset} onChange={(event) => selectAgentPreset(role.id, event.target.value)}><optgroup label="漫镜预设">{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}</optgroup>{roleCustomModels.length > 0 && <optgroup label="我的模型">{roleCustomModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.model}</option>)}</optgroup>}</select>
+                <div className="agent-model"><span>当前模型</span><b>{config.model}</b><small>{presets.find((item) => item.id === config.preset)?.note || roleCustomModels.find((item) => item.id === config.preset)?.note}</small></div>
                 <div className="recommend-row"><span>推荐</span>{role.recommends.map((item) => <i key={item}>{item}</i>)}</div>
                 <button className="agent-config-button" onClick={() => setConfiguringRole(configuringRole === role.id ? null : role.id)}>{configuringRole === role.id ? "收起设置" : "配置模型与接口"}</button>
                 {configuringRole === role.id && <div className="agent-config-panel">
@@ -1843,6 +2015,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
                   {(config.adapter === "pollinations" || config.adapter === "webhook" || config.adapter === "seedance") && <label>{config.adapter === "seedance" ? "火山方舟 API Key（必填）" : "岗位专用 API 密钥（可选）"}<input type="password" value={config.apiKey} onChange={(event) => updateAgentConfig(role.id, { apiKey: event.target.value.trim() })} placeholder={config.adapter === "pollinations" ? "留空则使用下方统一密钥" : config.adapter === "seedance" ? "火山方舟控制台生成的 API Key" : "Bearer token，可留空"} /></label>}
                   {config.adapter === "webhook" && <small>漫镜会 POST role、model、task 和输入内容；接口返回 text，或可下载的 url。需允许浏览器跨域访问。</small>}
                   {config.adapter === "seedance" && <small>通过漫镜的安全代理提交异步任务并轮询结果；密钥不写入网站服务器，只保存在当前浏览器。</small>}
+                  <a className="add-custom-model-link" href={`/models#custom`}>＋ 为{role.title}添加自定义模型</a>
                 </div>}
               </article>;
             })}
@@ -1858,26 +2031,37 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         </div>
 
         <div className="cloud-engine-hub">
-          <div className="cloud-engine-heading"><div><span>PRODUCTION ENGINES</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；即梦 Seedance 负责把单个分镜变成真正会动的视频。</p></div><em>密钥仅存当前浏览器</em></div>
+          <div className="cloud-engine-heading"><div><span>PRODUCTION ENGINES</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；Seedance 方舟 API 负责把单个分镜变成真正会动的视频。</p></div><em>密钥仅存当前浏览器</em></div>
           <div className="cloud-engine-grid">
-            <article className="cloud-engine-card libtv-card">
+            <article className={`cloud-engine-card libtv-card ${libtvCanvasOpen && (libtvSessionId || libtvProjectUrl) ? "canvas-open" : ""}`}>
               <div className="engine-title"><i>剧</i><div><b>LibTV 一键漫剧</b><span>剧本 → 角色 → 分镜 → 视频 → 配音 → 成片</span></div><em>全流程</em></div>
               <p>直接调用 LibTV 官方 Agent 接口创建完整项目。生成过程可在漫镜查看，也可打开 LibTV 无限画布继续精修。</p>
               <label>LibTV Access Key<input type="password" value={libtvAccessKey} onChange={(event) => setLibtvAccessKey(event.target.value.trim())} placeholder="填写 LIBTV_ACCESS_KEY" /></label>
-              <div className="engine-actions"><button onClick={() => void generateWithLibTv()} disabled={busy || story.trim().length < 8}>{libtvRunning ? "LibTV 正在制作…" : "一键生成完整 AI 漫剧"}</button>{libtvProjectUrl && <a href={libtvProjectUrl} target="_blank" rel="noreferrer">打开项目画布 ↗</a>}<a href="https://github.com/libtv-labs/libtv-skills" target="_blank" rel="noreferrer">官方接口说明 ↗</a></div>
+              <div className="engine-actions"><button onClick={() => void generateWithLibTv()} disabled={busy || story.trim().length < 8}>{libtvRunning ? "LibTV 正在制作…" : "一键生成完整 AI 漫剧"}</button><button className="secondary" onClick={() => void createLibTvCanvas()} disabled={libtvSending || libtvRunning}>新建空白画布</button>{(libtvSessionId || libtvProjectUrl) && <button className="secondary" onClick={() => setLibtvCanvasOpen((value) => !value)}>{libtvCanvasOpen ? "收起制片画布" : "查看制片画布"}</button>}<a href="https://github.com/libtv-labs/libtv-skills" target="_blank" rel="noreferrer">官方 OpenAPI ↗</a></div>
               {libtvSessionId && <div className="engine-task"><b>云端任务已建立</b><span>{libtvSessionId}</span></div>}
               {!!libtvResults.length && <div className="engine-results">{libtvResults.slice(0, 8).map((item, index) => {
                 const source = `/api/libtv?url=${encodeURIComponent(item.url)}`;
                 return <a key={`${item.url}-${index}`} href={source} download={`libtv-${index + 1}.${item.kind === "video" ? "mp4" : "png"}`} title="下载素材">{item.kind === "video" ? <video src={source} muted playsInline /> : <img src={source} alt={`LibTV 生成素材 ${index + 1}`} />}<span>{item.kind === "video" ? "视频" : "图片"} {index + 1}</span></a>;
               })}</div>}
+              {libtvCanvasOpen && (libtvSessionId || libtvProjectUrl) && <div className="libtv-canvas">
+                <div className="libtv-canvas-head"><div><span>LIVE PRODUCTION CANVAS</span><b>LibTV 制片画布</b><small>由官方会话消息与素材结果实时构建</small></div><div>{libtvRunning && <button onClick={toggleLibTvPolling}>{libtvPollingPaused ? "继续自动刷新" : "暂停自动刷新"}</button>}<button onClick={() => void refreshLibTvCanvas()} disabled={!libtvSessionId || libtvSending}>{libtvSending ? "刷新中…" : "立即刷新"}</button>{libtvProjectUrl && <a href={libtvProjectUrl} target="_blank" rel="noreferrer">进入官方无限画布 ↗</a>}</div></div>
+                <div className="libtv-node-flow">
+                  <article className={libtvMessages.length ? "done" : "running"}><i>1</i><b>剧本与导演</b><span>{libtvMessages.length ? "会话已建立" : "等待指令"}</span></article><em>→</em>
+                  <article className={libtvResults.some((item) => item.kind === "image") ? "done" : libtvMessages.length ? "running" : ""}><i>2</i><b>角色与分镜</b><span>{libtvResults.filter((item) => item.kind === "image").length} 张画面</span></article><em>→</em>
+                  <article className={libtvResults.some((item) => item.kind === "video") ? "done" : libtvResults.length ? "running" : ""}><i>3</i><b>动态与声音</b><span>{libtvResults.filter((item) => item.kind === "video").length} 段视频</span></article><em>→</em>
+                  <article className={libtvResults.some((item) => item.kind === "video") ? "done" : ""}><i>4</i><b>剪辑与交付</b><span>{libtvResults.some((item) => item.kind === "video") ? "可导入剪辑台" : "等待上游"}</span></article>
+                </div>
+                <div className="libtv-canvas-grid"><div className="libtv-message-stream"><div><b>AI 工作过程</b><span>{libtvMessages.length} 条消息</span></div>{libtvMessages.length ? libtvMessages.slice(-20).reverse().map((message) => <p key={message.id} className={message.role}><i>{message.role === "user" ? "你" : "AI"}</i><span>{message.content}</span><small>#{message.seq}</small></p>) : <p className="empty"><i>AI</i><span>任务开始后，剧本、画面、视频和交付消息会显示在这里。</span></p>}</div><div className="libtv-command-panel"><b>继续指挥 LibTV</b><p>可在同一会话追加修改要求，例如重做某个镜头、换画风或调整节奏。</p><textarea value={libtvInstruction} onChange={(event) => setLibtvInstruction(event.target.value)} placeholder="例如：把第 3 个镜头改成近景，让角色有明显的转身和开口动作，并重新剪进成片。" /><button onClick={() => void sendLibTvInstruction()} disabled={libtvSending || libtvInstruction.trim().length < 8 || !libtvSessionId}>{libtvSending ? "正在发送…" : "发送到当前画布"}</button></div></div>
+              </div>}
             </article>
             <article className="cloud-engine-card seedance-card">
-              <div className="engine-title"><i>梦</i><div><b>即梦 · Seedance</b><span>官方文生视频 / 图生视频异步接口</span></div><em>镜头级</em></div>
+              <div className="engine-title"><i>舞</i><div><b>Seedance · 火山方舟</b><span>官方文生视频 / 图生视频异步接口</span></div><em>镜头级</em></div>
               <p>应用到“视频 AI”岗位后，漫镜会把每张关键帧、人物动作和运镜提示逐镜提交给火山方舟。</p>
               <label>火山方舟 API Key<input type="password" value={seedanceApiKey} onChange={(event) => setSeedanceApiKey(event.target.value.trim())} placeholder="填写 ARK_API_KEY" /></label>
               <label>模型 ID 或 Endpoint ID<input value={seedanceModel} onChange={(event) => setSeedanceModel(event.target.value.trim())} placeholder="doubao-seedance-… 或 ep-…" /></label>
-              <div className="engine-actions"><button onClick={applySeedanceEngine}>{agentConfigs.video.adapter === "seedance" ? "更新即梦视频岗位" : "应用到视频 AI 岗位"}</button><a href="https://www.volcengine.com/docs/82379/1520757" target="_blank" rel="noreferrer">官方 API 文档 ↗</a></div>
+              <div className="engine-actions"><button onClick={applySeedanceEngine}>{agentConfigs.video.adapter === "seedance" ? "更新 Seedance 视频岗位" : "应用到视频 AI 岗位"}</button><a href="https://www.volcengine.com/docs/82379/1520758" target="_blank" rel="noreferrer">方舟官方 API ↗</a><a href="https://www.volcengine.com/docs/85621/1756900" target="_blank" rel="noreferrer">即梦视觉 API ↗</a></div>
               <div className={`engine-active ${agentConfigs.video.adapter === "seedance" ? "on" : ""}`}><i />{agentConfigs.video.adapter === "seedance" ? `已启用：${agentConfigs.video.model}` : "尚未应用，当前视频岗位保持不变"}</div>
+              <p className="api-identity-note"><b>认证别混用：</b>Seedance 方舟接口填写 ARK_API_KEY；即梦视觉 API 使用 VOLC_ACCESS_KEY + VOLC_SECRET_KEY，需要签名调用，可在“模型与 Key”里添加为自定义视频模型。</p>
             </article>
           </div>
           <p className="cloud-engine-note"><b>真实能力边界：</b>LibTV 和即梦的接口代码可以接入，但云端生成需要平台有效额度；漫镜不会伪装成免费算力，也不会把访问密钥写进部署配置。</p>
@@ -1933,6 +2117,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             <button onClick={downloadStoryboard}><i>镜</i><span><b>下载分镜</b><small>JSON · 可交给其他模型继续制作</small></span></button>
             <button onClick={downloadProject}><i>工</i><span><b>保存工程</b><small>JSON · 保留剪辑参数，稍后再改</small></span></button>
             <button onClick={downloadFilm} disabled={!exportUrl}><i>片</i><span><b>下载成片</b><small>{exportUrl ? "视频文件已就绪" : "重新合成后可下载"}</small></span></button>
+            <button className="send-to-editor" onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}><i>剪</i><span><b>{editorSyncState === "saving" ? "正在整理素材" : "进入专业剪辑台"}</b><small>{editorSyncState === "ready" ? "AI 工程已同步，可继续精剪" : "自动带入视频、图片、配音和字幕"}</small></span></button>
           </div>
           <div className="media-bin">{scenes.map((scene, index) => <article key={scene.id} className={selected === index ? "selected" : ""} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}>
             <div className="media-bin-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{String(index + 1).padStart(2, "0")}</span>}</div>
@@ -1947,7 +2132,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={!generatedVoiceEnabled || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline style={{ filter: previewFilter }} /> : current?.imageUrl ? <img className={`motion-preview motion-${current.motion || "push"}`} key={current.imageUrl} src={current.imageUrl} alt={current.visual} style={{ filter: previewFilter, animationDuration: `${Math.max(3, current.duration)}s` }} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "视频 AI 正在生成角色动态表演" : current?.status === "painting" ? "生图 AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
               {showFilm && exportUrl ? <div className="film-corner">AI 漫剧成片</div> : current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div>{current.subtitleEnabled !== false && <div className={`subtitle ${current.subtitlePosition || "bottom"}`} style={{ color: subtitleColor, fontSize: `${14 * subtitleScale}px` }}>“{current.dialogue}”</div>}</>}
             </div>
-            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={downloadFilm}>下载成片</button></div> : <>
+            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={() => void openInProfessionalEditor()}>进入专业剪辑台</button><button onClick={downloadFilm}>下载成片</button></div> : <>
               <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
               <div className="export-panel"><div><b>{nativeVideoEnabled ? "重新合成 AI 漫剧" : "重新生成流程样片"}</b><span>{nativeVideoEnabled && generatedVoiceEnabled && voiceEnabled ? "动态表演、字幕、分角色配音与配乐将写入视频" : "关键帧、运镜、转场和字幕将写入样片"}</span></div><button onClick={() => void exportFilm()} disabled={phase === "exporting"}>{phase === "exporting" ? `正在录制 ${exportProgress}%` : nativeVideoEnabled ? "生成 AI 漫剧成片" : "生成低动态样片"}</button></div>
               {exportUrl && <div className="export-result"><video src={exportUrl} controls playsInline /><div><b>已有漫剧成片</b><span>可以返回成片模式播放，或重新剪辑。</span><button onClick={() => setShowFilm(true)}>播放成片</button><button onClick={downloadFilm}>下载成片</button></div></div>}

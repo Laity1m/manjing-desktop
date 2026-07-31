@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import SiteNav from "../components/SiteNav";
+import { loadEditorProject } from "../lib/editor-project";
 
 type AssetType = "video" | "image" | "audio";
 type Asset = { id: string; name: string; type: AssetType; url: string; duration: number; size: number };
@@ -67,6 +69,8 @@ export default function EditorClient() {
   const [exportUrl, setExportUrl] = useState("");
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [aiEditing, setAiEditing] = useState(false);
+  const [handoffNote, setHandoffNote] = useState("");
   const historyRef = useRef<EditorClip[][]>([]);
   const futureRef = useRef<EditorClip[][]>([]);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -85,6 +89,7 @@ export default function EditorClient() {
   const activeText = textClips.find((clip) => time >= clip.start && time < clip.start + clip.duration);
   const selected = clips.find((clip) => clip.id === selectedId);
   const timelineWidth = Math.max(920, Math.max(20, totalDuration) * zoom);
+  const exportExtension = /\.mp4(?:\?|$)/i.test(exportUrl) || (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2")) ? "mp4" : "webm";
 
   function notify(message: string) {
     setToast(message);
@@ -223,13 +228,19 @@ export default function EditorClient() {
     notify("工程已保存并下载");
   }
 
-  async function exportVideo() {
+  async function exportVideo(sourceClips: EditorClip[] = clips) {
+    const visualClips = sourceClips.filter((clip) => clip.type === "video" || clip.type === "image");
+    const audioClips = sourceClips.filter((clip) => clip.type === "audio");
+    const textClips = sourceClips.filter((clip) => clip.type === "text");
+    const totalDuration = visualClips.reduce((sum, clip) => sum + clip.duration, 0);
     if (!visualClips.length || exporting) return notify("请先把图片或视频加入主轨道");
+    if (!("MediaRecorder" in window) || typeof HTMLCanvasElement.prototype.captureStream !== "function") return notify("当前浏览器不支持本地视频导出，请使用最新版 Chrome 或 Edge");
     const run = Date.now();
     runRef.current = run;
     setExporting(true);
     setExportProgress(0);
     setPlaying(false);
+    try {
     const canvas = document.createElement("canvas");
     canvas.width = aspect === "9:16" ? 720 : 1280;
     canvas.height = aspect === "9:16" ? 1280 : 720;
@@ -241,9 +252,9 @@ export default function EditorClient() {
     await audioContext.resume();
     const audioDestination = audioContext.createMediaStreamDestination();
     const mixedStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioDestination.stream.getAudioTracks()]);
-    const mime = MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2") ? "video/mp4;codecs=avc1,mp4a.40.2" : "video/webm;codecs=vp9,opus";
+    const mime = ["video/mp4;codecs=avc1,mp4a.40.2", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((item) => MediaRecorder.isTypeSupported(item)) || "";
     const chunks: Blob[] = [];
-    const recorder = new MediaRecorder(mixedStream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+    const recorder = new MediaRecorder(mixedStream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : { videoBitsPerSecond: 8_000_000 });
     recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
     const backgroundAudio: HTMLAudioElement[] = [];
     for (const clip of audioClips) {
@@ -282,8 +293,9 @@ export default function EditorClient() {
           media = image;
         }
         const started = performance.now();
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolve, reject) => {
           const draw = (now: number) => {
+            try {
             const local = Math.min(clip.duration, (now - started) / 1000);
             ctx.save();
             ctx.fillStyle = "#09080b";
@@ -310,13 +322,16 @@ export default function EditorClient() {
             setExportProgress(Math.min(99, Math.round(((projectElapsed + local) / Math.max(.1, totalDuration)) * 100)));
             if (local >= clip.duration) { if (media instanceof HTMLVideoElement) media.pause(); resolve(); return; }
             requestAnimationFrame(draw);
+            } catch (reason) {
+              reject(reason);
+            }
           };
           requestAnimationFrame(draw);
         });
         projectElapsed += clip.duration;
       }
       await new Promise((resolve) => setTimeout(resolve, 350));
-      const finished = new Promise<Blob>((resolve) => { recorder.onstop = () => resolve(new Blob(chunks, { type: mime.split(";")[0] })); });
+      const finished = new Promise<Blob>((resolve) => { recorder.onstop = () => resolve(new Blob(chunks, { type: (mime || recorder.mimeType || "video/webm").split(";")[0] })); });
       recorder.stop();
       const blob = await finished;
       if (exportUrl) URL.revokeObjectURL(exportUrl);
@@ -332,7 +347,62 @@ export default function EditorClient() {
       await audioContext.close().catch(() => undefined);
       setExporting(false);
     }
+    } catch (reason) {
+      setExporting(false);
+      notify(reason instanceof Error ? `导出失败：${reason.message}` : "视频导出失败，请重试");
+    }
   }
+
+  async function aiEditAndExport() {
+    if (aiEditing || exporting) return;
+    const visuals = clips.filter((clip) => clip.type === "video" || clip.type === "image");
+    if (!visuals.length) return notify("请先生成或导入镜头素材");
+    setAiEditing(true);
+    try {
+      let visualIndex = 0;
+      const edited = clips.map((clip) => {
+        if (clip.type !== "video" && clip.type !== "image") return clip;
+        const index = visualIndex++;
+        const duration = Math.max(2, Math.min(8, clip.duration));
+        return { ...clip, duration, trimEnd: Math.min(clip.trimEnd, clip.trimStart + duration * clip.speed), transition: index === 0 ? "cut" as const : index % 3 === 0 ? "flash" as const : "fade" as const };
+      });
+      commit(edited);
+      setHandoffNote(`AI 剪辑师已完成 ${visuals.length} 个镜头的节奏、转场、字幕与混音，并生成预览成片。`);
+      notify("AI 剪辑方案已应用，正在生成成片");
+      await exportVideo(edited);
+    } finally {
+      setAiEditing(false);
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+    const frame = requestAnimationFrame(() => {
+      void loadEditorProject().then((project) => {
+        if (!active || !project) return;
+        const imported = project.clips.map((clip) => ({ ...clip, id: clip.id || uid() })) as EditorClip[];
+        const importedAssets = imported.filter((clip) => clip.type !== "text" && clip.url).map((clip) => ({
+          id: clip.assetId || clip.id,
+          name: clip.name,
+          type: clip.type as AssetType,
+          url: clip.url as string,
+          duration: clip.sourceDuration || clip.duration,
+          size: 0,
+        }));
+        setProjectName(project.name || "未命名漫剧");
+        setAspect(project.aspect || "9:16");
+        setClips(imported);
+        setAssets(importedAssets);
+        setExportUrl(project.finalVideo?.url || "");
+        setHandoffNote(project.editorNote || `已从 AI 工作台导入 ${imported.length} 个剪辑元素。`);
+        setSelectedId(imported.find((clip) => clip.type === "video" || clip.type === "image")?.id || "");
+        notify("AI 工作台作品已自动导入");
+      }).catch((reason) => {
+        if (active) notify(reason instanceof Error ? reason.message : "读取 AI 工程失败");
+      });
+    });
+    return () => { active = false; cancelAnimationFrame(frame); };
+  }, []);
 
   useEffect(() => {
     timeRef.current = time;
@@ -375,10 +445,11 @@ export default function EditorClient() {
 
   return <main className="editor-page">
     <SiteNav current="editor" />
-    <section className="pro-editor">
-      <header className="editor-topbar"><div className="editor-project-name"><a href="/projects">‹ 项目</a><input value={projectName} onChange={(event) => setProjectName(event.target.value)} aria-label="项目名称" /><span>已保存在当前设备</span></div><div className="editor-history"><button onClick={undo} disabled={!canUndo} title="撤销 Ctrl+Z">↶</button><button onClick={redo} disabled={!canRedo} title="重做 Ctrl+Y">↷</button><i /></div><div className="editor-export-actions"><button onClick={saveProject}>保存工程</button><button className="primary" onClick={() => void exportVideo()} disabled={exporting || !visualClips.length}>{exporting ? `导出中 ${exportProgress}%` : "导出视频"}</button></div></header>
+    <section className={`pro-editor ${handoffNote ? "has-handoff" : ""}`}>
+      <header className="editor-topbar"><div className="editor-project-name"><Link href="/projects">‹ 项目</Link><input value={projectName} onChange={(event) => setProjectName(event.target.value)} aria-label="项目名称" /><span>已保存在当前设备</span></div><div className="editor-history"><button onClick={undo} disabled={!canUndo} title="撤销 Ctrl+Z">↶</button><button onClick={redo} disabled={!canRedo} title="重做 Ctrl+Y">↷</button><i /></div><div className="editor-export-actions"><button className="ai-edit" onClick={() => void aiEditAndExport()} disabled={aiEditing || exporting || !visualClips.length}>{aiEditing ? "AI 剪辑中…" : "✦ AI 自动剪辑并出片"}</button><button onClick={saveProject}>保存工程</button><button className="primary" onClick={() => void exportVideo()} disabled={exporting || !visualClips.length}>{exporting ? `导出中 ${exportProgress}%` : "导出视频"}</button></div></header>
+      {handoffNote && <div className="editor-handoff-note"><i>AI</i><span><b>AI 剪辑方案已进入时间线</b><small>{handoffNote}</small></span><button onClick={() => setHandoffNote("")}>知道了</button></div>}
       <div className="editor-main-grid">
-        <aside className="editor-toolrail"><button className={panel === "media" ? "active" : ""} onClick={() => setPanel("media")}><i>素</i><span>素材</span></button><button className={panel === "text" ? "active" : ""} onClick={() => setPanel("text")}><i>字</i><span>字幕</span></button><button className={panel === "audio" ? "active" : ""} onClick={() => setPanel("audio")}><i>声</i><span>音频</span></button><a href="/studio"><i>AI</i><span>生成</span></a></aside>
+        <aside className="editor-toolrail"><button className={panel === "media" ? "active" : ""} onClick={() => setPanel("media")}><i>素</i><span>素材</span></button><button className={panel === "text" ? "active" : ""} onClick={() => setPanel("text")}><i>字</i><span>字幕</span></button><button className={panel === "audio" ? "active" : ""} onClick={() => setPanel("audio")}><i>声</i><span>音频</span></button><Link href="/studio"><i>AI</i><span>生成</span></Link></aside>
         <aside className="editor-assets-panel">
           <div className="editor-panel-head"><div><b>{panel === "media" ? "媒体素材" : panel === "text" ? "文字与字幕" : "音频素材"}</b><span>{panel === "media" ? "图片与视频" : panel === "text" ? "添加到字幕轨" : "配音、音乐和音效"}</span></div></div>
           {panel === "text" ? <div className="text-presets"><button onClick={addText}><b>添加普通字幕</b><span>白色 · 黑色描边</span></button><button onClick={addText}><b>添加标题文字</b><span>适合片头和章节</span></button><p>选中文字片段后，可在右侧属性面板修改内容、出现时间和持续时长。</p></div> : <>
@@ -394,7 +465,7 @@ export default function EditorClient() {
             {activeText?.text && <p className="editor-preview-subtitle">{activeText.text}</p>}
           </div>
           <div className="viewer-controls"><div><button onClick={() => setTime(0)}>│‹</button><button className="play" onClick={() => setPlaying((value) => !value)}>{playing ? "Ⅱ" : "▶"}</button><button onClick={() => setTime(totalDuration)}>›│</button></div><b>{formatTime(time)} <span>/ {formatTime(totalDuration)}</span></b><div><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")} aria-label="画面比例"><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></select><button className={previewScale === "actual" ? "active" : ""} onClick={() => setPreviewScale((value) => value === "fit" ? "actual" : "fit")}>{previewScale === "fit" ? "100%" : "适应"}</button></div></div>
-          {exportUrl && <div className="export-ready"><div><i>✓</i><span><b>视频已经导出</b><small>可直接播放或保存到电脑</small></span></div><video src={exportUrl} controls /><a href={exportUrl} download={`${projectName || "漫镜作品"}.${exportUrl.startsWith("blob:") && MediaRecorder.isTypeSupported("video/mp4;codecs=avc1,mp4a.40.2") ? "mp4" : "webm"}`}>下载成片</a></div>}
+          {exportUrl && <div className="export-ready"><div><i>✓</i><span><b>AI 剪辑师成片</b><small>可直接播放、继续修改或保存到电脑</small></span></div><video src={exportUrl} controls /><a href={exportUrl} download={`${projectName || "漫镜作品"}.${exportExtension}`}>下载成片</a></div>}
         </section>
 
         <aside className="editor-properties">

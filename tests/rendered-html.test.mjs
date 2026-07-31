@@ -117,10 +117,17 @@ test("connects official LibTV orchestration and Volcengine Seedance jobs", async
   assert.match(page, /generateWithLibTv/);
   assert.match(page, /applySeedanceEngine/);
   assert.match(page, /LibTV 正在建立完整漫剧项目/);
+  assert.match(page, /LibTV 制片画布/);
+  assert.match(page, /sendLibTvInstruction/);
+  assert.match(page, /syncScenesToEditor/);
   assert.match(libtv, /https:\/\/im\.liblib\.tv/);
   assert.match(libtv, /Authorization: `Bearer \$\{accessKey\}`/);
+  assert.match(libtv, /openapi\/session\/change-project/);
+  assert.match(libtv, /body\.action === "message"/);
+  assert.match(libtv, /events/);
   assert.match(seedance, /contents\/generations\/tasks/);
   assert.match(seedance, /return_last_frame: true/);
+  assert.match(seedance, /role: "first_frame"/);
 });
 
 test("ships an interactive browser video editor instead of a decorative shell", async () => {
@@ -132,6 +139,9 @@ test("ships an interactive browser video editor instead of a decorative shell", 
   assert.match(editor, /function redo/);
   assert.match(editor, /canvas\.captureStream\(30\)/);
   assert.match(editor, /new MediaRecorder/);
+  assert.match(editor, /aiEditAndExport/);
+  assert.match(editor, /loadEditorProject/);
+  assert.match(editor, /当前浏览器不支持本地视频导出/);
   assert.match(editor, /setSnapEnabled/);
   assert.match(editor, /setPreviewScale/);
 });
@@ -142,9 +152,23 @@ test("documents provider keys and keeps project search controls interactive", as
   assert.match(keys, /LIBTV_ACCESS_KEY/);
   assert.match(keys, /ARK_API_KEY/);
   assert.match(keys, /POLLINATIONS_KEY/);
+  assert.match(keys, /VOLC_ACCESS_KEY \+ VOLC_SECRET_KEY/);
   assert.match(keys, /复制名称/);
+  assert.match(keys, /addCustomModel/);
+  assert.match(keys, /保存到我的模型库/);
   assert.match(projects, /setFilter\("working"\)/);
   assert.match(projects, /setQuery\(event\.target\.value\)/);
+});
+
+test("persists generated media across the studio and editor routes", async () => {
+  const handoff = await readFile(new URL("../app/lib/editor-project.ts", import.meta.url), "utf8");
+  const models = await readFile(new URL("../app/lib/custom-models.ts", import.meta.url), "utf8");
+  assert.match(handoff, /indexedDB\.open/);
+  assert.match(handoff, /manjing-editor-handoff/);
+  assert.match(handoff, /persistEditorProject/);
+  assert.match(handoff, /loadEditorProject/);
+  assert.match(models, /manjing-custom-models/);
+  assert.match(models, /saveCustomModels/);
 });
 
 test("cloud engine proxies reject missing credentials and untrusted media hosts", async () => {

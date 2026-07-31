@@ -7,9 +7,9 @@ function json(data: unknown, status = 200) {
 }
 
 function safeError(value: unknown) {
-  if (!value || typeof value !== "object") return "即梦 Seedance 暂时不可用";
+  if (!value || typeof value !== "object") return "Seedance 方舟接口暂时不可用";
   const data = value as { error?: { message?: unknown }; message?: unknown };
-  return String(data.error?.message || data.message || "即梦 Seedance 暂时不可用").slice(0, 300);
+  return String(data.error?.message || data.message || "Seedance 方舟接口暂时不可用").slice(0, 300);
 }
 
 export async function POST(request: Request) {
@@ -29,7 +29,7 @@ export async function POST(request: Request) {
       const text = `${prompt} --ratio ${ratio} --resolution 720p --dur ${duration} --watermark false`;
       const content: Array<Record<string, unknown>> = [{ type: "text", text }];
       const imageUrl = String(body.imageUrl || "").trim();
-      if (/^https:\/\//i.test(imageUrl)) content.push({ type: "image_url", image_url: { url: imageUrl } });
+      if (/^https:\/\//i.test(imageUrl)) content.push({ type: "image_url", image_url: { url: imageUrl }, role: "first_frame" });
       const upstream = await fetch(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, return_last_frame: true }) });
       const payload = await upstream.json() as { id?: string; error?: { message?: unknown }; message?: unknown };
       if (!upstream.ok || !payload.id) return json({ error: safeError(payload) }, upstream.status || 502);
