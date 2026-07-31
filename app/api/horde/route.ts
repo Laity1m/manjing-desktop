@@ -51,14 +51,14 @@ export async function POST(request: Request) {
 
     if (action === "story") {
       if (story.length < 8) return json({ error: "故事至少需要 8 个字" }, 400);
-      const count = Math.max(3, Math.min(6, Number(body.count) || 4));
+      const count = Math.max(3, Math.min(4, Number(body.count) || 3));
       const style = String(body.style || "国漫电影感").slice(0, 40);
       const prompt = [
         "You are a professional Chinese motion-comic storyboard writer.",
         `Turn the following story into exactly ${count} connected scenes in the visual style: ${style}.`,
-        "Return ONLY one valid JSON object. Every string value must be Simplified Chinese.",
-        "Do not repeat the user's wording. Establish consistent characters, dramatic conflict, concrete acting, camera language and a closing hook.",
-        'Schema: {"title":"作品标题","music":"配乐气质","characters":[{"name":"姓名","role":"身份","appearance":"固定五官发型服装","voice":"nova"}],"scenes":[{"title":"镜头标题","characters":["姓名"],"shot":"景别","visual":"场景构图灯光","action":"动作表情互动","camera":"运镜","speaker":"姓名","emotion":"情绪","dialogue":"台词","sfx":"音效","duration":6}]}',
+        "Return ONLY one minified JSON object on a single line. Use Simplified Chinese. No markdown and no explanation.",
+        "Keep every value concise. Use at most 2 characters. Establish fixed appearances, dramatic conflict, concrete acting and a closing hook.",
+        'Compact schema: {"t":"标题","m":"配乐","c":[{"n":"姓名","r":"身份","a":"外观","v":"nova"}],"s":[{"t":"镜头","c":["姓名"],"h":"景别","v":"场景","a":"动作","k":"运镜","p":"说话者","e":"情绪","d":"台词","x":"音效","u":6}]}',
         `故事：${story}`,
       ].join("\n");
       const selectedModel = await chooseChineseTextModel();

@@ -72,47 +72,86 @@ async function responseError(response: Response) {
   }
 }
 
+function closeTruncatedJson(source: string) {
+  const start = source.indexOf("{");
+  if (start < 0) return "";
+  let repaired = source.slice(start).trim();
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const character of repaired) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{" || character === "[") stack.push(character);
+    else if (character === "}" && stack.at(-1) === "{") stack.pop();
+    else if (character === "]" && stack.at(-1) === "[") stack.pop();
+  }
+  if (inString) {
+    if (escaped) repaired = repaired.slice(0, -1);
+    repaired += '"';
+  }
+  repaired = repaired.trimEnd();
+  if (repaired.endsWith(":")) repaired += "null";
+  else if (repaired.endsWith(",")) repaired = repaired.slice(0, -1);
+  while (stack.length) repaired += stack.pop() === "{" ? "}" : "]";
+  return repaired;
+}
+
 function parseStoryboard(raw: string, targetSeconds: number): { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] } {
   const unfenced = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = unfenced.indexOf("{");
   const end = unfenced.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("AI 返回的剧本格式不完整，请重试");
-  let parsed: { title?: unknown; characters?: unknown; music?: unknown; scenes?: unknown };
+  if (start < 0) throw new Error("AI 没有返回可识别的剧本，请重试");
+  let parsed: Record<string, unknown> | null = null;
   try {
-    parsed = JSON.parse(unfenced.slice(start, end + 1));
+    if (end > start) parsed = JSON.parse(unfenced.slice(start, end + 1)) as Record<string, unknown>;
   } catch {
-    throw new Error("AI 返回的剧本格式不正确，请重试");
+    parsed = null;
   }
-  if (!Array.isArray(parsed.scenes) || parsed.scenes.length < 2) throw new Error("AI 没有生成足够的分镜，请重试");
-  const picked = parsed.scenes.slice(0, 6) as Array<Record<string, unknown>>;
+  if (!parsed) {
+    try {
+      parsed = JSON.parse(closeTruncatedJson(unfenced)) as Record<string, unknown>;
+    } catch {
+      throw new Error("免费模型的剧本输出被截断，请再次生成");
+    }
+  }
+  const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
+  if (sceneSource.length < 2) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
+  const picked = sceneSource.slice(0, 6) as Array<Record<string, unknown>>;
   const seconds = Math.max(4, Math.round(targetSeconds / picked.length));
-  const rawCharacters = Array.isArray(parsed.characters) ? parsed.characters.slice(0, 4) as Array<Record<string, unknown>> : [];
+  const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
+  const rawCharacters = characterSource.slice(0, 4) as Array<Record<string, unknown>>;
   const characters: CharacterAsset[] = rawCharacters.map((item, index) => ({
     id: uid(),
-    name: String(item.name || `角色 ${index + 1}`).slice(0, 16),
-    role: String(item.role || (index === 0 ? "主角" : "重要角色")).slice(0, 24),
-    appearance: String(item.appearance || "具有鲜明辨识度的年轻角色，固定发型、五官与服装").slice(0, 260),
-    voice: ["nova", "coral", "onyx", "echo"].includes(String(item.voice)) ? String(item.voice) : VOICES[index % VOICES.length].value,
+    name: String(item.name || item.n || `角色 ${index + 1}`).slice(0, 16),
+    role: String(item.role || item.r || (index === 0 ? "主角" : "重要角色")).slice(0, 24),
+    appearance: String(item.appearance || item.a || "具有鲜明辨识度的年轻角色，固定发型、五官与服装").slice(0, 260),
+    voice: ["nova", "coral", "onyx", "echo"].includes(String(item.voice || item.v)) ? String(item.voice || item.v) : VOICES[index % VOICES.length].value,
     status: "queued" as const,
   }));
   if (!characters.length) characters.push({ id: uid(), name: "主角", role: "故事主角", appearance: "与剧情匹配、具有鲜明辨识度的年轻角色，固定五官、发型和服装", voice: "nova", status: "queued" });
   return {
-    title: String(parsed.title || "未命名漫剧").slice(0, 32),
+    title: String(parsed.title || parsed.t || "未命名漫剧").slice(0, 32),
     characters,
-    music: String(parsed.music || "cinematic emotional Chinese animation soundtrack, instrumental, no vocals").slice(0, 220),
+    music: String(parsed.music || parsed.m || "cinematic emotional Chinese animation soundtrack, instrumental, no vocals").slice(0, 220),
     scenes: picked.map((item, index) => ({
       id: uid(),
-      title: String(item.title || `镜头 ${index + 1}`).slice(0, 32),
-      visual: String(item.visual || item.description || "电影感人物场景").slice(0, 520),
-      action: String(item.action || "角色做出符合剧情的自然动作与表情变化").slice(0, 220),
-      shot: String(item.shot || "中景").slice(0, 24),
-      camera: String(item.camera || "缓慢推进").slice(0, 60),
-      dialogue: String(item.dialogue || "……").replace(/^[“\"']|[”\"']$/g, "").slice(0, 120),
-      speaker: String(item.speaker || characters[0].name).slice(0, 16),
-      emotion: String(item.emotion || "克制").slice(0, 24),
-      sfx: String(item.sfx || "环境氛围声").slice(0, 80),
-      characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : [String(item.speaker || characters[0].name)],
-      duration: Math.max(4, Math.min(15, Number(item.duration) || seconds)),
+      title: String(item.title || item.t || `镜头 ${index + 1}`).slice(0, 32),
+      visual: String(item.visual || item.v || item.description || "电影感人物场景").slice(0, 520),
+      action: String(item.action || item.a || "角色做出符合剧情的自然动作与表情变化").slice(0, 220),
+      shot: String(item.shot || item.h || "中景").slice(0, 24),
+      camera: String(item.camera || item.k || "缓慢推进").slice(0, 60),
+      dialogue: String(item.dialogue || item.d || "……").replace(/^[“\"']|[”\"']$/g, "").slice(0, 120),
+      speaker: String(item.speaker || item.p || characters[0].name).slice(0, 16),
+      emotion: String(item.emotion || item.e || "克制").slice(0, 24),
+      sfx: String(item.sfx || item.x || "环境氛围声").slice(0, 80),
+      characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
+      duration: Math.max(4, Math.min(15, Number(item.duration || item.u) || seconds)),
       status: "queued",
     })),
   };
@@ -425,7 +464,7 @@ export default function Home() {
       let raw = "";
       if (mode === "cloud") raw = await pollinationsStoryboard();
       else {
-        const task = await startHorde("story", { story: story.trim(), style, count: Math.max(3, Math.min(6, Math.ceil(targetDuration / 10))) });
+        const task = await startHorde("story", { story: story.trim(), style, count: Math.max(3, Math.min(4, Math.ceil(targetDuration / 15))) });
         const result = await pollHorde("text", task.id, run);
         raw = String(result.text || "");
       }
