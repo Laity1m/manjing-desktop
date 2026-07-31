@@ -39,6 +39,7 @@ type Scene = {
   status: SceneStatus;
   model?: string;
 };
+type Storyboard = { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] };
 
 const SAMPLE_STORY = "雨夜，女孩在即将关门的旧书店前，遇见了消失三年的恋人。他带着一封从未寄出的信，藏着两人错过彼此的真相。";
 const STYLE_PROMPTS: Record<string, string> = {
@@ -157,7 +158,7 @@ function closeTruncatedJson(source: string) {
   return repaired;
 }
 
-function parseStoryboard(raw: string, targetSeconds: number): { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] } {
+function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2): Storyboard {
   const unfenced = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = unfenced.indexOf("{");
   const end = unfenced.lastIndexOf("}");
@@ -176,9 +177,9 @@ function parseStoryboard(raw: string, targetSeconds: number): { title: string; c
     }
   }
   const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
-  if (sceneSource.length < 2) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
+  if (sceneSource.length < minimumScenes) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
   const picked = sceneSource.slice(0, 8) as Array<Record<string, unknown>>;
-  const seconds = Math.max(2, Math.floor(targetSeconds / picked.length));
+  const seconds = Math.max(1, Math.floor(targetSeconds / picked.length));
   const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
   const rawCharacters = characterSource.slice(0, 4) as Array<Record<string, unknown>>;
   const characters: CharacterAsset[] = rawCharacters.map((item, index) => ({
@@ -206,9 +207,52 @@ function parseStoryboard(raw: string, targetSeconds: number): { title: string; c
       emotion: String(item.emotion || item.e || "克制").slice(0, 24),
       sfx: String(item.sfx || item.x || "环境氛围声").slice(0, 80),
       characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
-      duration: Math.max(2, Math.min(30, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
+      duration: Math.max(1, Math.min(30, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
       status: "queued",
     })),
+  };
+}
+
+function completeFreeStoryboard(partial: Storyboard | null, story: string, visualStyle: string, targetSeconds: number): Storyboard {
+  const count = targetSeconds < 10 ? 2 : targetSeconds > 75 ? 4 : 3;
+  const seconds = Math.max(1, Math.floor(targetSeconds / count));
+  const premise = story.replace(/\s+/g, " ").slice(0, 140);
+  const characters = partial?.characters.length ? partial.characters : [
+    { id: uid(), name: "主角", role: "故事推动者", appearance: `${visualStyle}风格，具有明确五官、固定发型和标志性服装的年轻主角`, voice: "nova", status: "queued" },
+    { id: uid(), name: "关键人物", role: "冲突与秘密的承载者", appearance: `${visualStyle}风格，与主角形成轮廓和色彩对比，固定服装与神态`, voice: "onyx", status: "queued" },
+  ];
+  const beats = [
+    { title: "异样开场", shot: "全景转中景", camera: "缓慢推进", visual: `建立故事空间与时间，围绕“${premise}”呈现一个反常细节，电影感光影和明确前后景`, action: "主角进入环境并注意到异常，先停顿观察，再主动靠近关键线索", dialogue: "这里，和我记得的不一样。", emotion: "警觉", sfx: "环境底噪渐弱，细微提示音出现" },
+    { title: "线索逼近", shot: "双人中景", camera: "跟拍后轻微环绕", visual: "关键人物或关键物件进入画面，构图把双方关系和隐藏信息同时交代清楚", action: "主角试探，对方回避，动作和视线逐步暴露双方掌握的信息并不对等", dialogue: "你是不是早就知道了？", emotion: "克制质问", sfx: "脚步、衣料摩擦与短促停顿" },
+    { title: "冲突反转", shot: "近景与特写", camera: "快速推近后停住", visual: "矛盾在同一空间内爆发，通过表情、手部动作和关键证据形成视觉反转", action: "关键人物揭开部分真相，主角从拒绝相信转为必须立即作出选择", dialogue: "如果现在不选，就再也来不及了。", emotion: "急迫", sfx: "低频冲击后瞬间安静" },
+    { title: "悬念收束", shot: "特写转远景", camera: "拉远并留下空镜", visual: "主角做出第一步选择，但画面边缘出现新的代价或更大秘密，形成下一集钩子", action: "主角伸手触碰关键物件，画面在结果揭晓前切黑，只留下新的异常信号", dialogue: "原来，这才是开始。", emotion: "震惊后坚定", sfx: "心跳、信号声与切黑余响" },
+  ];
+  const existing = partial?.scenes || [];
+  const names = characters.slice(0, 2).map((character) => character.name);
+  const scenes = Array.from({ length: count }, (_, index) => {
+    const source = existing[index];
+    const beat = beats[index];
+    return source ? { ...source, duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds } : {
+      id: uid(),
+      title: beat.title,
+      visual: beat.visual,
+      action: beat.action,
+      shot: beat.shot,
+      camera: beat.camera,
+      dialogue: beat.dialogue,
+      speaker: characters[0].name,
+      emotion: beat.emotion,
+      sfx: beat.sfx,
+      characters: names,
+      duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds,
+      status: "queued" as SceneStatus,
+    };
+  });
+  return {
+    title: partial?.title || "自动补全漫剧",
+    characters,
+    music: partial?.music || "cinematic emotional Chinese animation soundtrack, instrumental, rising tension, no vocals",
+    scenes,
   };
 }
 
@@ -702,7 +746,20 @@ export default function Home() {
         setStatusText("导演复核暂时不可用，保留编剧初稿继续制作");
       }
       setProgress(15);
-      const storyboard = parseStoryboard(raw, productionDuration);
+      let storyboard: Storyboard;
+      try {
+        storyboard = parseStoryboard(raw, productionDuration);
+      } catch (reason) {
+        if (agentConfigs.writer.adapter !== "horde") throw reason;
+        let partial: Storyboard | null = null;
+        try {
+          partial = parseStoryboard(raw, productionDuration, 1);
+        } catch {
+          partial = null;
+        }
+        setStatusText("免费编剧输出不完整，漫镜正在自动补全分镜");
+        storyboard = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
+      }
       setProjectTitle(storyboard.title);
       setMusicPrompt(storyboard.music);
       let cast = storyboard.characters;

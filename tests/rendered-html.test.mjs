@@ -58,6 +58,13 @@ test("timeboxes the optional free director review instead of blocking production
   assert.match(source, /if \(runRef\.current !== run\) throw new Error\("任务已取消"\)/);
 });
 
+test("completes truncated free storyboards instead of aborting production", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /parseStoryboard\(raw, productionDuration, 1\)/);
+  assert.match(source, /completeFreeStoryboard\(partial, story\.trim\(\), style, productionDuration\)/);
+  assert.match(source, /免费编剧输出不完整，漫镜正在自动补全分镜/);
+});
+
 test("rejects invalid generation requests before contacting providers", async () => {
   const response = await worker.fetch(new Request("http://localhost/api/horde", {
     method: "POST",
