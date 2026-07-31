@@ -65,6 +65,30 @@ test("completes truncated free storyboards instead of aborting production", asyn
   assert.match(source, /免费编剧输出不完整，漫镜正在自动补全分镜/);
 });
 
+test("ships a user-editable multitrack workbench and downloadable deliverables", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /AI 制作现场/);
+  assert.match(source, /下载剧本/);
+  assert.match(source, /下载分镜/);
+  assert.match(source, /保存工程/);
+  assert.match(source, /替换图片/);
+  assert.match(source, /导入视频/);
+  assert.match(source, /导入配音/);
+  assert.match(source, /2\.5D 动态/);
+  assert.match(source, /subtitlePosition/);
+  assert.match(source, /musicVolume/);
+});
+
+test("improves the free image and motion pipeline without presenting it as native animation", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const horde = await readFile(new URL("../app/api/horde/route.ts", import.meta.url), "utf8");
+  assert.match(page, /layered foreground middle ground and background for 2\.5D motion/);
+  assert.match(page, /人物本身不会产生走路、口型等新动作/);
+  assert.match(page, /function drawMovingShot/);
+  assert.match(horde, /width: aspect === "9:16" \? 448 : 704/);
+  assert.match(horde, /height: aspect === "9:16" \? 704 : 384/);
+});
+
 test("rejects invalid generation requests before contacting providers", async () => {
   const response = await worker.fetch(new Request("http://localhost/api/horde", {
     method: "POST",

@@ -148,9 +148,9 @@ export async function POST(request: Request) {
           prompt: fullPrompt,
           params: {
             n: 1,
-            width: aspect === "9:16" ? 384 : 576,
-            height: aspect === "9:16" ? 576 : 320,
-            steps: 22,
+            width: aspect === "9:16" ? 448 : 704,
+            height: aspect === "9:16" ? 704 : 384,
+            steps: 24,
             sampler_name: "k_euler_a",
             cfg_scale: 7,
           },

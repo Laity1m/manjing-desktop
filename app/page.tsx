@@ -7,6 +7,12 @@ type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "m
 type SceneStatus = "queued" | "writing" | "painting" | "animating" | "voicing" | "ready" | "error";
 type AgentRole = "director" | "writer" | "image" | "video" | "voice" | "editor";
 type AgentAdapter = "horde" | "pollinations" | "browser" | "webhook";
+type MotionPreset = "push" | "pull" | "pan-left" | "pan-right" | "float";
+type TransitionPreset = "fade" | "cut" | "flash";
+type VisualFilter = "none" | "warm" | "cool" | "mono";
+type SubtitlePosition = "top" | "center" | "bottom";
+type ActivityState = "running" | "done" | "warning" | "error";
+type ActivityEvent = { id: string; role: AgentRole; state: ActivityState; message: string; time: string };
 type AgentConfig = { preset: string; adapter: AgentAdapter; model: string; endpoint: string; apiKey: string };
 type AgentPreset = { id: string; adapter: AgentAdapter; name: string; model: string; note: string; badge?: string; endpoint?: string };
 type CharacterAsset = {
@@ -38,6 +44,14 @@ type Scene = {
   videoUrl?: string;
   status: SceneStatus;
   model?: string;
+  motion?: MotionPreset;
+  motionIntensity?: number;
+  transition?: TransitionPreset;
+  filter?: VisualFilter;
+  speed?: number;
+  volume?: number;
+  subtitleEnabled?: boolean;
+  subtitlePosition?: SubtitlePosition;
 };
 type Storyboard = { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] };
 
@@ -53,6 +67,18 @@ const VOICES = [
   { value: "coral", label: "叙事女声" },
   { value: "onyx", label: "沉稳男声" },
   { value: "echo", label: "青年男声" },
+];
+const MOTION_OPTIONS: Array<{ value: MotionPreset; label: string }> = [
+  { value: "push", label: "缓慢推进" },
+  { value: "pull", label: "拉远揭示" },
+  { value: "pan-left", label: "向左横移" },
+  { value: "pan-right", label: "向右横移" },
+  { value: "float", label: "悬浮手持感" },
+];
+const TRANSITION_OPTIONS: Array<{ value: TransitionPreset; label: string }> = [
+  { value: "fade", label: "叠化" },
+  { value: "cut", label: "硬切" },
+  { value: "flash", label: "闪白" },
 ];
 
 const AGENT_ROLES: Array<{ id: AgentRole; icon: string; title: string; duty: string; recommends: string[] }> = [
@@ -81,7 +107,7 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
     { id: "webhook-image", adapter: "webhook", name: "自定义生图接口", model: "gpt-image-2", note: "可接 GPT Image、FLUX 等" },
   ],
   video: [
-    { id: "browser-video", adapter: "browser", name: "本地运镜样片", model: "Ken Burns", note: "免费默认 · 非原生动画", badge: "免费" },
+    { id: "browser-video", adapter: "browser", name: "本地 2.5D 运镜", model: "Depth Motion", note: "免费默认 · 推拉/横移/景深光效，人物不会生成新动作", badge: "免费" },
     { id: "pollinations-video", adapter: "pollinations", name: "Pollinations 视频", model: "seedance-2.0", note: "推荐 · 文/图/参考图生视频", badge: "推荐" },
     { id: "webhook-video", adapter: "webhook", name: "自定义视频接口", model: "veo-3.1", note: "可接 Veo、Sora、Seedance" },
   ],
@@ -209,6 +235,14 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2):
       characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
       duration: Math.max(1, Math.min(30, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
       status: "queued",
+      motion: (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4],
+      motionIntensity: 1,
+      transition: index === 0 ? "cut" : "fade",
+      filter: "none",
+      speed: 1,
+      volume: 1,
+      subtitleEnabled: true,
+      subtitlePosition: "bottom",
     })),
   };
 }
@@ -232,7 +266,7 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
   const scenes = Array.from({ length: count }, (_, index) => {
     const source = existing[index];
     const beat = beats[index];
-    return source ? { ...source, duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds } : {
+    return source ? { ...source, duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds, motion: source.motion || (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4], motionIntensity: source.motionIntensity || 1, transition: source.transition || (index === 0 ? "cut" : "fade"), filter: source.filter || "none", speed: source.speed || 1, volume: source.volume ?? 1, subtitleEnabled: source.subtitleEnabled !== false, subtitlePosition: source.subtitlePosition || "bottom" } : {
       id: uid(),
       title: beat.title,
       visual: beat.visual,
@@ -246,6 +280,14 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
       characters: names,
       duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds,
       status: "queued" as SceneStatus,
+      motion: (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4],
+      motionIntensity: 1,
+      transition: index === 0 ? "cut" : "fade",
+      filter: "none",
+      speed: 1,
+      volume: 1,
+      subtitleEnabled: true,
+      subtitlePosition: "bottom",
     };
   });
   return {
@@ -311,13 +353,45 @@ function drawCover(
   ctx.restore();
 }
 
-function drawMovingShot(ctx: CanvasRenderingContext2D, media: CanvasImageSource, width: number, height: number, index: number, progress: number, opacity = 1) {
+function drawMovingShot(
+  ctx: CanvasRenderingContext2D,
+  media: CanvasImageSource,
+  width: number,
+  height: number,
+  index: number,
+  progress: number,
+  opacity = 1,
+  motion: MotionPreset = "push",
+  intensity = 1,
+) {
   const eased = 0.5 - Math.cos(Math.PI * Math.max(0, Math.min(1, progress))) / 2;
-  const direction = index % 4;
-  const panX = direction === 0 ? eased * 2 - 1 : direction === 1 ? 1 - eased * 2 : direction === 2 ? 0.35 : -0.35;
-  const panY = direction === 2 ? eased * 2 - 1 : direction === 3 ? 1 - eased * 2 : 0;
-  const zoom = direction < 2 ? 1.045 + eased * 0.075 : 1.12 - eased * 0.065;
+  const strength = Math.max(0.35, Math.min(1.8, intensity));
+  let panX = 0;
+  let panY = 0;
+  let zoom = 1.05 + eased * 0.08 * strength;
+  if (motion === "pull") zoom = 1.16 - eased * 0.1 * strength;
+  if (motion === "pan-left") { panX = 1 - eased * 2; zoom = 1.11; }
+  if (motion === "pan-right") { panX = eased * 2 - 1; zoom = 1.11; }
+  if (motion === "float") {
+    panX = Math.sin((progress * 2 + index) * Math.PI) * 0.24 * strength;
+    panY = Math.cos((progress * 1.6 + index) * Math.PI) * 0.18 * strength;
+    zoom = 1.085 + Math.sin(progress * Math.PI) * 0.025 * strength;
+  }
+  if (!(media instanceof HTMLVideoElement)) {
+    ctx.save();
+    ctx.filter = "blur(18px) saturate(.82) brightness(.58)";
+    drawCover(ctx, media, width, height, 1.22, -panX * 0.2, -panY * 0.2, opacity);
+    ctx.restore();
+  }
   drawCover(ctx, media, width, height, zoom, panX, panY, opacity);
+  if (!(media instanceof HTMLVideoElement)) {
+    const lightX = width * (-0.25 + progress * 1.5);
+    const glow = ctx.createRadialGradient(lightX, height * 0.22, 0, lightX, height * 0.22, width * 0.7);
+    glow.addColorStop(0, `rgba(210,190,255,${0.11 * opacity})`);
+    glow.addColorStop(1, "rgba(210,190,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, width, height);
+  }
 }
 
 export default function Home() {
@@ -350,6 +424,10 @@ export default function Home() {
   const [configuringRole, setConfiguringRole] = useState<AgentRole | null>(null);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [draggingScene, setDraggingScene] = useState<number | null>(null);
+  const [subtitleScale, setSubtitleScale] = useState(1);
+  const [subtitleColor, setSubtitleColor] = useState("#ffffff");
+  const [musicVolume, setMusicVolume] = useState(0.16);
+  const [activityLog, setActivityLog] = useState<ActivityEvent[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const runRef = useRef(0);
@@ -362,6 +440,7 @@ export default function Home() {
     ? Math.max(0, scenes.findIndex((scene, index) => time >= offsets[index] && time < offsets[index] + scene.duration))
     : 0;
   const current = scenes[currentIndex] || scenes[selected];
+  const activityByRole = useMemo(() => Object.fromEntries(AGENT_ROLES.map(({ id }) => [id, activityLog.find((item) => item.role === id)])) as Partial<Record<AgentRole, ActivityEvent>>, [activityLog]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -438,15 +517,24 @@ export default function Home() {
 
   useEffect(() => {
     if (!videoRef.current) return;
+    videoRef.current.playbackRate = current?.speed || 1;
     if (playing) void videoRef.current.play().catch(() => undefined);
     else videoRef.current.pause();
-  }, [playing, currentIndex]);
+  }, [playing, currentIndex, current?.speed]);
 
-  function updateScene(id: string, patch: Partial<Scene>) {
-    setScenes((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  function recordActivity(role: AgentRole, message: string, state: ActivityState = "running") {
+    setActivityLog((items) => [{ id: uid(), role, message, state, time: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) }, ...items].slice(0, 30));
+  }
+
+  function invalidateExport() {
     if (exportUrl) URL.revokeObjectURL(exportUrl);
     setExportUrl("");
     setShowFilm(false);
+  }
+
+  function updateScene(id: string, patch: Partial<Scene>) {
+    setScenes((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    invalidateExport();
   }
 
   function applyTeamProfile(profile: "free" | "pollinations") {
@@ -678,7 +766,7 @@ export default function Home() {
   }
 
   async function makeImage(scene: Scene, index: number, run: number, characterGuide = "") {
-    const prompt = `${STYLE_PROMPTS[style]}, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, no typography`;
+    const prompt = `${STYLE_PROMPTS[style]}, premium animated film keyframe, one coherent scene rather than a comic page, polished linework, expressive eyes and natural hands, cinematic color grading, layered foreground middle ground and background for 2.5D motion, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, no typography, no speech bubbles, no panel borders`;
     if (agentConfigs.image.adapter === "pollinations" || agentConfigs.image.adapter === "webhook") return (await pollinationsMedia("image", prompt, index)).url;
     const task = await startHorde("image", { prompt, aspect, model: agentConfigs.image.model });
     const result = await pollHorde("image", task.id, run);
@@ -731,19 +819,25 @@ export default function Home() {
     setShowFilm(false);
     setPlaying(false);
     setTime(0);
+    setActivityLog([]);
     setPhase("story");
     setProgress(5);
     setStatusText("AI 正在理解故事并编写分镜");
+    recordActivity("writer", `${agentName("writer")}开始改编剧本和拆分镜头`);
     try {
       let raw = await generateStoryboard(run);
+      recordActivity("writer", "剧本初稿与分镜提示词已交付", "done");
       setProgress(10);
+      recordActivity("director", `${agentName("director")}开始复核节奏、角色一致性和结尾钩子`);
       try {
         const reviewed = await directorReview(raw, run);
         parseStoryboard(reviewed, productionDuration);
         raw = reviewed;
+        recordActivity("director", "导演复核通过，已锁定制作稿", "done");
       } catch {
         if (runRef.current !== run) throw new Error("任务已取消");
         setStatusText("导演复核暂时不可用，保留编剧初稿继续制作");
+        recordActivity("director", "免费导演未及时交稿，已采用编剧初稿继续制作", "warning");
       }
       setProgress(15);
       let storyboard: Storyboard;
@@ -759,6 +853,7 @@ export default function Home() {
         }
         setStatusText("免费编剧输出不完整，漫镜正在自动补全分镜");
         storyboard = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
+        recordActivity("writer", "免费输出被截断，漫镜已补齐缺失镜头", "warning");
       }
       setProjectTitle(storyboard.title);
       setMusicPrompt(storyboard.music);
@@ -769,12 +864,13 @@ export default function Home() {
       setSelected(0);
 
       setPhase("characters");
+      recordActivity("image", `${agentName("image")}开始生成角色设定与一致性参考`);
       for (let index = 0; index < cast.length; index += 1) {
         const character = cast[index];
         setStatusText(`正在建立角色资产 ${index + 1}/${cast.length}：${character.name}`);
         cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
         setCharacters(cast);
-        const characterPrompt = `${STYLE_PROMPTS[style]}, professional animation character model sheet, ${character.name}, ${character.role}, ${character.appearance}, full body and face close-up, clean neutral background, exact fixed facial features and costume, no typography`;
+        const characterPrompt = `${STYLE_PROMPTS[style]}, premium animation character design, ${character.name}, ${character.role}, ${character.appearance}, full body and face close-up, correct anatomy and natural hands, clean neutral background, exact fixed facial features and costume, polished linework, no typography`;
         if (agentConfigs.image.adapter !== "horde") {
           const asset = await pollinationsMedia("image", characterPrompt, 50 + index);
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
@@ -788,6 +884,7 @@ export default function Home() {
         setCharacters(cast);
         setProgress(10 + Math.round(((index + 1) / cast.length) * 16));
       }
+      recordActivity("image", `${cast.length} 个角色资产已建立，开始绘制连续分镜`);
 
       setPhase("images");
       for (let index = 0; index < work.length; index += 1) {
@@ -798,7 +895,7 @@ export default function Home() {
         const castForScene = presentCast.length ? presentCast : cast.slice(0, 2);
         const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
         if (agentConfigs.image.adapter !== "horde") {
-          const framePrompt = `${STYLE_PROMPTS[style]}, exact identities and costumes from the character references, ${scene.shot}, ${scene.visual}, ${scene.action}, cinematic composition, coherent spatial layout, no text`;
+          const framePrompt = `${STYLE_PROMPTS[style]}, premium animated film keyframe, one coherent scene rather than a comic page, exact identities and costumes from the character references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, cinematic composition and color grading, layered depth for 2.5D camera motion, coherent spatial layout, no text, no speech bubbles, no panel borders`;
           const frame = await pollinationsMedia("image", framePrompt, index, { references: castForScene.map((item) => item.remoteUrl).filter(Boolean) as string[] });
           const frameUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : frameUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`, frameUploadKey) : "";
@@ -810,9 +907,11 @@ export default function Home() {
         setScenes(work);
         setProgress(26 + Math.round(((index + 1) / work.length) * (agentConfigs.video.adapter !== "browser" ? 18 : 48)));
       }
+      recordActivity("image", `${work.length} 张分镜关键帧已生成`, "done");
 
       if (agentConfigs.video.adapter !== "browser") {
         setPhase("video");
+        recordActivity("video", `${agentName("video")}开始把关键帧生成原生动态镜头`);
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
           setStatusText(`正在让镜头真正动起来 ${index + 1}/${work.length}：${scene.action}`);
@@ -824,10 +923,14 @@ export default function Home() {
           setScenes(work);
           setProgress(44 + Math.round(((index + 1) / work.length) * 26));
         }
+        recordActivity("video", `${work.length} 个动态视频镜头已生成`, "done");
+      } else {
+        recordActivity("video", "免费模式使用 2.5D 运镜、景深和光影动画，不包含人物肢体生成", "warning");
       }
 
       if (voiceEnabled && agentConfigs.voice.adapter !== "browser") {
         setPhase("voice");
+        recordActivity("voice", `${agentName("voice")}开始逐镜生成角色配音`);
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
           setStatusText(`正在生成 ${scene.speaker} 的${scene.emotion}配音 ${index + 1}/${work.length}`);
@@ -839,6 +942,11 @@ export default function Home() {
           setScenes(work);
           setProgress(70 + Math.round(((index + 1) / work.length) * 13));
         }
+        recordActivity("voice", `${work.length} 条角色音轨已生成`, "done");
+      } else if (voiceEnabled) {
+        recordActivity("voice", "免费模式使用设备中文语音预览，不会写入可下载音轨", "warning");
+      } else {
+        recordActivity("voice", "用户已关闭自动配音", "warning");
       }
 
       let generatedMusicUrl = "";
@@ -849,17 +957,20 @@ export default function Home() {
         generatedMusicUrl = soundtrack.url;
         setMusicUrl(soundtrack.url);
       }
+      recordActivity("editor", `${agentName("editor")}开始调整顺序、节奏、字幕和混音`);
       work = await applyEditorPlan(work);
       setScenes(work);
       setProgress(88);
       setStatusText(agentConfigs.video.adapter !== "browser" ? "AI 制片组已完成素材，正在合成最终漫剧" : "免费制片组已完成，正在生成低动态样片");
       const exported = await exportFilm(work, true, generatedMusicUrl);
       if (!exported) return;
+      recordActivity("editor", "剪辑完成，成片和全部中间素材均可下载", "done");
     } catch (reason) {
       if (runRef.current !== run) return;
       setPhase("error");
       setError(reason instanceof Error ? reason.message : "生成失败，请重试");
       setStatusText("生成中断");
+      recordActivity("director", reason instanceof Error ? `制作中断：${reason.message}` : "制作中断", "error");
     }
   }
 
@@ -883,11 +994,12 @@ export default function Home() {
     runRef.current = run;
     setError("");
     updateScene(scene.id, { status: "painting" });
+    recordActivity("image", `${agentName("image")}正在重绘“${scene.title}”`);
     try {
       if (scene.imageUrl) URL.revokeObjectURL(scene.imageUrl);
       if (agentConfigs.image.adapter !== "horde") {
         const presentCast = characters.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
-        const frame = await pollinationsMedia("image", `${STYLE_PROMPTS[style]}, preserve the exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, cinematic composition, no text`, index, { references: presentCast.map((item) => item.remoteUrl).filter(Boolean) as string[] });
+        const frame = await pollinationsMedia("image", `${STYLE_PROMPTS[style]}, premium animated film keyframe, one coherent scene, preserve the exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, cinematic composition and color grading, layered depth, no text, no speech bubbles, no panel borders`, index, { references: presentCast.map((item) => item.remoteUrl).filter(Boolean) as string[] });
         const revisionUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : revisionUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}-revision.png`, revisionUploadKey) : "";
         updateScene(scene.id, { imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" });
@@ -896,9 +1008,11 @@ export default function Home() {
         const imageUrl = await makeImage(scene, index, run, characterGuide);
         updateScene(scene.id, { imageUrl, videoUrl: undefined, status: "ready" });
       }
+      recordActivity("image", `“${scene.title}”的新画面已交付`, "done");
     } catch (reason) {
       updateScene(scene.id, { status: "error" });
       setError(reason instanceof Error ? reason.message : "画面生成失败");
+      recordActivity("image", `“${scene.title}”重绘失败`, "error");
     }
   }
 
@@ -919,13 +1033,16 @@ export default function Home() {
     }
     setError("");
     updateScene(scene.id, { status: "animating" });
+    recordActivity("video", `${agentName("video")}正在重做“${scene.title}”的动态表演`);
     try {
       const clip = await pollinationsMedia("video", `${STYLE_PROMPTS[style]}, preserve exact character identity and costume. ${scene.action}. Camera: ${scene.camera}. Natural expressions and coherent motion, one continuous shot, no text.`, 0, { references: scene.remoteImageUrl ? [scene.remoteImageUrl] : [], duration: scene.duration });
       if (scene.videoUrl) URL.revokeObjectURL(scene.videoUrl);
       updateScene(scene.id, { videoUrl: clip.url, status: "ready", duration: Math.max(4, Math.min(10, scene.duration)) });
+      recordActivity("video", `“${scene.title}”的原生动态镜头已交付`, "done");
     } catch (reason) {
       updateScene(scene.id, { status: "error" });
       setError(reason instanceof Error ? reason.message : "动态镜头生成失败");
+      recordActivity("video", `“${scene.title}”视频生成失败`, "error");
     }
   }
 
@@ -989,11 +1106,115 @@ export default function Home() {
 
   function addScene() {
     const lead = characters[0]?.name || "主角";
-    setScenes((items) => [...items, { id: uid(), title: "新镜头", visual: "描述场景、构图和光线", action: "描述角色连续动作和表情变化", shot: "中景", camera: "缓慢推进", dialogue: "输入角色台词", speaker: lead, emotion: "自然", sfx: "环境氛围声", characters: [lead], duration: 6, status: "queued" }]);
+    setScenes((items) => [...items, { id: uid(), title: "新镜头", visual: "描述场景、构图和光线", action: "描述角色连续动作和表情变化", shot: "中景", camera: "缓慢推进", dialogue: "输入角色台词", speaker: lead, emotion: "自然", sfx: "环境氛围声", characters: [lead], duration: 6, status: "queued", motion: "push", motionIntensity: 1, transition: "fade", filter: "none", speed: 1, volume: 1, subtitleEnabled: true, subtitlePosition: "bottom" }]);
     setSelected(scenes.length);
-    if (exportUrl) URL.revokeObjectURL(exportUrl);
-    setExportUrl("");
-    setShowFilm(false);
+    invalidateExport();
+  }
+
+  function duplicateScene(index: number) {
+    const source = scenes[index];
+    if (!source) return;
+    const copy = { ...source, id: uid(), title: `${source.title} · 副本` };
+    setScenes((items) => [...items.slice(0, index + 1), copy, ...items.slice(index + 1)]);
+    setSelected(index + 1);
+    invalidateExport();
+    recordActivity("editor", `已复制镜头“${source.title}”`, "done");
+  }
+
+  function replaceSceneMedia(scene: Scene, kind: "image" | "video" | "audio", file?: File) {
+    if (!file) return;
+    const field = kind === "image" ? "imageUrl" : kind === "video" ? "videoUrl" : "audioUrl";
+    const previous = scene[field];
+    if (previous?.startsWith("blob:")) URL.revokeObjectURL(previous);
+    const url = URL.createObjectURL(file);
+    updateScene(scene.id, { [field]: url, status: "ready", model: "本地导入" });
+    recordActivity("editor", `已为“${scene.title}”替换${kind === "image" ? "画面" : kind === "video" ? "视频" : "配音"}`, "done");
+  }
+
+  function safeFilename(value: string) {
+    return (value || "漫镜素材").replace(/[\\/:*?"<>|]/g, "-").slice(0, 60);
+  }
+
+  function saveBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function downloadAsset(url: string, filename: string, fallbackExtension: string) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("素材读取失败");
+      const blob = await response.blob();
+      const extension = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : blob.type.includes("jpeg") ? "jpg" : blob.type.includes("mp4") ? "mp4" : blob.type.includes("mpeg") ? "mp3" : blob.type.includes("wav") ? "wav" : blob.type.includes("webm") ? "webm" : fallbackExtension;
+      saveBlob(blob, `${safeFilename(filename)}.${extension}`);
+    } catch {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${safeFilename(filename)}.${fallbackExtension}`;
+      anchor.target = "_blank";
+      anchor.click();
+    }
+  }
+
+  function downloadScript() {
+    const content = [
+      `《${projectTitle || "未命名漫剧"}》`,
+      `原始梗概：${story.trim()}`,
+      `画面风格：${style}｜比例：${aspect}｜总时长：${totalDuration} 秒`,
+      "",
+      ...scenes.flatMap((scene, index) => [
+        `第 ${index + 1} 镜｜${scene.title}｜${scene.duration} 秒`,
+        `场景：${scene.visual}`,
+        `表演：${scene.action}`,
+        `镜头：${scene.shot}，${scene.camera}`,
+        `对白：${scene.speaker}（${scene.emotion}）：${scene.dialogue}`,
+        `声音：${scene.sfx}`,
+        "",
+      ]),
+    ].join("\n");
+    saveBlob(new Blob([content], { type: "text/plain;charset=utf-8" }), `${safeFilename(projectTitle)}-剧本.txt`);
+  }
+
+  function downloadStoryboard() {
+    const payload = { title: projectTitle, premise: story.trim(), style, aspect, duration: totalDuration, music: musicPrompt, characters: characters.map((character) => ({ id: character.id, name: character.name, role: character.role, appearance: character.appearance, voice: character.voice, status: character.status, reference: character.remoteUrl || "" })), scenes: scenes.map(({ imageUrl, videoUrl, audioUrl, ...scene }, index) => ({ order: index + 1, ...scene, image: imageUrl?.startsWith("http") ? imageUrl : "", video: videoUrl?.startsWith("http") ? videoUrl : "", audio: audioUrl?.startsWith("http") ? audioUrl : "" })) };
+    saveBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" }), `${safeFilename(projectTitle)}-分镜.json`);
+  }
+
+  function downloadProject() {
+    const payload = { format: "manjing-project", version: 1, savedAt: new Date().toISOString(), projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, characters: characters.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), scenes: scenes.map(({ imageUrl, videoUrl, audioUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined, videoUrl: videoUrl?.startsWith("http") ? videoUrl : undefined, audioUrl: audioUrl?.startsWith("http") ? audioUrl : undefined })) };
+    saveBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" }), `${safeFilename(projectTitle)}-漫镜工程.json`);
+  }
+
+  async function importProject(file?: File) {
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text()) as Record<string, unknown>;
+      if (payload.format !== "manjing-project" || !Array.isArray(payload.scenes)) throw new Error("这不是有效的漫镜工程文件");
+      const importedScenes = (payload.scenes as Scene[]).slice(0, 50).map((scene, index) => ({ ...scene, id: uid(), title: String(scene.title || `镜头 ${index + 1}`), duration: Math.max(1, Math.min(30, Number(scene.duration) || 6)), status: scene.imageUrl || scene.videoUrl ? "ready" as SceneStatus : "queued" as SceneStatus }));
+      setProjectTitle(String(payload.projectTitle || "导入的漫镜工程").slice(0, 60));
+      setStory(String(payload.story || "导入工程的故事梗概"));
+      if (typeof payload.style === "string" && STYLE_PROMPTS[payload.style]) setStyle(payload.style);
+      if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
+      setTargetDuration(Number(payload.targetDuration) || 0);
+      setScenes(importedScenes);
+      setCharacters(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 12).map((item) => ({ ...item, id: uid() })) : []);
+      setMusicPrompt(String(payload.musicPrompt || ""));
+      setSubtitleScale(Math.max(0.7, Math.min(1.6, Number(payload.subtitleScale) || 1)));
+      setSubtitleColor(typeof payload.subtitleColor === "string" ? payload.subtitleColor : "#ffffff");
+      setMusicVolume(Math.max(0, Math.min(0.8, Number(payload.musicVolume) || 0.16)));
+      setSelected(0);
+      setTime(0);
+      setPhase("ready");
+      setError("");
+      invalidateExport();
+      recordActivity("editor", `已导入工程，共 ${importedScenes.length} 个镜头`, "done");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "工程文件导入失败");
+    }
   }
 
   function seek(value: number) {
@@ -1007,6 +1228,8 @@ export default function Home() {
       video.src = scene.videoUrl;
       video.muted = true;
       video.playsInline = true;
+      video.loop = true;
+      video.playbackRate = scene.speed || 1;
       await new Promise<void>((resolve, reject) => {
         video.onloadeddata = () => resolve();
         video.onerror = () => reject(new Error("动态镜头加载失败"));
@@ -1074,8 +1297,10 @@ export default function Home() {
       buffers.forEach((buffer, index) => {
         if (buffer) {
           const source = audioContext.createBufferSource();
+          const voiceGain = audioContext.createGain();
           source.buffer = buffer;
-          source.connect(destination);
+          voiceGain.gain.value = Math.max(0, Math.min(2, movieScenes[index].volume ?? 1));
+          source.connect(voiceGain).connect(destination);
           source.start(audioStart + audioOffset);
         }
         audioOffset += movieScenes[index].duration;
@@ -1085,7 +1310,7 @@ export default function Home() {
         const soundtrackGain = audioContext.createGain();
         soundtrack.buffer = soundtrackBuffer;
         soundtrack.loop = soundtrackBuffer.duration < movieDuration;
-        soundtrackGain.gain.value = buffers.some(Boolean) ? 0.13 : 0.24;
+        soundtrackGain.gain.value = Math.max(0, Math.min(0.8, musicVolume));
         soundtrack.connect(soundtrackGain).connect(destination);
         soundtrack.start(audioStart);
         soundtrack.stop(audioStart + movieDuration);
@@ -1115,9 +1340,24 @@ export default function Home() {
           }
           ctx.fillStyle = "#0d0b12";
           ctx.fillRect(0, 0, width, height);
-          const transition = Math.min(1, local * 5);
-          if (index > 0 && transition < 1) drawMovingShot(ctx, visuals[index - 1], width, height, index - 1, 1, 1);
-          drawMovingShot(ctx, visual, width, height, index, local, transition);
+          const transitionMode = scene.transition || "fade";
+          const transition = index === 0 || transitionMode === "cut" ? 1 : Math.min(1, local * (transitionMode === "flash" ? 9 : 5));
+          const filter = scene.filter === "warm" ? "sepia(.14) saturate(1.12)" : scene.filter === "cool" ? "hue-rotate(176deg) saturate(.9) brightness(.96)" : scene.filter === "mono" ? "grayscale(1) contrast(1.1)" : "none";
+          if (index > 0 && transition < 1) {
+            const previous = movieScenes[index - 1];
+            ctx.save();
+            ctx.filter = previous.filter === "warm" ? "sepia(.14) saturate(1.12)" : previous.filter === "cool" ? "hue-rotate(176deg) saturate(.9) brightness(.96)" : previous.filter === "mono" ? "grayscale(1) contrast(1.1)" : "none";
+            drawMovingShot(ctx, visuals[index - 1], width, height, index - 1, 1, 1, previous.motion, previous.motionIntensity);
+            ctx.restore();
+          }
+          ctx.save();
+          ctx.filter = filter;
+          drawMovingShot(ctx, visual, width, height, index, local, transition, scene.motion, scene.motionIntensity);
+          ctx.restore();
+          if (transitionMode === "flash" && local < 0.14) {
+            ctx.fillStyle = `rgba(255,255,255,${Math.max(0, 0.75 - local * 5.3)})`;
+            ctx.fillRect(0, 0, width, height);
+          }
           const shade = ctx.createLinearGradient(0, height * 0.48, 0, height);
           shade.addColorStop(0, "rgba(9,7,12,0)");
           shade.addColorStop(1, "rgba(9,7,12,.88)");
@@ -1126,10 +1366,16 @@ export default function Home() {
           ctx.fillStyle = "rgba(255,255,255,.72)";
           ctx.font = `${Math.round(width * 0.022)}px Microsoft YaHei, sans-serif`;
           ctx.fillText(`${String(index + 1).padStart(2, "0")}  ${scene.title}`, width * 0.07, height * 0.09);
-          ctx.textAlign = "center";
-          ctx.fillStyle = "#fff";
-          ctx.font = `600 ${Math.round(width * 0.044)}px Microsoft YaHei, sans-serif`;
-          wrapCanvasText(ctx, `“${scene.dialogue}”`, width / 2, height * 0.86, width * 0.78, width * 0.06, 3);
+          if (scene.subtitleEnabled !== false && scene.dialogue) {
+            const subtitleY = scene.subtitlePosition === "top" ? height * 0.18 : scene.subtitlePosition === "center" ? height * 0.5 : height * 0.86;
+            ctx.textAlign = "center";
+            ctx.fillStyle = subtitleColor;
+            ctx.font = `600 ${Math.round(width * 0.044 * subtitleScale)}px Microsoft YaHei, sans-serif`;
+            ctx.shadowColor = "rgba(0,0,0,.92)";
+            ctx.shadowBlur = Math.round(width * 0.012);
+            wrapCanvasText(ctx, `“${scene.dialogue}”`, width / 2, subtitleY, width * 0.78, width * 0.06 * subtitleScale, 3);
+            ctx.shadowBlur = 0;
+          }
           ctx.textAlign = "left";
           setExportProgress(Math.min(99, Math.round((elapsed / movieDuration) * 100)));
           requestAnimationFrame(render);
@@ -1174,6 +1420,7 @@ export default function Home() {
   const generatedVoiceEnabled = agentConfigs.voice.adapter !== "browser";
   const freeTeamActive = AGENT_ROLES.every(({ id }) => agentConfigs[id].preset === AGENT_PRESETS[id][0].id);
   const recommendedTeamActive = AGENT_ROLES.every(({ id }) => agentConfigs[id].preset === AGENT_PRESETS[id][1].id);
+  const previewFilter = current?.filter === "warm" ? "sepia(.14) saturate(1.12)" : current?.filter === "cool" ? "hue-rotate(176deg) saturate(.9) brightness(.96)" : current?.filter === "mono" ? "grayscale(1) contrast(1.1)" : "none";
 
   return (
     <main id="top">
@@ -1250,7 +1497,7 @@ export default function Home() {
             <button className={freeTeamActive ? "active" : ""} onClick={() => applyTeamProfile("free")}><b>免费多 AI 流程</b><span>Horde 编剧/导演/生图 · 本地配音剪辑</span></button>
             <button className={recommendedTeamActive ? "active" : ""} onClick={() => applyTeamProfile("pollinations")}><b>推荐 AI 制片组</b><span>独立导演 · 编剧 · 生图 · 视频 · 配音 · 剪辑</span></button>
           </div>
-          {freeTeamActive ? <p className="provider-note"><b>免费边界：</b>语言和生图岗位使用社区算力，可能排队；视频岗位生成的是本地图片运镜样片，不会冒充原生 AI 动画。可只替换其中一个岗位，不必整套更换。</p> : <div className="key-panel"><div><b>统一备用密钥</b><span>未填写岗位专用密钥时使用这里的 Pollinations 密钥；所有密钥只保存在当前设备。</span></div><div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">获取密钥 ↗</a></div></div>}
+          {freeTeamActive ? <p className="provider-note"><b>免费边界：</b>语言和生图岗位使用社区算力，画质与一致性会随在线模型变化；视频岗位只做 2.5D 推拉、横移、景深和光影动画，人物本身不会产生走路、口型等新动作。可只替换“生图 AI”或“视频 AI”，不必整套更换。</p> : <div className="key-panel"><div><b>统一备用密钥</b><span>未填写岗位专用密钥时使用这里的 Pollinations 密钥；所有密钥只保存在当前设备。</span></div><div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">获取密钥 ↗</a></div></div>}
         </div>
 
         <div className="generate-row">
@@ -1258,6 +1505,14 @@ export default function Home() {
           {busy && phase !== "exporting" && <button className="cancel-button" onClick={cancelGeneration}>停止</button>}
         </div>
         {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><b>{error || statusText}</b><span>{error ? "请检查对应 AI 岗位的接口设置后重试。" : `${visibleProgress}%`}</span></div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
+        {(activityLog.length > 0 || busy) && <div className="workflow-monitor">
+          <div className="workflow-heading"><div><b>AI 制作现场</b><span>每个岗位正在做什么、用了哪个模型、交付了什么，都实时记录</span></div><em>{busy ? "制作直播中" : "本次流程已保存"}</em></div>
+          <div className="workflow-roles">{AGENT_ROLES.map((role) => {
+            const latest = activityByRole[role.id];
+            return <article key={role.id} className={latest?.state || "waiting"}><i>{role.icon}</i><div><b>{role.title}</b><span>{latest?.message || "等待上游交付"}</span><small>{agentName(role.id)}</small></div><em>{latest?.state === "running" ? "工作中" : latest?.state === "done" ? "已交付" : latest?.state === "warning" ? "已降级" : latest?.state === "error" ? "中断" : "等待"}</em></article>;
+          })}</div>
+          <div className="workflow-log"><b>制作记录</b><div>{activityLog.length ? activityLog.map((item) => <p key={item.id} className={item.state}><time>{item.time}</time><span>{AGENT_ROLES.find((role) => role.id === item.role)?.title}</span>{item.message}</p>) : <p><time>--:--</time><span>制片组</span>任务开始后，这里会显示每一步真实进度</p>}</div></div>
+        </div>}
       </section>
 
       <section id="works" className="works section-shell">
@@ -1266,7 +1521,7 @@ export default function Home() {
           <div className="asset-heading"><div><b>角色资产库</b><span>固定人物的五官、发型、服装与专属音色，作为后续镜头参考</span></div><em>{characters.filter((item) => item.status === "ready").length}/{characters.length} 已锁定</em></div>
           <div className="character-list">{characters.map((character) => <article key={character.id} className={character.status}>
             <div className="character-portrait">{character.imageUrl ? <img src={character.imageUrl} alt={`${character.name}角色设定`} /> : <span>{character.status === "generating" ? "生成中" : character.name.slice(0, 1)}</span>}</div>
-            <div><b>{character.name}</b><small>{character.role} · {VOICES.find((item) => item.value === character.voice)?.label || "角色音色"}</small><p>{character.appearance}</p></div>
+            <div><b>{character.name}</b><small>{character.role} · {VOICES.find((item) => item.value === character.voice)?.label || "角色音色"}</small><p>{character.appearance}</p>{character.imageUrl && <button className="asset-download-mini" onClick={() => void downloadAsset(character.imageUrl as string, `${projectTitle}-${character.name}-角色设定`, "png")}>下载角色图</button>}</div>
           </article>)}</div>
           <div className="quality-gates">
             <span className={characters.every((item) => item.imageUrl) ? "passed" : ""}>角色参考</span>
@@ -1277,11 +1532,26 @@ export default function Home() {
             <span className={!!exportUrl ? "passed" : ""}>最终成片</span>
           </div>
         </div>}
+        {!!scenes.length && <div className="delivery-center">
+          <div className="delivery-heading"><div><b>交付物与素材库</b><span>剧本、分镜、角色图、镜头图片、视频、配音和成片都可以单独下载</span></div><label className="project-import">导入漫镜工程<input type="file" accept="application/json,.json" onChange={(event) => { void importProject(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
+          <div className="delivery-actions">
+            <button onClick={downloadScript}><i>文</i><span><b>下载剧本</b><small>TXT · 含对白、动作和声音</small></span></button>
+            <button onClick={downloadStoryboard}><i>镜</i><span><b>下载分镜</b><small>JSON · 可交给其他模型继续制作</small></span></button>
+            <button onClick={downloadProject}><i>工</i><span><b>保存工程</b><small>JSON · 保留剪辑参数，稍后再改</small></span></button>
+            <button onClick={downloadFilm} disabled={!exportUrl}><i>片</i><span><b>下载成片</b><small>{exportUrl ? "视频文件已就绪" : "重新合成后可下载"}</small></span></button>
+          </div>
+          <div className="media-bin">{scenes.map((scene, index) => <article key={scene.id} className={selected === index ? "selected" : ""} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}>
+            <div className="media-bin-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{String(index + 1).padStart(2, "0")}</span>}</div>
+            <div><b>{String(index + 1).padStart(2, "0")} · {scene.title}</b><small>{scene.videoUrl ? "原生视频" : scene.imageUrl ? "2.5D 图片镜头" : "等待画面"} · {scene.duration} 秒</small></div>
+            <div className="media-downloads">{scene.imageUrl && <button onClick={(event) => { event.stopPropagation(); void downloadAsset(scene.imageUrl as string, `${projectTitle}-${index + 1}-${scene.title}`, "png"); }}>图片</button>}{scene.videoUrl && <button onClick={(event) => { event.stopPropagation(); void downloadAsset(scene.videoUrl as string, `${projectTitle}-${index + 1}-${scene.title}`, "mp4"); }}>视频</button>}{scene.audioUrl && <button onClick={(event) => { event.stopPropagation(); void downloadAsset(scene.audioUrl as string, `${projectTitle}-${index + 1}-${scene.speaker}-配音`, "mp3"); }}>配音</button>}</div>
+          </article>)}</div>
+          <div className="delivery-note"><b>{nativeVideoEnabled ? "当前使用原生视频模型" : "为什么现在人物不会真正动？"}</b><span>{nativeVideoEnabled ? "每个带“原生视频”标记的镜头都由视频 AI 生成，可单独下载和替换。" : "免费默认视频岗位没有调用人物动画模型，只对静态图做 2.5D 推拉、横移、景深和光影动画。若需要人物口型、走路和表演，请把“视频 AI”切换到 Seedance 或自定义视频接口。"}</span></div>
+        </div>}
         {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成 AI 漫剧”，完成后这里会直接出现可播放成片。</p></div> : <><div className="workbench">
           <div className="preview-column">
             <div className={`stage ${aspect === "9:16" ? "portrait" : "landscape"} ${showFilm && exportUrl ? "film-ready" : ""}`}>
-              {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={!generatedVoiceEnabled || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline /> : current?.imageUrl ? <img key={current.imageUrl} src={current.imageUrl} alt={current.visual} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "视频 AI 正在生成角色动态表演" : current?.status === "painting" ? "生图 AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
-              {showFilm && exportUrl ? <div className="film-corner">AI 漫剧成片</div> : current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div><div className="subtitle">“{current.dialogue}”</div></>}
+              {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={!generatedVoiceEnabled || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline style={{ filter: previewFilter }} /> : current?.imageUrl ? <img className={`motion-preview motion-${current.motion || "push"}`} key={current.imageUrl} src={current.imageUrl} alt={current.visual} style={{ filter: previewFilter, animationDuration: `${Math.max(3, current.duration)}s` }} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "视频 AI 正在生成角色动态表演" : current?.status === "painting" ? "生图 AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
+              {showFilm && exportUrl ? <div className="film-corner">AI 漫剧成片</div> : current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div>{current.subtitleEnabled !== false && <div className={`subtitle ${current.subtitlePosition || "bottom"}`} style={{ color: subtitleColor, fontSize: `${14 * subtitleScale}px` }}>“{current.dialogue}”</div>}</>}
             </div>
             {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={downloadFilm}>下载成片</button></div> : <>
               <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
@@ -1293,7 +1563,20 @@ export default function Home() {
           <div className="timeline-panel">
             <div className="timeline-title"><div><b>智能分镜</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
             <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.imageUrl ? "一致性关键帧" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
-            {selectedScene && <div className="scene-editor"><div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")}</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div><label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label><div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>运镜<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div><label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label><label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label><label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label><div className="editor-grid"><label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label></div><div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>让生图 AI 重做</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{nativeVideoEnabled ? "让视频 AI 重做" : "配置视频 AI"}</button></div></div>}
+            {selectedScene && <div className="scene-editor">
+              <div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")} · 属性检查器</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button onClick={() => duplicateScene(selected)}>复制</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div>
+              <div className="local-media-tools"><label>替换图片<input type="file" accept="image/*" onChange={(event) => { replaceSceneMedia(selectedScene, "image", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>导入视频<input type="file" accept="video/*" onChange={(event) => { replaceSceneMedia(selectedScene, "video", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>导入配音<input type="file" accept="audio/*" onChange={(event) => { replaceSceneMedia(selectedScene, "audio", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
+              <label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label>
+              <div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>文字运镜描述<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div>
+              <label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label>
+              <label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label>
+              <label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label>
+              <div className="editor-grid"><label>2.5D 动态<select value={selectedScene.motion || "push"} onChange={(event) => updateScene(selectedScene.id, { motion: event.target.value as MotionPreset })}>{MOTION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>转场<select value={selectedScene.transition || "fade"} onChange={(event) => updateScene(selectedScene.id, { transition: event.target.value as TransitionPreset })}>{TRANSITION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>画面滤镜<select value={selectedScene.filter || "none"} onChange={(event) => updateScene(selectedScene.id, { filter: event.target.value as VisualFilter })}><option value="none">原色</option><option value="warm">暖调电影感</option><option value="cool">冷调悬疑</option><option value="mono">黑白漫画</option></select></label><label>字幕位置<select value={selectedScene.subtitlePosition || "bottom"} onChange={(event) => updateScene(selectedScene.id, { subtitlePosition: event.target.value as SubtitlePosition })}><option value="top">顶部</option><option value="center">中央</option><option value="bottom">底部</option></select></label></div>
+              <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
+              <div className="subtitle-switch"><div><b>显示本镜字幕</b><span>关闭后对白仍保留在剧本中</span></div><button className={`toggle ${selectedScene.subtitleEnabled !== false ? "on" : ""}`} onClick={() => updateScene(selectedScene.id, { subtitleEnabled: selectedScene.subtitleEnabled === false })}><i /></button></div>
+              <label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label>
+              <div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>让生图 AI 重做</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{nativeVideoEnabled ? "让视频 AI 重做" : "配置视频 AI"}</button></div>
+            </div>}
           </div>
         </div>
 
@@ -1305,6 +1588,9 @@ export default function Home() {
               <button onClick={splitAtPlayhead}>分割</button>
               <button onClick={() => deleteScene(selected)} disabled={!selectedScene}>删除片段</button>
               <label>缩放<input type="range" aria-label="时间轴缩放" min={0.6} max={2.4} step={0.2} value={timelineZoom} onChange={(event) => setTimelineZoom(Number(event.target.value))} /></label>
+              <label>字幕<input type="range" aria-label="字幕大小" min={0.7} max={1.6} step={0.1} value={subtitleScale} onChange={(event) => { setSubtitleScale(Number(event.target.value)); invalidateExport(); }} /></label>
+              <label className="color-tool">颜色<input type="color" aria-label="字幕颜色" value={subtitleColor} onChange={(event) => { setSubtitleColor(event.target.value); invalidateExport(); }} /></label>
+              <label>BGM<input type="range" aria-label="背景音乐音量" min={0} max={0.8} step={0.02} value={musicVolume} onChange={(event) => { setMusicVolume(Number(event.target.value)); invalidateExport(); }} /></label>
             </div>
           </div>
           <div className="nle-grid">
