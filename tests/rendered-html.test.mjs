@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -42,6 +43,12 @@ test("rejects an incomplete director review before contacting providers", async 
   }), env, ctx);
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "导演复核缺少完整剧本" });
+});
+
+test("keeps anonymous AI Horde text jobs inside the free token allowance", async () => {
+  const source = await readFile(new URL("../app/api/horde/route.ts", import.meta.url), "utf8");
+  assert.equal(source.match(/max_length:\s*480/g)?.length, 2);
+  assert.match(source, /Math\.min\(4, Number\(body\.count\)/);
 });
 
 test("rejects invalid generation requests before contacting providers", async () => {

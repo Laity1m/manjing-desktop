@@ -526,7 +526,7 @@ export default function Home() {
     const count = Math.max(3, Math.min(8, Math.ceil(productionDuration / 15)));
     const config = agentConfigs.writer;
     if (config.adapter === "horde") {
-      const task = await startHorde("story", { story: story.trim(), style, count, role: "writer", model: config.model });
+      const task = await startHorde("story", { story: story.trim(), style, count: Math.min(4, count), role: "writer", model: config.model });
       const result = await pollHorde("text", task.id, run);
       return String(result.text || "");
     }
@@ -540,7 +540,7 @@ export default function Home() {
     const config = agentConfigs.director;
     setStatusText(`${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
     if (config.adapter === "horde") {
-      const task = await startHorde("director", { story: story.trim(), style, draft, count: Math.max(3, Math.min(8, Math.ceil(productionDuration / 15))), model: config.model });
+      const task = await startHorde("director", { story: story.trim(), style, draft, count: Math.max(3, Math.min(4, Math.ceil(productionDuration / 30))), model: config.model });
       const result = await pollHorde("text", task.id, run);
       return String(result.text || draft);
     }

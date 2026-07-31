@@ -12,7 +12,9 @@ function json(data: unknown, status = 200) {
 function safeMessage(value: unknown) {
   if (!value || typeof value !== "object") return "免费生成服务暂时不可用";
   const candidate = value as { message?: unknown; rc?: unknown };
-  return String(candidate.message || candidate.rc || "免费生成服务暂时不可用").slice(0, 240);
+  const message = String(candidate.message || candidate.rc || "免费生成服务暂时不可用").slice(0, 240);
+  if (/kudos|heavy demand|over 512 tokens/i.test(message)) return "免费社区当前负载较高，请稍后重试；漫镜已将匿名请求限制在免费额度内";
+  return message;
 }
 
 function repairUtf8Mojibake(value: string) {
@@ -54,7 +56,7 @@ export async function POST(request: Request) {
 
     if (action === "story") {
       if (story.length < 8) return json({ error: "故事至少需要 8 个字" }, 400);
-      const count = Math.max(3, Math.min(8, Number(body.count) || 3));
+      const count = Math.max(3, Math.min(4, Number(body.count) || 3));
       const style = String(body.style || "国漫电影感").slice(0, 40);
       const prompt = [
         "You are a professional Chinese motion-comic storyboard writer.",
@@ -78,7 +80,7 @@ export async function POST(request: Request) {
           params: {
             n: 1,
             max_context_length: 4096,
-            max_length: Math.min(1000, 260 + count * 95),
+            max_length: 480,
             temperature: 0.65,
             top_p: 0.9,
             rep_pen: 1.12,
@@ -97,7 +99,7 @@ export async function POST(request: Request) {
     if (action === "director") {
       const draft = String(body.draft || "").trim().slice(0, 10000);
       if (story.length < 8 || draft.length < 20) return json({ error: "导演复核缺少完整剧本" }, 400);
-      const count = Math.max(3, Math.min(8, Number(body.count) || 3));
+      const count = Math.max(3, Math.min(4, Number(body.count) || 3));
       const style = String(body.style || "国漫电影感").slice(0, 40);
       const prompt = [
         "You are the supervising director of a Chinese AI motion-comic production.",
@@ -113,7 +115,7 @@ export async function POST(request: Request) {
         headers: { "Content-Type": "application/json", apikey: "0000000000", "Client-Agent": CLIENT_AGENT },
         body: JSON.stringify({
           prompt,
-          params: { n: 1, max_context_length: 8192, max_length: Math.min(1200, 360 + count * 105), temperature: 0.45, top_p: 0.88, rep_pen: 1.08 },
+          params: { n: 1, max_context_length: 8192, max_length: 480, temperature: 0.45, top_p: 0.88, rep_pen: 1.08 },
           ...(selectedModel ? { models: [selectedModel] } : {}),
           trusted_workers: false,
           validated_backends: true,
