@@ -3,20 +3,20 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://manjing-ai-comic-studio.lingxiangniao03.chatgpt.site"),
-  title: "漫镜 · 多 AI 协作生成漫剧",
-  description: "导演、编剧、生图、视频、配音与剪辑六个 AI 岗位协作，并支持 LibTV 一键成片与即梦 Seedance 动态视频。",
+  title: "漫镜 · AI 漫剧创作与剪辑工作台",
+  description: "从剧本、分镜、角色一致性、动态视频和配音，到浏览器多轨剪辑与成片导出的一站式 AI 漫剧工作台。",
   openGraph: {
-    title: "漫镜 · 多 AI 协作生成漫剧",
-    description: "支持 LibTV 一键成片、即梦 Seedance 动态镜头与可编辑多轨工作台。",
-    images: [{ url: "/og-v3.png", width: 1744, height: 915 }],
+    title: "漫镜 · 从故事到成片的 AI 漫剧工作台",
+    description: "多 AI 分工生成，专业时间线继续精剪；每个阶段产物均可查看、下载和替换。",
+    images: [{ url: "/og-v4.png", width: 1736, height: 905 }],
     locale: "zh_CN",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "漫镜 · 多 AI 协作生成漫剧",
-    description: "支持 LibTV 一键成片、即梦 Seedance 动态镜头与可编辑多轨工作台。",
-    images: ["/og-v3.png"],
+    title: "漫镜 · 从故事到成片的 AI 漫剧工作台",
+    description: "多 AI 分工生成，专业时间线继续精剪；每个阶段产物均可查看、下载和替换。",
+    images: ["/og-v4.png"],
   },
 };
 

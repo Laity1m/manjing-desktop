@@ -11,31 +11,38 @@ const env = {
 };
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 
-test("renders the Simplified Chinese motion-comic studio", async () => {
+test("renders the Simplified Chinese multi-page motion-comic portal", async () => {
   const response = await worker.fetch(new Request("http://localhost/", { headers: { accept: "text/html" } }), env, ctx);
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>漫镜 · 多 AI 协作生成漫剧<\/title>/);
-  assert.match(html, /一键生成 AI 漫剧/);
-  assert.match(html, /免费多 AI 流程/);
-  assert.match(html, /推荐 AI 制片组/);
-  assert.match(html, /LibTV 一键漫剧/);
-  assert.match(html, /即梦 · Seedance/);
-  assert.match(html, /一键生成完整 AI 漫剧/);
-  assert.match(html, /AI 制片组/);
-  assert.match(html, /六个岗位，各自调用自己的模型/);
-  assert.match(html, /导演 AI/);
-  assert.match(html, /编剧与分镜 AI/);
-  assert.match(html, /生图 AI/);
-  assert.match(html, /视频 AI/);
-  assert.match(html, /配音 AI/);
-  assert.match(html, /剪辑 AI/);
-  assert.match(html, /min="0" max="120"/);
-  assert.match(html, /角色资产锁定/);
-  assert.match(html, /分镜级动态表演/);
-  assert.match(html, /自动剪辑成片/);
+  assert.match(html, /<title>漫镜 · AI 漫剧创作与剪辑工作台<\/title>/);
+  assert.match(html, /到一部/);
+  assert.match(html, /真正会动/);
+  assert.match(html, /进入 AI 工作台/);
+  assert.match(html, /打开专业剪辑台/);
+  assert.match(html, /模型与 Key/);
+  assert.match(html, /项目资产/);
+  assert.match(html, /0–120s/);
+  assert.match(html, /href="\/studio"/);
+  assert.match(html, /href="\/editor"/);
+  assert.match(html, /href="\/models"/);
+  assert.match(html, /href="\/projects"/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/);
+});
+
+test("renders every primary product route", async () => {
+  const cases = [
+    ["/studio", /一键生成完整 AI 漫剧/],
+    ["/editor", /保存工程/],
+    ["/models", /模型与 Key/],
+    ["/projects", /项目与资产/],
+  ];
+  for (const [path, marker] of cases) {
+    const response = await worker.fetch(new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }), env, ctx);
+    assert.equal(response.status, 200, path);
+    assert.match(await response.text(), marker);
+  }
 });
 
 test("rejects an incomplete director review before contacting providers", async () => {
@@ -55,21 +62,21 @@ test("keeps anonymous AI Horde text jobs inside the free token allowance", async
 });
 
 test("timeboxes the optional free director review instead of blocking production", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   assert.match(source, /maxAttempts:\s*6/);
   assert.match(source, /超过 18 秒将自动采用编剧初稿/);
   assert.match(source, /if \(runRef\.current !== run\) throw new Error\("任务已取消"\)/);
 });
 
 test("completes truncated free storyboards instead of aborting production", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   assert.match(source, /parseStoryboard\(raw, productionDuration, 1\)/);
   assert.match(source, /completeFreeStoryboard\(partial, story\.trim\(\), style, productionDuration\)/);
   assert.match(source, /免费编剧输出不完整，漫镜正在自动补全分镜/);
 });
 
 test("ships a user-editable multitrack workbench and downloadable deliverables", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   assert.match(source, /AI 制作现场/);
   assert.match(source, /下载剧本/);
   assert.match(source, /下载分镜/);
@@ -83,7 +90,7 @@ test("ships a user-editable multitrack workbench and downloadable deliverables",
 });
 
 test("improves the free image and motion pipeline without presenting it as native animation", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   const horde = await readFile(new URL("../app/api/horde/route.ts", import.meta.url), "utf8");
   assert.match(page, /layered foreground middle ground and background for 2\.5D motion/);
   assert.match(page, /人物本身不会产生走路、口型等新动作/);
@@ -93,7 +100,7 @@ test("improves the free image and motion pipeline without presenting it as nativ
 });
 
 test("connects self-hosted ComfyUI, Wan, CosyVoice and MuseTalk nodes", async () => {
-  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   assert.match(source, /开源本地节点中心/);
   assert.match(source, /\/v1\/image/);
   assert.match(source, /\/v1\/video/);
@@ -104,7 +111,7 @@ test("connects self-hosted ComfyUI, Wan, CosyVoice and MuseTalk nodes", async ()
 });
 
 test("connects official LibTV orchestration and Volcengine Seedance jobs", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   const libtv = await readFile(new URL("../app/api/libtv/route.ts", import.meta.url), "utf8");
   const seedance = await readFile(new URL("../app/api/seedance/route.ts", import.meta.url), "utf8");
   assert.match(page, /generateWithLibTv/);
@@ -114,6 +121,30 @@ test("connects official LibTV orchestration and Volcengine Seedance jobs", async
   assert.match(libtv, /Authorization: `Bearer \$\{accessKey\}`/);
   assert.match(seedance, /contents\/generations\/tasks/);
   assert.match(seedance, /return_last_frame: true/);
+});
+
+test("ships an interactive browser video editor instead of a decorative shell", async () => {
+  const editor = await readFile(new URL("../app/editor/EditorClient.tsx", import.meta.url), "utf8");
+  assert.match(editor, /async function importFiles/);
+  assert.match(editor, /function splitAtPlayhead/);
+  assert.match(editor, /function reorderVisual/);
+  assert.match(editor, /function undo/);
+  assert.match(editor, /function redo/);
+  assert.match(editor, /canvas\.captureStream\(30\)/);
+  assert.match(editor, /new MediaRecorder/);
+  assert.match(editor, /setSnapEnabled/);
+  assert.match(editor, /setPreviewScale/);
+});
+
+test("documents provider keys and keeps project search controls interactive", async () => {
+  const keys = await readFile(new URL("../app/models/KeysClient.tsx", import.meta.url), "utf8");
+  const projects = await readFile(new URL("../app/projects/ProjectsClient.tsx", import.meta.url), "utf8");
+  assert.match(keys, /LIBTV_ACCESS_KEY/);
+  assert.match(keys, /ARK_API_KEY/);
+  assert.match(keys, /POLLINATIONS_KEY/);
+  assert.match(keys, /复制名称/);
+  assert.match(projects, /setFilter\("working"\)/);
+  assert.match(projects, /setQuery\(event\.target\.value\)/);
 });
 
 test("cloud engine proxies reject missing credentials and untrusted media hosts", async () => {
