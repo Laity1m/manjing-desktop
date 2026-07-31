@@ -15,14 +15,33 @@ test("renders the Simplified Chinese motion-comic studio", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>漫镜 · AI 一键生成漫剧<\/title>/);
+  assert.match(html, /<title>漫镜 · 多 AI 协作生成漫剧<\/title>/);
   assert.match(html, /一键生成 AI 漫剧/);
-  assert.match(html, /免费流程体验/);
-  assert.match(html, /完整 AI 漫剧/);
+  assert.match(html, /免费多 AI 流程/);
+  assert.match(html, /推荐 AI 制片组/);
+  assert.match(html, /AI 制片组/);
+  assert.match(html, /六个岗位，各自调用自己的模型/);
+  assert.match(html, /导演 AI/);
+  assert.match(html, /编剧与分镜 AI/);
+  assert.match(html, /生图 AI/);
+  assert.match(html, /视频 AI/);
+  assert.match(html, /配音 AI/);
+  assert.match(html, /剪辑 AI/);
+  assert.match(html, /min="0" max="120"/);
   assert.match(html, /角色资产锁定/);
   assert.match(html, /分镜级动态表演/);
   assert.match(html, /自动剪辑成片/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/);
+});
+
+test("rejects an incomplete director review before contacting providers", async () => {
+  const response = await worker.fetch(new Request("http://localhost/api/horde", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "director", story: "这是一个足够长的故事梗概", draft: "{}" }),
+  }), env, ctx);
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "导演复核缺少完整剧本" });
 });
 
 test("rejects invalid generation requests before contacting providers", async () => {

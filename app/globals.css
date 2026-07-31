@@ -82,8 +82,8 @@ a { color: inherit; text-decoration: none; }
 .duration-setting input { width: 100%; height: 4px; margin: 16px 0 8px; accent-color: var(--purple); cursor: ew-resize; }
 .duration-setting small { display: flex; justify-content: space-between; color: #9e96a2; font-size: 8px; }
 .aspect-setting { display: flex; flex-direction: column; }
-select, .key-input input, .scene-editor input, .scene-editor textarea { border: 1px solid var(--line); background: #faf9f7; color: var(--ink); border-radius: 9px; padding: 10px 11px; outline: none; }
-select:focus, .key-input input:focus, .scene-editor input:focus, .scene-editor textarea:focus { border-color: #ad94e7; box-shadow: 0 0 0 3px rgba(126,91,213,.1); }
+select, .key-input input, .scene-editor input, .scene-editor textarea, .agent-config-panel input { border: 1px solid var(--line); background: #faf9f7; color: var(--ink); border-radius: 9px; padding: 10px 11px; outline: none; }
+select:focus, .key-input input:focus, .scene-editor input:focus, .scene-editor textarea:focus, .agent-config-panel input:focus { border-color: #ad94e7; box-shadow: 0 0 0 3px rgba(126,91,213,.1); }
 .voice-row { margin-top: 18px; padding: 16px 0; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #ebe7e2; }
 .voice-row label { display: block; font-size: 12px; font-weight: 700; }
 .voice-row small { display: block; font-size: 9px; color: #99929d; margin-top: 3px; }
@@ -91,6 +91,39 @@ select:focus, .key-input input:focus, .scene-editor input:focus, .scene-editor t
 .toggle i { display: block; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: .2s; box-shadow: 0 1px 4px rgba(0,0,0,.14); }
 .toggle.on { background: var(--purple); }
 .toggle.on i { transform: translateX(16px); }
+
+.ai-team { margin-top: 16px; border: 1px solid #d9d1df; border-radius: 17px; padding: 18px; background: linear-gradient(145deg, #f8f5fb, #fffdfa 48%, #f0ebf7); }
+.ai-team-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 15px; }
+.ai-team-heading > div:first-child > span { color: var(--purple); font-size: 9px; font-weight: 700; letter-spacing: .18em; }
+.ai-team-heading h3 { margin: 4px 0 5px; font: 500 20px "Noto Serif SC", serif; }
+.ai-team-heading p { margin: 0; color: var(--muted); font-size: 9px; }
+.team-profiles { display: flex; gap: 7px; }
+.team-profiles button { border: 1px solid #cec5d8; border-radius: 8px; background: rgba(255,255,255,.72); color: #706977; padding: 9px 11px; font-size: 9px; white-space: nowrap; }
+.team-profiles button.active { border-color: var(--purple); background: var(--purple); color: #fff; }
+.agent-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.agent-card { position: relative; min-width: 0; border: 1px solid #ddd6e2; border-radius: 12px; padding: 12px; background: rgba(255,255,255,.82); }
+.agent-card.pollinations { border-color: #bdaee2; box-shadow: inset 0 3px 0 #9476d9; }
+.agent-card.webhook { border-color: #8fb9ae; box-shadow: inset 0 3px 0 #4c9b83; }
+.agent-card-top { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 8px; }
+.agent-card-top > i { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: var(--ink); color: #fff; font: normal 11px "Noto Serif SC", serif; }
+.agent-card-top b, .agent-card-top span { display: block; }
+.agent-card-top b { font-size: 11px; }
+.agent-card-top span { margin-top: 2px; color: #918a95; font-size: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-card-top em { padding: 4px 6px; border-radius: 999px; background: #eee9f3; color: #7a6a8d; font-size: 7px; font-style: normal; }
+.agent-card select { width: 100%; margin-top: 10px; padding: 8px 9px; font-size: 8px; }
+.agent-model { min-height: 56px; margin-top: 8px; padding: 8px 9px; border-radius: 8px; background: #f4f1f6; }
+.agent-model span, .agent-model b, .agent-model small { display: block; }
+.agent-model span { color: #99919d; font-size: 7px; }
+.agent-model b { margin-top: 2px; overflow: hidden; color: #51495a; font-size: 9px; white-space: nowrap; text-overflow: ellipsis; }
+.agent-model small { margin-top: 2px; color: #a199a5; font-size: 7px; }
+.recommend-row { display: flex; align-items: center; gap: 4px; margin-top: 8px; overflow: hidden; }
+.recommend-row > span { color: #958e99; font-size: 7px; }
+.recommend-row i { padding: 3px 5px; border-radius: 999px; background: #ede8f3; color: #756584; font-size: 6px; font-style: normal; white-space: nowrap; }
+.agent-config-button { width: 100%; margin-top: 9px; border: 1px solid #d7cfe0; border-radius: 7px; background: #fff; color: var(--purple-dark); padding: 7px; font-size: 8px; }
+.agent-config-panel { margin-top: 9px; padding-top: 9px; border-top: 1px solid #e4dee8; }
+.agent-config-panel label { display: block; margin-top: 7px; color: #817985; font-size: 8px; }
+.agent-config-panel input { display: block; width: 100%; margin-top: 4px; padding: 8px; font-size: 8px; }
+.agent-config-panel > small { display: block; margin-top: 8px; color: #968e9a; font-size: 7px; line-height: 1.55; }
 
 .provider-box { margin-top: 15px; display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: center; border: 1px solid var(--line); border-radius: 15px; padding: 13px; background: #faf8f5; }
 .provider-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -297,6 +330,8 @@ footer p { flex: 1; }
   .nle-actions { width: 100%; flex-wrap: wrap; }
   .nle-actions label { margin-left: auto; }
   .provider-box { grid-template-columns: 1fr; }
+  .agent-grid { grid-template-columns: 1fr 1fr; }
+  .ai-team-heading { align-items: flex-start; flex-direction: column; }
   .key-panel { align-items: flex-start; flex-direction: column; }
   .key-input { min-width: 0; width: 100%; }
   .key-input input { flex: 1; min-width: 0; }
@@ -318,6 +353,9 @@ footer p { flex: 1; }
   .story-panel, .settings-panel { padding: 20px; }
   .choice-grid, .setting-pair { grid-template-columns: 1fr 1fr; }
   .provider-tabs { grid-template-columns: 1fr; }
+  .agent-grid { grid-template-columns: 1fr; }
+  .team-profiles { width: 100%; }
+  .team-profiles button { flex: 1; }
   .character-list { grid-template-columns: 1fr; }
   .asset-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
   .generate-button small { display: none; }

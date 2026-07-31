@@ -26,13 +26,16 @@ function repairUtf8Mojibake(value: string) {
   }
 }
 
-async function chooseChineseTextModel() {
-  const preferred = [
+async function chooseChineseTextModel(role: "writer" | "director" = "writer") {
+  const preferred = role === "director" ? [
+    "koboldcpp/Qwen/Qwen3.5-0.8B",
+    "koboldcpp/Qwen_Qwen3-0.6B-IQ4_XS",
+    "google/gemma-4-31b",
+  ] : [
     "google/gemma-4-31b",
     "koboldcpp/Gemma-4-26B",
     "koboldcpp/gemma-4-26B-A4B-it-UD-Q4_K_S",
     "koboldcpp/Qwen/Qwen3.5-0.8B",
-    "koboldcpp/Qwen_Qwen3-0.6B-IQ4_XS",
   ];
   try {
     const response = await fetch(`${HORDE_API}/status/models?type=text`);
@@ -51,7 +54,7 @@ export async function POST(request: Request) {
 
     if (action === "story") {
       if (story.length < 8) return json({ error: "故事至少需要 8 个字" }, 400);
-      const count = Math.max(3, Math.min(4, Number(body.count) || 3));
+      const count = Math.max(3, Math.min(8, Number(body.count) || 3));
       const style = String(body.style || "国漫电影感").slice(0, 40);
       const prompt = [
         "You are a professional Chinese motion-comic storyboard writer.",
@@ -61,7 +64,8 @@ export async function POST(request: Request) {
         'Compact schema: {"t":"标题","m":"配乐","c":[{"n":"姓名","r":"身份","a":"外观","v":"nova"}],"s":[{"t":"镜头","c":["姓名"],"h":"景别","v":"场景","a":"动作","k":"运镜","p":"说话者","e":"情绪","d":"台词","x":"音效","u":6}]}',
         `故事：${story}`,
       ].join("\n");
-      const selectedModel = await chooseChineseTextModel();
+      const requestedModel = String(body.model || "").trim().slice(0, 160);
+      const selectedModel = requestedModel && !/自动调度|Stable Horde/i.test(requestedModel) ? requestedModel : await chooseChineseTextModel("writer");
       const upstream = await fetch(`${HORDE_API}/generate/text/async`, {
         method: "POST",
         headers: {
@@ -74,7 +78,7 @@ export async function POST(request: Request) {
           params: {
             n: 1,
             max_context_length: 4096,
-            max_length: 480,
+            max_length: Math.min(1000, 260 + count * 95),
             temperature: 0.65,
             top_p: 0.9,
             rep_pen: 1.12,
@@ -90,9 +94,41 @@ export async function POST(request: Request) {
       return json({ id: data.id, kind: "text" }, 202);
     }
 
+    if (action === "director") {
+      const draft = String(body.draft || "").trim().slice(0, 10000);
+      if (story.length < 8 || draft.length < 20) return json({ error: "导演复核缺少完整剧本" }, 400);
+      const count = Math.max(3, Math.min(8, Number(body.count) || 3));
+      const style = String(body.style || "国漫电影感").slice(0, 40);
+      const prompt = [
+        "You are the supervising director of a Chinese AI motion-comic production.",
+        `Review the writer draft for exactly ${count} scenes and style ${style}. Fix JSON syntax, character consistency, dramatic pacing, visual prompts and the ending hook.`,
+        "Return ONLY the complete minified JSON object. Keep the same compact schema and use Simplified Chinese. No markdown or explanation.",
+        `原故事：${story}`,
+        `编剧初稿：${draft}`,
+      ].join("\n");
+      const requestedModel = String(body.model || "").trim().slice(0, 160);
+      const selectedModel = requestedModel && !/自动调度/i.test(requestedModel) ? requestedModel : await chooseChineseTextModel("director");
+      const upstream = await fetch(`${HORDE_API}/generate/text/async`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: "0000000000", "Client-Agent": CLIENT_AGENT },
+        body: JSON.stringify({
+          prompt,
+          params: { n: 1, max_context_length: 8192, max_length: Math.min(1200, 360 + count * 105), temperature: 0.45, top_p: 0.88, rep_pen: 1.08 },
+          ...(selectedModel ? { models: [selectedModel] } : {}),
+          trusted_workers: false,
+          validated_backends: true,
+          slow_workers: true,
+        }),
+      });
+      const data = await upstream.json();
+      if (!upstream.ok || !data?.id) return json({ error: safeMessage(data) }, upstream.status || 502);
+      return json({ id: data.id, kind: "text" }, 202);
+    }
+
     if (action === "image") {
       const prompt = String(body.prompt || "").trim().slice(0, 1800);
       const aspect = body.aspect === "16:9" ? "16:9" : "9:16";
+      const requestedModel = String(body.model || "").trim().slice(0, 160);
       if (prompt.length < 8) return json({ error: "画面描述太短" }, 400);
       const fullPrompt = [
         prompt,
@@ -123,6 +159,7 @@ export async function POST(request: Request) {
           trusted_workers: false,
           validated_backends: true,
           slow_workers: true,
+          ...(requestedModel && !/Stable Horde|自动调度/i.test(requestedModel) ? { models: [requestedModel] } : {}),
         }),
       });
       const data = await upstream.json();

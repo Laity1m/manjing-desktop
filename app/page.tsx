@@ -5,6 +5,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 type Mode = "community" | "cloud";
 type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "music" | "ready" | "exporting" | "error";
 type SceneStatus = "queued" | "writing" | "painting" | "animating" | "voicing" | "ready" | "error";
+type AgentRole = "director" | "writer" | "image" | "video" | "voice" | "editor";
+type AgentAdapter = "horde" | "pollinations" | "browser" | "webhook";
+type AgentConfig = { preset: string; adapter: AgentAdapter; model: string; endpoint: string; apiKey: string };
+type AgentPreset = { id: string; adapter: AgentAdapter; name: string; model: string; note: string; badge?: string; endpoint?: string };
 type CharacterAsset = {
   id: string;
   name: string;
@@ -49,6 +53,57 @@ const VOICES = [
   { value: "onyx", label: "沉稳男声" },
   { value: "echo", label: "青年男声" },
 ];
+
+const AGENT_ROLES: Array<{ id: AgentRole; icon: string; title: string; duty: string; recommends: string[] }> = [
+  { id: "director", icon: "导", title: "导演 AI", duty: "审片、纠错、统一风格与节奏", recommends: ["GPT-5.6 Terra", "Gemini 3 Pro", "Qwen 3.5"] },
+  { id: "writer", icon: "编", title: "编剧与分镜 AI", duty: "剧本改编、分镜表、提示词", recommends: ["GPT-5.6 Luna", "Gemini 3 Flash", "DeepSeek"] },
+  { id: "image", icon: "图", title: "生图 AI", duty: "角色设定、场景与一致性关键帧", recommends: ["GPT Image 2", "Nano Banana", "FLUX"] },
+  { id: "video", icon: "影", title: "视频 AI", duty: "文生视频、图生视频、参考图生视频", recommends: ["Veo 3.1", "Sora 2", "Seedance 2.0"] },
+  { id: "voice", icon: "声", title: "配音 AI", duty: "角色音色、情绪、对白与旁白", recommends: ["Eleven v3", "Gemini TTS", "OpenAI Speech"] },
+  { id: "editor", icon: "剪", title: "剪辑 AI", duty: "节奏、镜头排序、字幕与混音", recommends: ["漫镜智能剪辑", "GPT-5.6 Terra", "自定义工作流"] },
+];
+
+const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
+  director: [
+    { id: "horde-director", adapter: "horde", name: "AI Horde 导演", model: "Qwen 自动调度", note: "免费默认 · 独立复核剧本", badge: "免费" },
+    { id: "pollinations-director", adapter: "pollinations", name: "Pollinations 导演", model: "openai", note: "推荐 · 需要发布密钥", badge: "推荐" },
+    { id: "webhook-director", adapter: "webhook", name: "自定义导演接口", model: "your-director-model", note: "漫镜通用 Webhook" },
+  ],
+  writer: [
+    { id: "horde-writer", adapter: "horde", name: "AI Horde 编剧", model: "Gemma 自动调度", note: "免费默认 · 剧本与分镜", badge: "免费" },
+    { id: "pollinations-writer", adapter: "pollinations", name: "Pollinations 编剧", model: "openai", note: "推荐 · JSON 分镜", badge: "推荐" },
+    { id: "webhook-writer", adapter: "webhook", name: "自定义语言模型", model: "your-llm", note: "OpenAI 兼容或自建转接" },
+  ],
+  image: [
+    { id: "horde-image", adapter: "horde", name: "AI Horde 生图", model: "Stable Horde", note: "免费默认 · 需要排队", badge: "免费" },
+    { id: "pollinations-image", adapter: "pollinations", name: "Pollinations 生图", model: "kontext", note: "推荐 · 支持角色参考图", badge: "推荐" },
+    { id: "webhook-image", adapter: "webhook", name: "自定义生图接口", model: "gpt-image-2", note: "可接 GPT Image、FLUX 等" },
+  ],
+  video: [
+    { id: "browser-video", adapter: "browser", name: "本地运镜样片", model: "Ken Burns", note: "免费默认 · 非原生动画", badge: "免费" },
+    { id: "pollinations-video", adapter: "pollinations", name: "Pollinations 视频", model: "seedance-2.0", note: "推荐 · 文/图/参考图生视频", badge: "推荐" },
+    { id: "webhook-video", adapter: "webhook", name: "自定义视频接口", model: "veo-3.1", note: "可接 Veo、Sora、Seedance" },
+  ],
+  voice: [
+    { id: "browser-voice", adapter: "browser", name: "系统中文语音", model: "Web Speech", note: "免费默认 · 使用本机音色", badge: "免费" },
+    { id: "pollinations-voice", adapter: "pollinations", name: "Pollinations 配音", model: "tts", note: "推荐 · 分角色生成音轨", badge: "推荐" },
+    { id: "webhook-voice", adapter: "webhook", name: "自定义配音接口", model: "eleven-v3", note: "可接 ElevenLabs、Gemini TTS" },
+  ],
+  editor: [
+    { id: "browser-editor", adapter: "browser", name: "漫镜智能剪辑", model: "AutoCut v1", note: "免费默认 · 本地合成", badge: "免费" },
+    { id: "pollinations-editor", adapter: "pollinations", name: "Pollinations 剪辑师", model: "openai", note: "推荐 · AI 先给节奏方案", badge: "推荐" },
+    { id: "webhook-editor", adapter: "webhook", name: "自定义剪辑接口", model: "your-editor-agent", note: "返回镜头顺序与时长" },
+  ],
+};
+
+function configFromPreset(role: AgentRole, presetId: string): AgentConfig {
+  const preset = AGENT_PRESETS[role].find((item) => item.id === presetId) || AGENT_PRESETS[role][0];
+  return { preset: preset.id, adapter: preset.adapter, model: preset.model, endpoint: preset.endpoint || "", apiKey: "" };
+}
+
+function makeTeam(profile: "free" | "pollinations"): Record<AgentRole, AgentConfig> {
+  return Object.fromEntries(AGENT_ROLES.map(({ id }) => [id, configFromPreset(id, profile === "free" ? AGENT_PRESETS[id][0].id : AGENT_PRESETS[id][1].id)])) as Record<AgentRole, AgentConfig>;
+}
 
 function uid() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -123,7 +178,7 @@ function parseStoryboard(raw: string, targetSeconds: number): { title: string; c
   const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
   if (sceneSource.length < 2) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
   const picked = sceneSource.slice(0, 8) as Array<Record<string, unknown>>;
-  const seconds = Math.max(4, Math.round(targetSeconds / picked.length));
+  const seconds = Math.max(2, Math.floor(targetSeconds / picked.length));
   const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
   const rawCharacters = characterSource.slice(0, 4) as Array<Record<string, unknown>>;
   const characters: CharacterAsset[] = rawCharacters.map((item, index) => ({
@@ -151,7 +206,7 @@ function parseStoryboard(raw: string, targetSeconds: number): { title: string; c
       emotion: String(item.emotion || item.e || "克制").slice(0, 24),
       sfx: String(item.sfx || item.x || "环境氛围声").slice(0, 80),
       characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
-      duration: Math.max(4, Math.min(30, Number(item.duration || item.u) || seconds)),
+      duration: Math.max(2, Math.min(30, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
       status: "queued",
     })),
   };
@@ -246,7 +301,9 @@ export default function Home() {
   const [exportUrl, setExportUrl] = useState("");
   const [exportProgress, setExportProgress] = useState(0);
   const [showFilm, setShowFilm] = useState(false);
-  const [showKey, setShowKey] = useState(false);
+  const [agentConfigs, setAgentConfigs] = useState<Record<AgentRole, AgentConfig>>(() => makeTeam("free"));
+  const [agentTeamLoaded, setAgentTeamLoaded] = useState(false);
+  const [configuringRole, setConfiguringRole] = useState<AgentRole | null>(null);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [draggingScene, setDraggingScene] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -254,6 +311,7 @@ export default function Home() {
   const runRef = useRef(0);
 
   const totalDuration = useMemo(() => scenes.reduce((sum, item) => sum + item.duration, 0), [scenes]);
+  const productionDuration = targetDuration || 30;
   const offsets = useMemo(() => scenes.map((_, index) => scenes.slice(0, index).reduce((sum, item) => sum + item.duration, 0)), [scenes]);
   const timelineWidth = Math.max(720, totalDuration * 34 * timelineZoom);
   const currentIndex = scenes.length
@@ -265,8 +323,20 @@ export default function Home() {
     const frame = window.requestAnimationFrame(() => {
       const savedKey = window.localStorage.getItem("manjing-pollinations-key") || "";
       const savedDraft = window.localStorage.getItem("manjing-text-draft");
+      const savedAgents = window.localStorage.getItem("manjing-agent-team");
       if (savedKey.startsWith("pk_")) setApiKey(savedKey);
       if (savedDraft) setStory(savedDraft);
+      if (savedAgents) {
+        try {
+          const parsed = JSON.parse(savedAgents) as Partial<Record<AgentRole, AgentConfig>>;
+          const merged = { ...makeTeam("free"), ...parsed };
+          setAgentConfigs(merged);
+          setMode(AGENT_ROLES.some(({ id }) => merged[id].adapter === "pollinations" || merged[id].adapter === "webhook") ? "cloud" : "community");
+        } catch {
+          window.localStorage.removeItem("manjing-agent-team");
+        }
+      }
+      setAgentTeamLoaded(true);
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
@@ -278,6 +348,10 @@ export default function Home() {
   useEffect(() => {
     if (apiKey.startsWith("pk_")) window.localStorage.setItem("manjing-pollinations-key", apiKey);
   }, [apiKey]);
+
+  useEffect(() => {
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-agent-team", JSON.stringify(agentConfigs));
+  }, [agentConfigs, agentTeamLoaded]);
 
   useEffect(() => {
     if (!playing || !totalDuration) return;
@@ -331,7 +405,77 @@ export default function Home() {
     setShowFilm(false);
   }
 
-  async function startHorde(action: "story" | "image", payload: Record<string, unknown>) {
+  function applyTeamProfile(profile: "free" | "pollinations") {
+    setAgentConfigs(makeTeam(profile));
+    setMode(profile === "free" ? "community" : "cloud");
+    setConfiguringRole(null);
+  }
+
+  function selectAgentPreset(role: AgentRole, presetId: string) {
+    const previous = agentConfigs[role];
+    const next = configFromPreset(role, presetId);
+    if (next.adapter === "webhook") {
+      next.endpoint = previous.endpoint;
+      next.apiKey = previous.apiKey;
+      if (previous.adapter === "webhook") next.model = previous.model;
+    }
+    setAgentConfigs((current) => ({ ...current, [role]: next }));
+    if (next.adapter !== "horde" && next.adapter !== "browser") setMode("cloud");
+  }
+
+  function updateAgentConfig(role: AgentRole, patch: Partial<AgentConfig>) {
+    setAgentConfigs((current) => ({ ...current, [role]: { ...current[role], ...patch } }));
+  }
+
+  function agentName(role: AgentRole) {
+    const config = agentConfigs[role];
+    return AGENT_PRESETS[role].find((item) => item.id === config.preset)?.name || config.model;
+  }
+
+  function agentKey(role: AgentRole) {
+    return agentConfigs[role].apiKey.trim() || apiKey.trim();
+  }
+
+  async function callAgentWebhook(role: AgentRole, payload: Record<string, unknown>) {
+    const config = agentConfigs[role];
+    if (!config.endpoint.startsWith("https://")) throw new Error(`${agentName(role)}需要填写 HTTPS 接口地址`);
+    const response = await fetch(config.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}) },
+      body: JSON.stringify({ role, model: config.model, ...payload }),
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+    return response;
+  }
+
+  async function webhookText(role: "director" | "writer" | "editor", payload: Record<string, unknown>) {
+    const response = await callAgentWebhook(role, payload);
+    const data = await response.json() as { text?: string; content?: string; result?: string };
+    const text = data.text || data.content || data.result;
+    if (!text) throw new Error(`${agentName(role)}没有返回文本结果`);
+    return text;
+  }
+
+  async function webhookMedia(role: "image" | "video" | "voice", payload: Record<string, unknown>) {
+    const response = await callAgentWebhook(role, payload);
+    let blob: Blob;
+    let remoteUrl = "";
+    if ((response.headers.get("content-type") || "").startsWith(role === "image" ? "image/" : role === "video" ? "video/" : "audio/")) {
+      blob = await response.blob();
+    } else {
+      const data = await response.json() as { url?: string; dataUrl?: string };
+      remoteUrl = data.url || data.dataUrl || "";
+      if (!remoteUrl) throw new Error(`${agentName(role)}没有返回媒体地址`);
+      const mediaResponse = await fetch(remoteUrl);
+      if (!mediaResponse.ok) throw new Error(`${agentName(role)}返回的媒体无法读取`);
+      blob = await mediaResponse.blob();
+    }
+    const expected = role === "image" ? "image/" : role === "video" ? "video/" : "audio/";
+    if (!blob.type.startsWith(expected)) throw new Error(`${agentName(role)}返回的文件类型不正确`);
+    return { url: URL.createObjectURL(blob), blob, remoteUrl };
+  }
+
+  async function startHorde(action: "story" | "director" | "image", payload: Record<string, unknown>) {
     const response = await fetch("/api/horde", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -354,19 +498,20 @@ export default function Home() {
     throw new Error("生成等待超时，请稍后重试");
   }
 
-  async function pollinationsStoryboard() {
-    const count = Math.max(3, Math.min(8, Math.ceil(targetDuration / 15)));
+  async function pollinationsText(role: "director" | "writer" | "editor", system: string, user: string) {
+    const key = agentKey(role);
+    if (!key.startsWith("pk_")) throw new Error(`${agentName(role)}需要 Pollinations 发布密钥`);
     const response = await fetch("https://gen.pollinations.ai/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey.trim()}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({
-        model: "openai",
+        model: agentConfigs[role].model || "openai",
         temperature: 0.7,
         safe: true,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: `你是专业 AI 漫剧导演。把故事改编成恰好 ${count} 个连续、可拍摄的短剧镜头，只返回 JSON，所有内容使用简体中文。先建立最多 4 个固定角色，再写分镜。结构：{"title":"标题","music":"无歌词配乐描述","characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光","action":"人物连续动作、表情与互动","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观跨镜头必须一致；每镜都要推动剧情，结尾形成钩子；不要复述用户原文。` },
-          { role: "user", content: `视觉风格：${style}\n目标时长：${targetDuration} 秒\n故事：${story.trim()}` },
+          { role: "system", content: system },
+          { role: "user", content: user },
         ],
       }),
     });
@@ -377,17 +522,51 @@ export default function Home() {
     return content;
   }
 
+  async function generateStoryboard(run: number) {
+    const count = Math.max(3, Math.min(8, Math.ceil(productionDuration / 15)));
+    const config = agentConfigs.writer;
+    if (config.adapter === "horde") {
+      const task = await startHorde("story", { story: story.trim(), style, count, role: "writer", model: config.model });
+      const result = await pollHorde("text", task.id, run);
+      return String(result.text || "");
+    }
+    const system = `你是专业 AI 漫剧编剧和分镜师。把故事改编成恰好 ${count} 个连续、可拍摄的短剧镜头，只返回 JSON，所有内容使用简体中文。先建立最多 4 个固定角色，再写分镜和生成提示词。结构：{"title":"标题","music":"无歌词配乐描述","characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观跨镜头必须一致；每镜都要推动剧情，结尾形成钩子；不要复述用户原文。`;
+    const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n故事：${story.trim()}`;
+    if (config.adapter === "webhook") return webhookText("writer", { task: "storyboard", system, prompt: user, count, duration: productionDuration });
+    return pollinationsText("writer", system, user);
+  }
+
+  async function directorReview(draft: string, run: number) {
+    const config = agentConfigs.director;
+    setStatusText(`${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
+    if (config.adapter === "horde") {
+      const task = await startHorde("director", { story: story.trim(), style, draft, count: Math.max(3, Math.min(8, Math.ceil(productionDuration / 15))), model: config.model });
+      const result = await pollHorde("text", task.id, run);
+      return String(result.text || draft);
+    }
+    const system = "你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜，修复格式、人物一致性、时长、节奏和结尾钩子。保留同一 JSON 结构，只返回修订后的完整 JSON，不要解释。";
+    const user = `原故事：${story.trim()}\n视觉风格：${style}\n编剧初稿：${draft}`;
+    if (config.adapter === "webhook") return webhookText("director", { task: "review_storyboard", system, prompt: user, draft });
+    return pollinationsText("director", system, user);
+  }
+
   async function pollinationsMedia(
     kind: "image" | "audio" | "video",
     prompt: string,
     index = 0,
     options: { references?: string[]; voiceName?: string; duration?: number; music?: boolean } = {},
   ) {
+    const role: "image" | "video" | "voice" = kind === "image" ? "image" : kind === "video" ? "video" : "voice";
+    const config = agentConfigs[role];
+    if (config.adapter === "webhook") return webhookMedia(role, { task: kind, prompt, index, aspect, ...options });
+    if (config.adapter !== "pollinations") throw new Error(`${agentName(role)}不支持当前云端媒体任务`);
+    const key = agentKey(role);
+    if (!key.startsWith("pk_")) throw new Error(`${agentName(role)}需要 Pollinations 发布密钥`);
     const base = "https://gen.pollinations.ai";
     let url = "";
     if (kind === "image") {
       const params = new URLSearchParams({
-        model: options.references?.length ? "kontext" : "zimage",
+        model: options.references?.length ? config.model || "kontext" : config.model === "kontext" ? "zimage" : config.model || "zimage",
         width: aspect === "9:16" ? "768" : "1280",
         height: aspect === "9:16" ? "1280" : "720",
         seed: String(Math.abs(story.length * 97 + index * 7919)),
@@ -403,12 +582,13 @@ export default function Home() {
         params.set("duration", String(Math.max(6, Math.min(180, Math.round(options.duration || targetDuration)))));
         params.set("instrumental", "true");
       } else {
+        if (config.model && config.model !== "tts") params.set("model", config.model);
         params.set("voice", options.voiceName || voice);
       }
       url = `${base}/audio/${encodeURIComponent(prompt)}?${params}`;
     } else {
       const params = new URLSearchParams({
-        model: "seedance-2.0",
+        model: config.model || "seedance-2.0",
         duration: String(Math.max(4, Math.min(10, Math.round(options.duration || 6)))),
         aspectRatio: aspect,
         audio: "false",
@@ -417,7 +597,7 @@ export default function Home() {
       if (options.references?.length) params.set("image", options.references.slice(0, 1).join("|"));
       url = `${base}/video/${encodeURIComponent(prompt)}?${params}`;
     }
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${apiKey.trim()}` } });
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
     if (!response.ok) throw new Error(await responseError(response));
     const blob = await response.blob();
     const expected = kind === "image" ? "image/" : kind === "audio" ? "audio/" : "video/";
@@ -425,12 +605,12 @@ export default function Home() {
     return { url: URL.createObjectURL(blob), blob };
   }
 
-  async function uploadPollinationsMedia(blob: Blob, filename: string) {
+  async function uploadPollinationsMedia(blob: Blob, filename: string, uploadKey = agentKey("image")) {
     const form = new FormData();
     form.append("file", blob, filename);
     const response = await fetch("https://gen.pollinations.ai/upload", {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey.trim()}` },
+      headers: { Authorization: `Bearer ${uploadKey}` },
       body: form,
     });
     if (!response.ok) throw new Error(await responseError(response));
@@ -441,8 +621,8 @@ export default function Home() {
 
   async function makeImage(scene: Scene, index: number, run: number, characterGuide = "") {
     const prompt = `${STYLE_PROMPTS[style]}, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, no typography`;
-    if (mode === "cloud") return (await pollinationsMedia("image", prompt, index)).url;
-    const task = await startHorde("image", { prompt, aspect });
+    if (agentConfigs.image.adapter === "pollinations" || agentConfigs.image.adapter === "webhook") return (await pollinationsMedia("image", prompt, index)).url;
+    const task = await startHorde("image", { prompt, aspect, model: agentConfigs.image.model });
     const result = await pollHorde("image", task.id, run);
     const remote = String(result.imageUrl || "");
     const response = await fetch(`/api/media?url=${encodeURIComponent(remote)}`);
@@ -450,11 +630,38 @@ export default function Home() {
     return URL.createObjectURL(await response.blob());
   }
 
+  async function applyEditorPlan(work: Scene[]) {
+    const config = agentConfigs.editor;
+    if (config.adapter === "browser") return work;
+    setStatusText(`${agentName("editor")}正在分析镜头节奏和剪辑顺序`);
+    const compactScenes = work.map((scene) => ({ id: scene.id, title: scene.title, action: scene.action, dialogue: scene.dialogue, duration: scene.duration }));
+    const system = "你是短视频剪辑师。根据剧情调整镜头顺序和单镜头时长，只返回 JSON：{\"order\":[\"镜头id\"],\"durations\":{\"镜头id\":6}}。不要删除镜头；每镜 2–30 秒；总时长尽量接近目标。";
+    const prompt = `目标时长：${productionDuration} 秒\n镜头：${JSON.stringify(compactScenes)}`;
+    let raw = "";
+    if (config.adapter === "webhook") raw = await webhookText("editor", { task: "edit_plan", system, prompt, scenes: compactScenes, duration: productionDuration });
+    else raw = await pollinationsText("editor", system, prompt);
+    try {
+      const parsed = JSON.parse(raw.replace(/```json/gi, "").replace(/```/g, "").trim()) as { order?: string[]; durations?: Record<string, number> };
+      const byId = new Map(work.map((scene) => [scene.id, scene]));
+      const order = Array.isArray(parsed.order) ? parsed.order.filter((id) => byId.has(id)) : [];
+      const ordered = order.length === work.length ? order.map((id) => byId.get(id) as Scene) : work;
+      return ordered.map((scene) => ({ ...scene, duration: Math.max(2, Math.min(30, Number(parsed.durations?.[scene.id]) || scene.duration)) }));
+    } catch {
+      return work;
+    }
+  }
+
   async function generateAll() {
     if (story.trim().length < 8 || !["idle", "ready", "error"].includes(phase)) return;
-    if (mode === "cloud" && !apiKey.trim().startsWith("pk_")) {
-      setShowKey(true);
-      setError("增强模式需要填写以 pk_ 开头的发布密钥");
+    const missingPollinationsKey = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "pollinations" && !agentKey(id).startsWith("pk_"));
+    if (missingPollinationsKey) {
+      setError(`${missingPollinationsKey.title}需要填写以 pk_ 开头的 Pollinations 发布密钥`);
+      return;
+    }
+    const missingWebhook = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "webhook" && !agentConfigs[id].endpoint.startsWith("https://"));
+    if (missingWebhook) {
+      setConfiguringRole(missingWebhook.id);
+      setError(`${missingWebhook.title}需要填写 HTTPS Webhook 地址`);
       return;
     }
     const run = Date.now();
@@ -470,14 +677,16 @@ export default function Home() {
     setProgress(5);
     setStatusText("AI 正在理解故事并编写分镜");
     try {
-      let raw = "";
-      if (mode === "cloud") raw = await pollinationsStoryboard();
-      else {
-        const task = await startHorde("story", { story: story.trim(), style, count: Math.max(3, Math.min(4, Math.ceil(targetDuration / 15))) });
-        const result = await pollHorde("text", task.id, run);
-        raw = String(result.text || "");
+      let raw = await generateStoryboard(run);
+      setProgress(10);
+      try {
+        const reviewed = await directorReview(raw, run);
+        parseStoryboard(reviewed, productionDuration);
+        raw = reviewed;
+      } catch {
+        setStatusText("导演复核暂时不可用，保留编剧初稿继续制作");
       }
-      const storyboard = parseStoryboard(raw, targetDuration);
+      const storyboard = parseStoryboard(raw, productionDuration);
       setProjectTitle(storyboard.title);
       setMusicPrompt(storyboard.music);
       let cast = storyboard.characters;
@@ -493,9 +702,10 @@ export default function Home() {
         cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
         setCharacters(cast);
         const characterPrompt = `${STYLE_PROMPTS[style]}, professional animation character model sheet, ${character.name}, ${character.role}, ${character.appearance}, full body and face close-up, clean neutral background, exact fixed facial features and costume, no typography`;
-        if (mode === "cloud") {
+        if (agentConfigs.image.adapter !== "horde") {
           const asset = await pollinationsMedia("image", characterPrompt, 50 + index);
-          const remoteUrl = await uploadPollinationsMedia(asset.blob, `character-${index + 1}.png`);
+          const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
+          const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : assetUploadKey ? await uploadPollinationsMedia(asset.blob, `character-${index + 1}.png`, assetUploadKey) : "";
           cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, status: "ready" as const } : item);
         } else {
           const referenceScene: Scene = { id: uid(), title: character.name, visual: characterPrompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
@@ -514,20 +724,21 @@ export default function Home() {
         const presentCast = cast.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
         const castForScene = presentCast.length ? presentCast : cast.slice(0, 2);
         const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
-        if (mode === "cloud") {
+        if (agentConfigs.image.adapter !== "horde") {
           const framePrompt = `${STYLE_PROMPTS[style]}, exact identities and costumes from the character references, ${scene.shot}, ${scene.visual}, ${scene.action}, cinematic composition, coherent spatial layout, no text`;
           const frame = await pollinationsMedia("image", framePrompt, index, { references: castForScene.map((item) => item.remoteUrl).filter(Boolean) as string[] });
-          const remoteImageUrl = await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`);
+          const frameUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
+          const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : frameUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`, frameUploadKey) : "";
           work = work.map((item) => item.id === scene.id ? { ...item, imageUrl: frame.url, remoteImageUrl, status: "ready" as SceneStatus } : item);
         } else {
           const imageUrl = await makeImage(scene, index, run, characterGuide);
           work = work.map((item) => (item.id === scene.id ? { ...item, imageUrl, status: "ready" as SceneStatus } : item));
         }
         setScenes(work);
-        setProgress(26 + Math.round(((index + 1) / work.length) * (mode === "cloud" ? 18 : 48)));
+        setProgress(26 + Math.round(((index + 1) / work.length) * (agentConfigs.video.adapter !== "browser" ? 18 : 48)));
       }
 
-      if (mode === "cloud") {
+      if (agentConfigs.video.adapter !== "browser") {
         setPhase("video");
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
@@ -542,7 +753,7 @@ export default function Home() {
         }
       }
 
-      if (voiceEnabled && mode === "cloud") {
+      if (voiceEnabled && agentConfigs.voice.adapter !== "browser") {
         setPhase("voice");
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
@@ -558,16 +769,17 @@ export default function Home() {
       }
 
       let generatedMusicUrl = "";
-      if (mode === "cloud" && bgmEnabled) {
+      if (bgmEnabled && agentConfigs.voice.adapter !== "browser") {
         setPhase("music");
         setStatusText("正在生成与剧情节奏匹配的无歌词配乐");
         const soundtrack = await pollinationsMedia("audio", storyboard.music, 0, { music: true, duration: work.reduce((sum, item) => sum + item.duration, 0) });
         generatedMusicUrl = soundtrack.url;
         setMusicUrl(soundtrack.url);
       }
+      work = await applyEditorPlan(work);
       setScenes(work);
       setProgress(88);
-      setStatusText(mode === "cloud" ? "角色、动态镜头和声音已完成，正在自动剪辑" : "免费流程预览已完成，正在生成低动态样片");
+      setStatusText(agentConfigs.video.adapter !== "browser" ? "AI 制片组已完成素材，正在合成最终漫剧" : "免费制片组已完成，正在生成低动态样片");
       const exported = await exportFilm(work, true, generatedMusicUrl);
       if (!exported) return;
     } catch (reason) {
@@ -585,9 +797,13 @@ export default function Home() {
   }
 
   async function regenerateImage(scene: Scene, index: number) {
-    if (mode === "cloud" && !apiKey.trim().startsWith("pk_")) {
-      setShowKey(true);
-      setError("请先填写发布密钥");
+    if (agentConfigs.image.adapter === "pollinations" && !agentKey("image").startsWith("pk_")) {
+      setError("生图 AI 需要先填写发布密钥");
+      return;
+    }
+    if (agentConfigs.image.adapter === "webhook" && !agentConfigs.image.endpoint.startsWith("https://")) {
+      setConfiguringRole("image");
+      setError("请先配置生图 AI 的 Webhook");
       return;
     }
     const run = Date.now();
@@ -596,10 +812,11 @@ export default function Home() {
     updateScene(scene.id, { status: "painting" });
     try {
       if (scene.imageUrl) URL.revokeObjectURL(scene.imageUrl);
-      if (mode === "cloud") {
+      if (agentConfigs.image.adapter !== "horde") {
         const presentCast = characters.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
         const frame = await pollinationsMedia("image", `${STYLE_PROMPTS[style]}, preserve the exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, cinematic composition, no text`, index, { references: presentCast.map((item) => item.remoteUrl).filter(Boolean) as string[] });
-        const remoteImageUrl = await uploadPollinationsMedia(frame.blob, `scene-${index + 1}-revision.png`);
+        const revisionUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
+        const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : revisionUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}-revision.png`, revisionUploadKey) : "";
         updateScene(scene.id, { imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" });
       } else {
         const characterGuide = characters.filter((character) => scene.characters.includes(character.name)).map((character) => `${character.name}: ${character.appearance}`).join("; ");
@@ -613,9 +830,18 @@ export default function Home() {
   }
 
   async function generateVideo(scene: Scene) {
-    if (!apiKey.trim().startsWith("pk_")) {
-      setShowKey(true);
-      setError("AI 动态镜头需要增强模式发布密钥");
+    if (agentConfigs.video.adapter === "browser") {
+      setConfiguringRole("video");
+      setError("当前是免费本地运镜样片，请为视频 AI 选择 Seedance 或自定义视频接口");
+      return;
+    }
+    if (agentConfigs.video.adapter === "pollinations" && !agentKey("video").startsWith("pk_")) {
+      setError("视频 AI 需要发布密钥");
+      return;
+    }
+    if (agentConfigs.video.adapter === "webhook" && !agentConfigs.video.endpoint.startsWith("https://")) {
+      setConfiguringRole("video");
+      setError("请先配置视频 AI 的 Webhook");
       return;
     }
     setError("");
@@ -871,6 +1097,10 @@ export default function Home() {
   const busy = !["idle", "ready", "error"].includes(phase);
   const visibleProgress = phase === "exporting" ? exportProgress : progress;
   const selectedScene = scenes[selected];
+  const nativeVideoEnabled = agentConfigs.video.adapter !== "browser";
+  const generatedVoiceEnabled = agentConfigs.voice.adapter !== "browser";
+  const freeTeamActive = AGENT_ROLES.every(({ id }) => agentConfigs[id].preset === AGENT_PRESETS[id][0].id);
+  const recommendedTeamActive = AGENT_ROLES.every(({ id }) => agentConfigs[id].preset === AGENT_PRESETS[id][1].id);
 
   return (
     <main id="top">
@@ -878,7 +1108,7 @@ export default function Home() {
         <a className="brand" href="#top"><span>漫</span><strong>漫镜</strong><small>AI 漫剧工作台</small></a>
         <div className="nav-links"><a href="#studio">创作</a><a href="#works">剪辑台</a><a href="#capabilities">能力说明</a></div>
         <button className={`connection ${mode}`} onClick={() => document.getElementById("provider")?.scrollIntoView({ behavior: "smooth" })}>
-          <i />{mode === "community" ? "免费流程体验" : "完整 AI 漫剧"}
+          <i />{freeTeamActive ? "免费 AI 制片组" : "自定义 AI 制片组"}
         </button>
       </nav>
 
@@ -908,30 +1138,53 @@ export default function Home() {
             <label>视觉风格</label>
             <div className="choice-grid">{Object.keys(STYLE_PROMPTS).map((item) => <button key={item} className={style === item ? "active" : ""} onClick={() => setStyle(item)}>{item}</button>)}</div>
             <div className="duration-setting">
-              <div><label htmlFor="target-duration">目标时长</label><b>{formatTime(targetDuration)}</b></div>
-              <input id="target-duration" type="range" min={15} max={120} step={15} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} />
-              <small><span>15 秒</span><span>拖动选择成片长度</span><span>120 秒</span></small>
+              <div><label htmlFor="target-duration">目标时长</label><b>{targetDuration === 0 ? "自动" : formatTime(targetDuration)}</b></div>
+              <input id="target-duration" type="range" min={0} max={120} step={5} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} />
+              <small><span>0 秒</span><span>{targetDuration === 0 ? "自动判断剧情长度" : "拖动选择成片长度"}</span><span>2 分钟</span></small>
             </div>
             <div className="aspect-setting"><label>画面比例</label><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")}><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option></select></div>
-            <div className="voice-row"><div><label>自动配音</label><small>{mode === "cloud" ? "生成音轨并写入成片" : "使用设备中文语音播放"}</small></div><button className={`toggle ${voiceEnabled ? "on" : ""}`} aria-label="切换自动配音" onClick={() => setVoiceEnabled((value) => !value)}><i /></button></div>
-            {mode === "cloud" && <div className="voice-row"><div><label>剧情配乐</label><small>生成无歌词 BGM 并自动混音</small></div><button className={`toggle ${bgmEnabled ? "on" : ""}`} aria-label="切换剧情配乐" onClick={() => setBgmEnabled((value) => !value)}><i /></button></div>}
-            {mode === "cloud" && voiceEnabled && <select aria-label="配音音色" value={voice} onChange={(event) => setVoice(event.target.value)}>{VOICES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}
+            <div className="voice-row"><div><label>自动配音</label><small>{generatedVoiceEnabled ? "由配音 AI 生成音轨并写入成片" : "使用设备中文语音预览"}</small></div><button className={`toggle ${voiceEnabled ? "on" : ""}`} aria-label="切换自动配音" onClick={() => setVoiceEnabled((value) => !value)}><i /></button></div>
+            {generatedVoiceEnabled && <div className="voice-row"><div><label>剧情配乐</label><small>由声音岗位生成无歌词 BGM 并自动混音</small></div><button className={`toggle ${bgmEnabled ? "on" : ""}`} aria-label="切换剧情配乐" onClick={() => setBgmEnabled((value) => !value)}><i /></button></div>}
+            {generatedVoiceEnabled && voiceEnabled && <select aria-label="配音音色" value={voice} onChange={(event) => setVoice(event.target.value)}>{VOICES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}
+          </div>
+        </div>
+
+        <div className="ai-team">
+          <div className="ai-team-heading"><div><span>AI 制片组</span><h3>六个岗位，各自调用自己的模型</h3><p>编剧先交稿，导演复核；画面、视频和声音分工生产，最后由剪辑 AI 形成成片。</p></div><div className="team-profiles"><button className={freeTeamActive ? "active" : ""} onClick={() => applyTeamProfile("free")}>免费默认阵容</button><button className={recommendedTeamActive ? "active" : ""} onClick={() => applyTeamProfile("pollinations")}>一键应用推荐阵容</button></div></div>
+          <div className="agent-grid">
+            {AGENT_ROLES.map((role) => {
+              const config = agentConfigs[role.id];
+              const presets = AGENT_PRESETS[role.id];
+              return <article key={role.id} className={`agent-card ${config.adapter}`}>
+                <div className="agent-card-top"><i>{role.icon}</i><div><b>{role.title}</b><span>{role.duty}</span></div><em>{config.adapter === "horde" || config.adapter === "browser" ? "免费" : config.adapter === "webhook" ? "自定义" : "已托管"}</em></div>
+                <select aria-label={`选择${role.title}`} value={config.preset} onChange={(event) => selectAgentPreset(role.id, event.target.value)}>{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}</select>
+                <div className="agent-model"><span>当前模型</span><b>{config.model}</b><small>{presets.find((item) => item.id === config.preset)?.note}</small></div>
+                <div className="recommend-row"><span>推荐</span>{role.recommends.map((item) => <i key={item}>{item}</i>)}</div>
+                <button className="agent-config-button" onClick={() => setConfiguringRole(configuringRole === role.id ? null : role.id)}>{configuringRole === role.id ? "收起设置" : "配置模型与接口"}</button>
+                {configuringRole === role.id && <div className="agent-config-panel">
+                  <label>模型 ID<input value={config.model} onChange={(event) => updateAgentConfig(role.id, { model: event.target.value })} placeholder="模型名称或 ID" /></label>
+                  {config.adapter === "webhook" && <label>Webhook 地址<input value={config.endpoint} onChange={(event) => updateAgentConfig(role.id, { endpoint: event.target.value.trim() })} placeholder="https://..." /></label>}
+                  {(config.adapter === "pollinations" || config.adapter === "webhook") && <label>岗位专用 API 密钥（可选）<input type="password" value={config.apiKey} onChange={(event) => updateAgentConfig(role.id, { apiKey: event.target.value.trim() })} placeholder={config.adapter === "pollinations" ? "留空则使用下方统一密钥" : "Bearer token，可留空"} /></label>}
+                  {config.adapter === "webhook" && <small>漫镜会 POST role、model、task 和输入内容；接口返回 text，或可下载的 url。需允许浏览器跨域访问。</small>}
+                </div>}
+              </article>;
+            })}
           </div>
         </div>
 
         <div id="provider" className="provider-box">
           <div className="provider-tabs">
-            <button className={mode === "community" ? "active" : ""} onClick={() => setMode("community")}><b>免费流程体验</b><span>剧本 · 人设 · 分镜 · 低动态样片</span></button>
-            <button className={mode === "cloud" ? "active" : ""} onClick={() => { setMode("cloud"); setShowKey(true); }}><b>完整 AI 漫剧</b><span>角色锁定 · 图生视频 · 配音配乐</span></button>
+            <button className={freeTeamActive ? "active" : ""} onClick={() => applyTeamProfile("free")}><b>免费多 AI 流程</b><span>Horde 编剧/导演/生图 · 本地配音剪辑</span></button>
+            <button className={recommendedTeamActive ? "active" : ""} onClick={() => applyTeamProfile("pollinations")}><b>推荐 AI 制片组</b><span>独立导演 · 编剧 · 生图 · 视频 · 配音 · 剪辑</span></button>
           </div>
-          {mode === "community" ? <p className="provider-note"><b>边界说明：</b>免费模式用于体验完整生产流程，输出是图片运镜样片，不会冒充人物原生动画。要生成角色真正表演、动作连续的 AI 漫剧，请使用“完整 AI 漫剧”。</p> : <div className="key-panel"><div><b>Pollinations 发布密钥</b><span>系统会先生成角色参考资产，再据此制作一致性关键帧和逐镜头视频；密钥只保存在你的设备，请设置预算上限。</span></div>{showKey && <div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">获取密钥 ↗</a></div>}</div>}
+          {freeTeamActive ? <p className="provider-note"><b>免费边界：</b>语言和生图岗位使用社区算力，可能排队；视频岗位生成的是本地图片运镜样片，不会冒充原生 AI 动画。可只替换其中一个岗位，不必整套更换。</p> : <div className="key-panel"><div><b>统一备用密钥</b><span>未填写岗位专用密钥时使用这里的 Pollinations 密钥；所有密钥只保存在当前设备。</span></div><div className="key-input"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value.trim())} placeholder="pk_..." aria-label="Pollinations 发布密钥" /><a href="https://enter.pollinations.ai" target="_blank" rel="noreferrer">获取密钥 ↗</a></div></div>}
         </div>
 
         <div className="generate-row">
-          <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "正在制作完整成片" : mode === "cloud" ? "一键生成 AI 漫剧" : "生成免费流程样片"}<small>{mode === "community" ? "不调用视频模型" : "角色锁定 + 动态表演 + 声音设计"}</small></button>
+          <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑</small></button>
           {busy && phase !== "exporting" && <button className="cancel-button" onClick={cancelGeneration}>停止</button>}
         </div>
-        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><b>{error || statusText}</b><span>{error ? "请检查设置后重新尝试，页面不会伪装成已完成。" : `${visibleProgress}%`}</span></div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>剧本</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>角色</span><span className={["images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>分镜</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{mode === "cloud" ? "动态" : "样片"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>声音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>成片</span></div></div>}
+        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><b>{error || statusText}</b><span>{error ? "请检查对应 AI 岗位的接口设置后重试。" : `${visibleProgress}%`}</span></div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
       </section>
 
       <section id="works" className="works section-shell">
@@ -945,21 +1198,21 @@ export default function Home() {
           <div className="quality-gates">
             <span className={characters.every((item) => item.imageUrl) ? "passed" : ""}>角色参考</span>
             <span className={scenes.every((item) => item.imageUrl) ? "passed" : ""}>一致性分镜</span>
-            <span className={mode === "cloud" && scenes.every((item) => item.videoUrl) ? "passed" : ""}>动态表演</span>
-            <span className={mode === "cloud" && voiceEnabled && scenes.every((item) => item.audioUrl) ? "passed" : ""}>分角色配音</span>
-            <span className={mode === "cloud" && bgmEnabled && !!musicUrl ? "passed" : ""}>剧情配乐</span>
+            <span className={nativeVideoEnabled && scenes.every((item) => item.videoUrl) ? "passed" : ""}>动态表演</span>
+            <span className={generatedVoiceEnabled && voiceEnabled && scenes.every((item) => item.audioUrl) ? "passed" : ""}>分角色配音</span>
+            <span className={generatedVoiceEnabled && bgmEnabled && !!musicUrl ? "passed" : ""}>剧情配乐</span>
             <span className={!!exportUrl ? "passed" : ""}>最终成片</span>
           </div>
         </div>}
         {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成 AI 漫剧”，完成后这里会直接出现可播放成片。</p></div> : <><div className="workbench">
           <div className="preview-column">
             <div className={`stage ${aspect === "9:16" ? "portrait" : "landscape"} ${showFilm && exportUrl ? "film-ready" : ""}`}>
-              {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={mode === "community" || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline /> : current?.imageUrl ? <img key={current.imageUrl} src={current.imageUrl} alt={current.visual} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "AI 正在生成角色动态表演" : current?.status === "painting" ? "AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
+              {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={!generatedVoiceEnabled || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline /> : current?.imageUrl ? <img key={current.imageUrl} src={current.imageUrl} alt={current.visual} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "视频 AI 正在生成角色动态表演" : current?.status === "painting" ? "生图 AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
               {showFilm && exportUrl ? <div className="film-corner">AI 漫剧成片</div> : current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div><div className="subtitle">“{current.dialogue}”</div></>}
             </div>
-            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{mode === "cloud" ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{mode === "cloud" ? `角色参考、逐镜头 AI 动画、分角色配音${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={downloadFilm}>下载成片</button></div> : <>
+            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={downloadFilm}>下载成片</button></div> : <>
               <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
-              <div className="export-panel"><div><b>{mode === "cloud" ? "重新合成 AI 漫剧" : "重新生成流程样片"}</b><span>{mode === "cloud" && voiceEnabled ? "动态表演、字幕、分角色配音与配乐将写入视频" : "关键帧、运镜、转场和字幕将写入样片"}</span></div><button onClick={() => void exportFilm()} disabled={phase === "exporting"}>{phase === "exporting" ? `正在录制 ${exportProgress}%` : mode === "cloud" ? "生成 AI 漫剧成片" : "生成低动态样片"}</button></div>
+              <div className="export-panel"><div><b>{nativeVideoEnabled ? "重新合成 AI 漫剧" : "重新生成流程样片"}</b><span>{nativeVideoEnabled && generatedVoiceEnabled && voiceEnabled ? "动态表演、字幕、分角色配音与配乐将写入视频" : "关键帧、运镜、转场和字幕将写入样片"}</span></div><button onClick={() => void exportFilm()} disabled={phase === "exporting"}>{phase === "exporting" ? `正在录制 ${exportProgress}%` : nativeVideoEnabled ? "生成 AI 漫剧成片" : "生成低动态样片"}</button></div>
               {exportUrl && <div className="export-result"><video src={exportUrl} controls playsInline /><div><b>已有漫剧成片</b><span>可以返回成片模式播放，或重新剪辑。</span><button onClick={() => setShowFilm(true)}>播放成片</button><button onClick={downloadFilm}>下载成片</button></div></div>}
             </>}
           </div>
@@ -967,7 +1220,7 @@ export default function Home() {
           <div className="timeline-panel">
             <div className="timeline-title"><div><b>智能分镜</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
             <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.imageUrl ? "一致性关键帧" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
-            {selectedScene && <div className="scene-editor"><div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")}</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div><label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label><div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>运镜<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div><label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label><label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label><label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label><div className="editor-grid"><label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label></div><div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>重做一致性关键帧</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{mode === "cloud" ? "重做 AI 动态表演" : "转为 AI 动态镜头"}</button></div></div>}
+            {selectedScene && <div className="scene-editor"><div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")}</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div><label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label><div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>运镜<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div><label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label><label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label><label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label><div className="editor-grid"><label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label></div><div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>让生图 AI 重做</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{nativeVideoEnabled ? "让视频 AI 重做" : "配置视频 AI"}</button></div></div>}
           </div>
         </div>
 
