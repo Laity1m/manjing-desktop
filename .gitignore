@@ -1,0 +1,6 @@
+*.exe
+*.blockmap
+.manjing-*/
+node_modules/
+dist/
+*.log
