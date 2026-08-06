@@ -44,3 +44,7 @@ next-env.d.ts
 /windows-app/node_modules/
 /windows-app/release/
 /.pnpm-store/
+*.exe
+*.blockmap
+.manjing-*/
+*.log
