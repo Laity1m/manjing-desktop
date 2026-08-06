@@ -1,6 +1,6 @@
 {
   "name": "manjing-desktop",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "description": "漫镜 AI 漫剧工作室 Windows 原生直载安装版",
