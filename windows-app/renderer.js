@@ -1,7 +1,6 @@
 "use strict";
 
-const BASE_URL = "https://manjing-ai-comic-studio.lingxiangniao03.chatgpt.site";
-const routes = ["/", "/studio", "/editor", "/models", "/projects"];
+const routes = ["/", "/studio", "/video", "/editor", "/models", "/projects"];
 
 const frame = document.getElementById("appFrame");
 const loadingBar = document.getElementById("loadingBar");
@@ -14,8 +13,10 @@ const routeEyebrow = document.getElementById("routeEyebrow");
 const pageTitle = document.getElementById("pageTitle");
 const downloadToast = document.getElementById("downloadToast");
 
+let baseUrl = "";
 let currentRoute = "/";
 let downloadTimer = 0;
+let siteStarted = false;
 
 function setLoading(active) {
   loadingBar.classList.toggle("active", active);
@@ -24,16 +25,15 @@ function setLoading(active) {
 function updateNetwork() {
   const online = navigator.onLine;
   networkPill.classList.toggle("offline", !online);
-  networkPill.querySelector("b").textContent = online ? "云端已连接" : "网络已断开";
-  networkLabel.textContent = online ? "云端服务在线" : "离线模式";
-  offlineCard.hidden = online;
-  frame.classList.toggle("is-offline", !online);
+  networkPill.querySelector("b").textContent = online ? "AI 网络可用" : "本机模式 · AI 离线";
+  networkLabel.textContent = "本机工作区";
 }
 
 function routeLabel(pathname) {
   return ({
     "/": ["创作首页", "MANJING / HOME"],
     "/studio": ["AI 工作台", "MANJING / AI STUDIO"],
+    "/video": ["自主 AI 视频", "MANJING / FREE VIDEO"],
     "/editor": ["专业剪辑台", "MANJING / EDITOR"],
     "/models": ["模型与 Key", "MANJING / MODELS"],
     "/projects": ["项目与资产", "MANJING / PROJECTS"]
@@ -50,13 +50,32 @@ function navigate(pathname) {
   document.querySelectorAll(".rail-item[data-route]").forEach((button) => {
     button.classList.toggle("active", button.dataset.route === route);
   });
+  if (!baseUrl) return;
   setLoading(true);
-  frame.src = `${BASE_URL}${route}`;
+  siteStarted = true;
+  frame.src = `${baseUrl}${route}`;
   welcomePanel.classList.remove("visible");
 }
 
 function showWelcome() {
   welcomePanel.classList.add("visible");
+}
+
+async function initialize() {
+  setLoading(true);
+  offlineCard.hidden = true;
+  try {
+    const meta = await window.manjingDesktop.getMeta();
+    if (!meta?.appUrl || !meta.local) throw new Error("本机服务未就绪");
+    baseUrl = meta.appUrl;
+    document.getElementById("versionLabel").textContent = `版本 ${meta.version}`;
+    siteStarted = true;
+    frame.src = `${baseUrl}${currentRoute}`;
+    showWelcome();
+  } catch {
+    setLoading(false);
+    offlineCard.hidden = false;
+  }
 }
 
 document.querySelectorAll(".rail-item[data-route]").forEach((button) => {
@@ -70,8 +89,8 @@ document.querySelectorAll("[data-welcome-route]").forEach((button) => {
 document.getElementById("welcomeButton").addEventListener("click", showWelcome);
 document.getElementById("welcomeClose").addEventListener("click", () => welcomePanel.classList.remove("visible"));
 document.getElementById("reloadButton").addEventListener("click", () => navigate(currentRoute));
-document.getElementById("retryButton").addEventListener("click", () => { updateNetwork(); if (navigator.onLine) navigate(currentRoute); });
-document.getElementById("browserButton").addEventListener("click", () => window.manjingDesktop.openExternal(`${BASE_URL}${currentRoute}`));
+document.getElementById("retryButton").addEventListener("click", initialize);
+document.getElementById("browserButton").addEventListener("click", () => navigate("/"));
 document.getElementById("downloadButton").addEventListener("click", () => window.manjingDesktop.showDownload());
 document.getElementById("showDownloadButton").addEventListener("click", () => window.manjingDesktop.showDownload());
 document.getElementById("minimizeButton").addEventListener("click", () => window.manjingDesktop.minimize());
@@ -79,13 +98,16 @@ document.getElementById("maximizeButton").addEventListener("click", () => window
 document.getElementById("closeButton").addEventListener("click", () => window.manjingDesktop.close());
 
 frame.addEventListener("load", () => {
+  if (!siteStarted) return;
   window.setTimeout(() => setLoading(false), 240);
+  offlineCard.hidden = true;
+  window.manjingDesktop.siteReady();
 });
 
 window.addEventListener("online", updateNetwork);
 window.addEventListener("offline", updateNetwork);
 window.addEventListener("keydown", (event) => {
-  if (event.ctrlKey && /^[1-5]$/.test(event.key)) {
+  if (event.ctrlKey && /^[1-6]$/.test(event.key)) {
     event.preventDefault();
     navigate(routes[Number(event.key) - 1]);
   }
@@ -113,9 +135,5 @@ window.manjingDesktop.onDownload((download) => {
   }
 });
 
-window.manjingDesktop.getMeta().then((meta) => {
-  if (meta) document.getElementById("versionLabel").textContent = `版本 ${meta.version}`;
-});
-
 updateNetwork();
-showWelcome();
+void initialize();

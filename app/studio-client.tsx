@@ -2,14 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import SiteNav from "./components/SiteNav";
-import { persistEditorProject, type EditorProjectClip } from "./lib/editor-project";
-import { loadCustomModels, type CustomModel } from "./lib/custom-models";
+import ConfirmButton from "./components/ConfirmButton";
+import { API_MODE_DEFAULT_ENDPOINTS, API_MODE_LABELS, apiModesForRole, discoverApiModels, type DiscoverableApiMode, type DiscoveredModel } from "./lib/custom-api";
+import { loadEditorProjectById, persistEditorProject, type EditorProjectClip } from "./lib/editor-project";
+import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/custom-models";
+import { createCanvasFromStudio } from "./lib/production-canvas";
+import { loadLibraryAssets, saveLibraryFile, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
 
 type Mode = "community" | "cloud";
 type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "music" | "ready" | "exporting" | "error";
 type SceneStatus = "queued" | "writing" | "painting" | "animating" | "voicing" | "ready" | "error";
 type AgentRole = "director" | "writer" | "image" | "video" | "voice" | "editor";
-type AgentAdapter = "horde" | "pollinations" | "seedance" | "browser" | "webhook";
+type AgentAdapter = "horde" | "openai" | "anthropic" | "gemini" | "pollinations" | "seedance" | "browser" | "webhook";
 type MotionPreset = "push" | "pull" | "pan-left" | "pan-right" | "float";
 type TransitionPreset = "fade" | "cut" | "flash";
 type VisualFilter = "none" | "warm" | "cool" | "mono";
@@ -19,6 +23,9 @@ type ActivityEvent = { id: string; role: AgentRole; state: ActivityState; messag
 type BridgeHealth = { state: "idle" | "testing" | "ready" | "partial" | "error"; message: string; nodes?: Record<string, boolean>; workflows?: Record<string, boolean> };
 type AgentConfig = { preset: string; adapter: AgentAdapter; model: string; endpoint: string; apiKey: string };
 type AgentPreset = { id: string; adapter: AgentAdapter; name: string; model: string; note: string; badge?: string; endpoint?: string };
+type QuickModelDraft = { name: string; adapter: DiscoverableApiMode; model: string; endpoint: string; apiKey: string; note: string };
+type RoleSaveState = { role: AgentRole | null; state: "idle" | "saving" | "saved" | "error"; message: string };
+type SceneAction = { id: string; type: "image" | "video" };
 type CharacterAsset = {
   id: string;
   name: string;
@@ -27,6 +34,7 @@ type CharacterAsset = {
   voice: string;
   imageUrl?: string;
   remoteUrl?: string;
+  sheetVersion?: 2;
   status: "queued" | "generating" | "ready" | "error";
 };
 type Scene = {
@@ -57,17 +65,199 @@ type Scene = {
   subtitleEnabled?: boolean;
   subtitlePosition?: SubtitlePosition;
 };
+type StudioSession = {
+  version: 2;
+  projectId: string;
+  projectTitle: string;
+  story: string;
+  style: string;
+  targetDuration: number;
+  aspect: "9:16" | "16:9";
+  characters: CharacterAsset[];
+  scenes: Scene[];
+  selected: number;
+  phase: Phase;
+  progress: number;
+  statusText: string;
+  activityLog: ActivityEvent[];
+  musicPrompt: string;
+  musicUrl?: string;
+  exportUrl?: string;
+  updatedAt: string;
+};
 type Storyboard = { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] };
 type LibTvResult = { kind: "image" | "video"; url: string };
 type LibTvMessage = { id: string; seq: number; role: "user" | "assistant"; content: string };
+type SeedancePendingTask = { id: string; model: string; createdAt: number };
 
 const SAMPLE_STORY = "雨夜，女孩在即将关门的旧书店前，遇见了消失三年的恋人。他带着一封从未寄出的信，藏着两人错过彼此的真相。";
-const STYLE_PROMPTS: Record<string, string> = {
-  "国漫电影感": "cinematic Chinese manhua, elegant facial features, dramatic film lighting, rich atmospheric depth",
-  "日系清新": "fresh Japanese anime, soft daylight, delicate line art, airy pastel colors",
-  "赛博朋克": "cyberpunk comic, neon city, rain, holographic glow, strong rim light",
-  "水墨古风": "Chinese ink wash animation, ancient costume, poetic mist, expressive brush texture",
+const STUDIO_SESSION_KEY = "manjing-studio-session-v2";
+const STUDIO_DRAFTS_KEY = "manjing-studio-drafts-v1";
+const NEW_STUDIO_KEY = "manjing-new-studio";
+const OPEN_STUDIO_PROJECT_KEY = "manjing-studio-open-project";
+const SEEDANCE_PENDING_KEY = "manjing-seedance-pending-v1";
+
+function durableMediaUrl(url?: string) {
+  return url && !url.startsWith("blob:") ? url : undefined;
+}
+
+function serializableScene(scene: Scene): Scene {
+  return { ...scene, imageUrl: durableMediaUrl(scene.imageUrl), audioUrl: durableMediaUrl(scene.audioUrl), videoUrl: durableMediaUrl(scene.videoUrl) };
+}
+
+function serializableCharacter(character: CharacterAsset): CharacterAsset {
+  return { ...character, imageUrl: durableMediaUrl(character.imageUrl) };
+}
+type VisualStylePreset = {
+  name: string;
+  category: "写实" | "动画" | "艺术";
+  description: string;
+  preview: string;
+  base: string;
+  character: string;
+  frame: string;
+  motion: string;
 };
+
+const STYLE_PRESETS: VisualStylePreset[] = [
+  {
+    name: "电影写实", category: "写实", description: "真人演员、电影镜头与自然皮肤质感", preview: "/styles/cinematic-photoreal.webp",
+    base: "photorealistic cinematic live-action, real Chinese actors, natural skin pores and fine facial details, physically accurate lighting, realistic fabric and environment textures, correct anatomy and natural hands, restrained feature-film color grade, 35mm cinema lens, not illustration, not anime, not comic, not 3D",
+    character: "live-action casting and wardrobe reference sheet, natural facial asymmetry, realistic hair strands, full body and clean face close-up",
+    frame: "live-action feature film still, subtle acting, practical lighting, believable set dressing, shallow depth of field, cinematic composition",
+    motion: "realistic actor performance, natural blinking and breathing, subtle facial micro-expressions, physically believable hair and cloth motion",
+  },
+  {
+    name: "都市生活写实", category: "写实", description: "当代城市、自然光与生活流表演", preview: "/styles/urban-realism.webp",
+    base: "photorealistic contemporary Chinese urban drama, real actors, documentary-level natural detail, soft available light, authentic modern locations and wardrobe, realistic skin and anatomy, understated color grade, not illustration, not anime, not CGI",
+    character: "modern live-action casting photo and wardrobe continuity reference, natural expression, full body and face close-up",
+    frame: "naturalistic urban television drama frame, believable daily-life production design, observational camera, realistic depth",
+    motion: "restrained natural acting, conversational gestures, realistic eye focus, breathing and fabric physics",
+  },
+  {
+    name: "古装剧写实", category: "写实", description: "真人古装、考究服化道与历史氛围", preview: "/styles/historical-live-action.webp",
+    base: "photorealistic Chinese historical costume drama, real Chinese actors, period-accurate layered silk and linen costumes, detailed hair ornaments, authentic architecture and props, cinematic practical lighting, natural skin texture, not animation, not illustration",
+    character: "live-action historical casting and costume continuity reference, intricate period hairstyle, full body and clean face close-up",
+    frame: "prestige historical drama film still, atmospheric lantern light, authentic production design, elegant widescreen composition",
+    motion: "graceful but physically realistic period performance, subtle sleeves and hair ornaments moving naturally, restrained facial acting",
+  },
+  {
+    name: "港风复古", category: "写实", description: "90 年代胶片、霓虹街景与浓郁情绪", preview: "/styles/hong-kong-retro.webp",
+    base: "photorealistic 1990s Hong Kong cinema, real Chinese actors, 35mm film grain, neon reflected on wet streets, warm tungsten interiors, deep green and red color palette, cinematic halation, realistic anatomy, not illustration",
+    character: "live-action Hong Kong film casting portrait and retro wardrobe continuity sheet, natural textured hair and skin",
+    frame: "moody 1990s Hong Kong film still, expressive practical neon, subtle film grain, intimate cinematic blocking",
+    motion: "natural live-action performance, handheld camera energy, realistic rain, smoke, hair and fabric movement",
+  },
+  {
+    name: "国漫电影感", category: "动画", description: "精致国漫角色与大片式光影", preview: "/styles/chinese-animation.webp",
+    base: "premium cinematic Chinese animation and manhua, elegant facial features, polished linework, dramatic film lighting, rich atmospheric depth, coherent anatomy and natural hands",
+    character: "premium animation character design sheet, clean silhouette, full body and face close-up, production-ready turnaround feeling",
+    frame: "single cinematic Chinese animated film keyframe, layered foreground middle ground and background, expressive acting",
+    motion: "fluid premium animation performance, expressive eyes and mouth, controlled secondary hair and costume motion",
+  },
+  {
+    name: "日系清新", category: "动画", description: "轻盈日漫、柔和天光与青春气息", preview: "/styles/japanese-anime.webp",
+    base: "fresh Japanese anime feature style, delicate clean line art, soft daylight, airy pastel colors, expressive but consistent faces, correct anatomy",
+    character: "anime production character sheet, clean cel shading, full body and facial expression close-up",
+    frame: "single polished anime film keyframe, poetic light, detailed painted background, cinematic composition",
+    motion: "smooth anime acting, subtle eye and mouth animation, gentle wind through hair and clothes",
+  },
+  {
+    name: "美式漫画", category: "动画", description: "大胆墨线、网点与英雄式构图", preview: "/styles/american-comic.webp",
+    base: "bold American graphic novel art, confident ink contours, controlled halftone texture, expressive shadows, saturated accent colors, strong anatomy, sophisticated comic illustration",
+    character: "graphic novel character design sheet, bold silhouette, full body and expressive portrait",
+    frame: "one cinematic graphic-novel frame without panel borders, dynamic perspective, dramatic inked lighting",
+    motion: "stylized graphic-novel motion, strong readable poses, controlled parallax and energetic camera movement",
+  },
+  {
+    name: "赛博朋克", category: "动画", description: "雨夜霓虹、未来城市与强轮廓光", preview: "/styles/cyberpunk.webp",
+    base: "cinematic cyberpunk animation, neon megacity at night, wet reflections, holographic glow, strong rim light, detailed technology, coherent faces and anatomy",
+    character: "cyberpunk character design sheet, distinctive futuristic wardrobe and accessories, full body and face close-up",
+    frame: "single premium cyberpunk animated-film keyframe, volumetric neon, layered city depth, no comic panels",
+    motion: "cinematic cyberpunk performance, animated neon and rain, realistic secondary motion and continuous camera movement",
+  },
+  {
+    name: "3D 动画", category: "动画", description: "院线级三维角色、材质与柔和表演", preview: "/styles/feature-3d.webp",
+    base: "polished stylized 3D animated feature, appealing Chinese character design, physically based materials, soft global illumination, detailed environments, correct anatomy, cinematic rendering",
+    character: "3D feature-animation character model reference, full body and expressive face close-up, consistent materials and proportions",
+    frame: "single theatrical 3D animation frame, cinematic lighting, volumetric depth, production-quality render",
+    motion: "appealing 3D character acting, smooth facial animation, believable body mechanics, hair and cloth simulation",
+  },
+  {
+    name: "黑白漫画", category: "动画", description: "高反差墨稿、速度线与日式网点", preview: "/styles/american-comic.webp",
+    base: "high-contrast black and white manga, professional ink linework, screentone shading, expressive faces, precise anatomy, crisp white paper texture",
+    character: "black-and-white manga character reference sheet, clean contours, full body and facial expression close-up",
+    frame: "one complete manga cinematic frame without borders or speech bubbles, dramatic blacks, controlled screentones",
+    motion: "dynamic manga-inspired animation, controlled camera movement, ink accents and subtle parallax without text",
+  },
+  {
+    name: "水墨古风", category: "艺术", description: "东方留白、宣纸墨韵与诗意云雾", preview: "/styles/ink-wash.webp",
+    base: "Chinese ink-wash animation, expressive brush texture on xuan paper, elegant restrained color accents, poetic mist and negative space, coherent faces and anatomy",
+    character: "ink-wash character design reference, expressive brush contours, full body and face study",
+    frame: "single poetic Chinese ink-wash animated keyframe, layered mountains and mist, cinematic visual rhythm",
+    motion: "flowing ink-wash animation, drifting mist and brush textures, graceful continuous character movement",
+  },
+  {
+    name: "绘本水彩", category: "艺术", description: "透明水色、纸张纹理与温柔叙事", preview: "/styles/watercolor.webp",
+    base: "delicate watercolor storybook illustration, transparent pigments, visible cold-press paper texture, gentle edges, luminous color washes, consistent appealing characters",
+    character: "watercolor storybook character reference sheet, full body and expressive portrait, clean readable silhouette",
+    frame: "single complete watercolor storybook scene, cinematic composition, layered washes and atmospheric depth",
+    motion: "gentle storybook animation, subtle watercolor blooms, natural character gestures and slow cinematic camera",
+  },
+  {
+    name: "黏土定格", category: "艺术", description: "手工黏土、微缩布景与定格质感", preview: "/styles/clay-stop-motion.webp",
+    base: "handcrafted clay stop-motion film, tactile fingerprints in clay, miniature practical sets, warm studio lighting, charming consistent puppets, realistic material texture",
+    character: "clay puppet model sheet, handcrafted wardrobe, full body and face close-up, consistent proportions",
+    frame: "single premium stop-motion film frame, miniature set depth, practical light and tactile surfaces",
+    motion: "expressive stop-motion puppet acting, deliberate frame-by-frame movement, physical miniature effects",
+  },
+  {
+    name: "油画奇幻", category: "艺术", description: "古典油画笔触与史诗奇幻光线", preview: "/styles/watercolor.webp",
+    base: "cinematic fantasy oil painting, rich impasto brushwork, classical chiaroscuro, luminous atmosphere, elegant detailed characters, epic environmental depth",
+    character: "fantasy oil-painted character design study, full body and portrait, ornate consistent costume",
+    frame: "single cinematic fantasy oil-painting scene, dramatic classical lighting, layered atmospheric perspective",
+    motion: "painterly cinematic motion, subtle living brush texture, majestic natural gestures and drifting atmosphere",
+  },
+  {
+    name: "暗黑奇幻", category: "艺术", description: "哥特建筑、低调光影与神秘史诗", preview: "/styles/cyberpunk.webp",
+    base: "dark gothic fantasy cinematic art, monumental architecture, moody low-key lighting, intricate costumes, atmospheric fog, sophisticated restrained palette, coherent anatomy",
+    character: "dark-fantasy character design sheet, ornate silhouette, full body and expressive portrait",
+    frame: "single gothic fantasy cinematic keyframe, deep atmospheric perspective, dramatic motivated light",
+    motion: "weighty dark-fantasy performance, believable cloth and fog motion, slow ominous camera movement",
+  },
+  {
+    name: "治愈插画", category: "艺术", description: "温暖色彩、柔软造型与轻松日常", preview: "/styles/watercolor.webp",
+    base: "warm healing editorial illustration, soft rounded shapes, gentle textured brushwork, harmonious warm palette, expressive friendly characters, cozy detailed environment",
+    character: "warm illustrated character design sheet, approachable silhouette, full body and facial expression close-up",
+    frame: "single cozy illustrated film frame, soft light, readable staging and layered environment",
+    motion: "gentle charming character animation, relaxed gestures, soft environmental movement and calm camera drift",
+  },
+];
+
+const STYLE_PROMPTS: Record<string, string> = Object.fromEntries(STYLE_PRESETS.map((preset) => [preset.name, preset.base]));
+
+function visualStyle(name: string) {
+  return STYLE_PRESETS.find((preset) => preset.name === name) || STYLE_PRESETS[4];
+}
+
+function characterVisualPrompt(name: string) {
+  const preset = visualStyle(name);
+  return `${preset.base}, ${preset.character}`;
+}
+
+function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
+  return `${characterVisualPrompt(styleName)}, ${character.name}, ${character.role}, ${character.appearance}. 16:9 horizontal standard character turnaround model sheet on a pure seamless light-gray cyclorama studio background. Strict layout from left to right: an extreme close-up of the front face at the far left, then a front full-body view, a side full-body view, and a back full-body view. The face, facial proportions, hairstyle, hair color, costume, accessories, footwear, socks and body proportions must remain exactly identical across all four views. Show the three full-body views completely from head to toe without cropping. Calm natural standing posture, both arms hanging naturally, empty hands, no props, no scenery, no furniture, no text, no labels, no decorative frame. 构图硬性要求：16:9 横版，纯浅灰色无缝影棚背景；画面最左侧为人物正面面部大特写，右侧依次排列人物正面全身、侧面全身、背面全身三视图；四个视图的面部、发型、服装、饰品、鞋袜和身体比例严格一致；人物从头到脚完整展示，站姿沉稳自然，双手自然下垂，不拿任何道具。`;
+}
+
+function frameVisualPrompt(name: string) {
+  const preset = visualStyle(name);
+  return `${preset.base}, ${preset.frame}`;
+}
+
+function motionVisualPrompt(name: string) {
+  const preset = visualStyle(name);
+  return `${preset.base}, ${preset.motion}`;
+}
 const VOICES = [
   { value: "nova", label: "温柔女声" },
   { value: "coral", label: "叙事女声" },
@@ -95,6 +285,7 @@ const AGENT_ROLES: Array<{ id: AgentRole; icon: string; title: string; duty: str
   { id: "voice", icon: "声", title: "配音 AI", duty: "角色音色、情绪、对白与旁白", recommends: ["Eleven v3", "Gemini TTS", "OpenAI Speech"] },
   { id: "editor", icon: "剪", title: "剪辑 AI", duty: "节奏、镜头排序、字幕与混音", recommends: ["漫镜智能剪辑", "GPT-5.6 Terra", "自定义工作流"] },
 ];
+const CUSTOM_TEXT_ADAPTERS: AgentAdapter[] = ["openai", "anthropic", "gemini", "webhook"];
 
 const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
   director: [
@@ -116,7 +307,7 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
   video: [
     { id: "browser-video", adapter: "browser", name: "本地 2.5D 运镜", model: "Depth Motion", note: "免费默认 · 推拉/横移/景深光效，人物不会生成新动作", badge: "免费" },
     { id: "pollinations-video", adapter: "pollinations", name: "Pollinations 视频", model: "seedance-2.0", note: "推荐 · 文/图/参考图生视频", badge: "推荐" },
-    { id: "volc-seedance", adapter: "seedance", name: "即梦 Seedance 官方", model: "doubao-seedance-1-0-pro-250528", note: "火山方舟官方 API · 文生视频与图生视频", badge: "官方" },
+    { id: "volc-seedance", adapter: "seedance", name: "Seedance 1.5 Pro · 方舟", model: "doubao-seedance-1-5-pro-251215", note: "火山方舟 Ark API · 文生视频、图生视频与原生音轨", badge: "官方" },
     { id: "wan22-video", adapter: "webhook", name: "本地 Wan2.2 视频", model: "Wan2.2 / ComfyUI", note: "开源节点 · 真实图生视频，需要本机 GPU" },
     { id: "webhook-video", adapter: "webhook", name: "自定义视频接口", model: "veo-3.1", note: "可接 Veo、Sora、Seedance" },
   ],
@@ -124,6 +315,7 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
     { id: "browser-voice", adapter: "browser", name: "系统中文语音", model: "Web Speech", note: "免费默认 · 使用本机音色", badge: "免费" },
     { id: "pollinations-voice", adapter: "pollinations", name: "Pollinations 配音", model: "tts", note: "推荐 · 分角色生成音轨", badge: "推荐" },
     { id: "cosyvoice-voice", adapter: "webhook", name: "本地 CosyVoice", model: "CosyVoice", note: "开源节点 · 中文情绪配音与声音复刻" },
+    { id: "vibevoice-realtime-voice", adapter: "webhook", name: "VibeVoice Realtime", model: "VibeVoice-Realtime-0.5B", note: "微软开源实验节点 · 英文单角色流式配音" },
     { id: "webhook-voice", adapter: "webhook", name: "自定义配音接口", model: "eleven-v3", note: "可接 ElevenLabs、Gemini TTS" },
   ],
   editor: [
@@ -266,13 +458,44 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2):
   };
 }
 
+function storyboardDraft(title: string, music: string, cast: CharacterAsset[], work: Scene[]) {
+  return JSON.stringify({
+    title,
+    music,
+    characters: cast.map((character) => ({ name: character.name, role: character.role, appearance: character.appearance, voice: character.voice })),
+    scenes: work.map((scene) => ({ id: scene.id, title: scene.title, characters: scene.characters, shot: scene.shot, visual: scene.visual, action: scene.action, camera: scene.camera, speaker: scene.speaker, emotion: scene.emotion, dialogue: scene.dialogue, sfx: scene.sfx, duration: scene.duration })),
+  });
+}
+
+function mergeReviewedStoryboard(reviewed: Storyboard, previousCast: CharacterAsset[], previousScenes: Scene[]) {
+  const characters = reviewed.characters.map((character, index) => {
+    const previous = previousCast.find((item) => item.name === character.name) || previousCast[index];
+    return previous ? { ...character, id: previous.id, imageUrl: previous.imageUrl, remoteUrl: previous.remoteUrl, status: previous.status } : character;
+  });
+  const scenes = reviewed.scenes.map((scene, index) => {
+    const previous = previousScenes[index];
+    if (!previous) return scene;
+    return {
+      ...previous,
+      ...scene,
+      id: previous.id,
+      imageUrl: previous.imageUrl,
+      remoteImageUrl: previous.remoteImageUrl,
+      audioUrl: previous.audioUrl,
+      videoUrl: previous.videoUrl,
+      status: previous.videoUrl || previous.imageUrl ? "ready" as SceneStatus : "queued" as SceneStatus,
+    };
+  });
+  return { ...reviewed, characters, scenes };
+}
+
 function completeFreeStoryboard(partial: Storyboard | null, story: string, visualStyle: string, targetSeconds: number): Storyboard {
   const count = targetSeconds < 10 ? 2 : targetSeconds > 75 ? 4 : 3;
   const seconds = Math.max(1, Math.floor(targetSeconds / count));
   const premise = story.replace(/\s+/g, " ").slice(0, 140);
-  const characters = partial?.characters.length ? partial.characters : [
-    { id: uid(), name: "主角", role: "故事推动者", appearance: `${visualStyle}风格，具有明确五官、固定发型和标志性服装的年轻主角`, voice: "nova", status: "queued" },
-    { id: uid(), name: "关键人物", role: "冲突与秘密的承载者", appearance: `${visualStyle}风格，与主角形成轮廓和色彩对比，固定服装与神态`, voice: "onyx", status: "queued" },
+  const characters: CharacterAsset[] = partial?.characters.length ? partial.characters : [
+    { id: uid(), name: "主角", role: "故事推动者", appearance: `${visualStyle}风格，具有明确五官、固定发型和标志性服装的年轻主角`, voice: "nova", status: "queued" as const },
+    { id: uid(), name: "关键人物", role: "冲突与秘密的承载者", appearance: `${visualStyle}风格，与主角形成轮廓和色彩对比，固定服装与神态`, voice: "onyx", status: "queued" as const },
   ];
   const beats = [
     { title: "异样开场", shot: "全景转中景", camera: "缓慢推进", visual: `建立故事空间与时间，围绕“${premise}”呈现一个反常细节，电影感光影和明确前后景`, action: "主角进入环境并注意到异常，先停顿观察，再主动靠近关键线索", dialogue: "这里，和我记得的不一样。", emotion: "警觉", sfx: "环境底噪渐弱，细微提示音出现" },
@@ -282,7 +505,7 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
   ];
   const existing = partial?.scenes || [];
   const names = characters.slice(0, 2).map((character) => character.name);
-  const scenes = Array.from({ length: count }, (_, index) => {
+  const scenes: Scene[] = Array.from({ length: count }, (_, index) => {
     const source = existing[index];
     const beat = beats[index];
     return source ? { ...source, duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds, motion: source.motion || (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4], motionIntensity: source.motionIntensity || 1, transition: source.transition || (index === 0 ? "cut" : "fade"), filter: source.filter || "none", speed: source.speed || 1, volume: source.volume ?? 1, subtitleEnabled: source.subtitleEnabled !== false, subtitlePosition: source.subtitlePosition || "bottom" } : {
@@ -301,12 +524,12 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
       status: "queued" as SceneStatus,
       motion: (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4],
       motionIntensity: 1,
-      transition: index === 0 ? "cut" : "fade",
-      filter: "none",
+      transition: (index === 0 ? "cut" : "fade") as TransitionPreset,
+      filter: "none" as VisualFilter,
       speed: 1,
       volume: 1,
       subtitleEnabled: true,
-      subtitlePosition: "bottom",
+      subtitlePosition: "bottom" as SubtitlePosition,
     };
   });
   return {
@@ -370,6 +593,49 @@ function drawCover(
     drawHeight,
   );
   ctx.restore();
+}
+
+async function normalizeImageBlobForAspect(blob: Blob, aspect: "9:16" | "16:9") {
+  const bitmap = await createImageBitmap(blob);
+  const width = aspect === "9:16" ? 720 : 1280;
+  const height = aspect === "9:16" ? 1280 : 720;
+  const targetRatio = width / height;
+  const sourceRatio = bitmap.width / bitmap.height;
+  let sourceX = 0;
+  let sourceY = 0;
+  let sourceWidth = bitmap.width;
+  let sourceHeight = bitmap.height;
+  if (sourceRatio > targetRatio) {
+    sourceWidth = bitmap.height * targetRatio;
+    sourceX = (bitmap.width - sourceWidth) / 2;
+  } else if (sourceRatio < targetRatio) {
+    sourceHeight = bitmap.width / targetRatio;
+    sourceY = (bitmap.height - sourceHeight) / 2;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("无法建立视频关键帧画布");
+  }
+  context.fillStyle = "#111";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(bitmap, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, width, height);
+  bitmap.close();
+  const normalized = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.94));
+  if (!normalized) throw new Error("无法把生图结果转换为视频关键帧尺寸");
+  return normalized;
+}
+
+function blobToDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("关键帧读取失败"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 function drawMovingShot(
@@ -441,6 +707,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [agentConfigs, setAgentConfigs] = useState<Record<AgentRole, AgentConfig>>(() => makeTeam("free"));
   const [agentTeamLoaded, setAgentTeamLoaded] = useState(false);
   const [configuringRole, setConfiguringRole] = useState<AgentRole | null>(null);
+  const [quickModelRole, setQuickModelRole] = useState<AgentRole | null>(null);
+  const [quickModelDraft, setQuickModelDraft] = useState<QuickModelDraft>({ name: "", adapter: "webhook", model: "", endpoint: "", apiKey: "", note: "" });
+  const [quickModelMessage, setQuickModelMessage] = useState("");
+  const [quickModelLoading, setQuickModelLoading] = useState(false);
+  const [quickModelSaving, setQuickModelSaving] = useState(false);
+  const [quickModelOptions, setQuickModelOptions] = useState<DiscoveredModel[]>([]);
+  const [roleSaveState, setRoleSaveState] = useState<RoleSaveState>({ role: null, state: "idle", message: "" });
+  const [roleModelOptions, setRoleModelOptions] = useState<Partial<Record<AgentRole, DiscoveredModel[]>>>({});
+  const [roleModelLoading, setRoleModelLoading] = useState<AgentRole | null>(null);
+  const [retryingRole, setRetryingRole] = useState<AgentRole | null>(null);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [draggingScene, setDraggingScene] = useState<number | null>(null);
   const [subtitleScale, setSubtitleScale] = useState(1);
@@ -463,11 +739,21 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [libtvSending, setLibtvSending] = useState(false);
   const [customModels, setCustomModels] = useState<CustomModel[]>([]);
   const [editorSyncState, setEditorSyncState] = useState<"idle" | "saving" | "ready" | "error">("idle");
+  const [editorSyncProgress, setEditorSyncProgress] = useState(0);
+  const [sceneAction, setSceneAction] = useState<SceneAction | null>(null);
   const [seedanceApiKey, setSeedanceApiKey] = useState("");
-  const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-1-0-pro-250528");
+  const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-1-5-pro-251215");
+  const [importMessage, setImportMessage] = useState("可按需导入，已具备的环节会自动跳过");
+  const [scriptImported, setScriptImported] = useState(false);
+  const [volcengineSdk, setVolcengineSdk] = useState<{ installed: boolean; version: string; signerReady: boolean; note: string } | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const runRef = useRef(0);
+  const editorSyncRef = useRef(false);
+  const quickModelSaveRef = useRef(false);
+  const roleModelWriteRef = useRef<AgentRole | null>(null);
+  const sceneActionRef = useRef("");
+  const editorProjectIdRef = useRef(`studio-${Date.now().toString(36)}`);
   const libtvPauseRef = useRef(false);
 
   const totalDuration = useMemo(() => scenes.reduce((sum, item) => sum + item.duration, 0), [scenes]);
@@ -481,51 +767,162 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const activityByRole = useMemo(() => Object.fromEntries(AGENT_ROLES.map(({ id }) => [id, activityLog.find((item) => item.role === id)])) as Partial<Record<AgentRole, ActivityEvent>>, [activityLog]);
 
   useEffect(() => {
+    let active = true;
     const frame = window.requestAnimationFrame(() => {
-      const savedKey = window.localStorage.getItem("manjing-pollinations-key") || "";
-      const savedDraft = window.localStorage.getItem("manjing-text-draft");
-      const savedAgents = window.localStorage.getItem("manjing-agent-team");
-      const savedBridge = window.localStorage.getItem("manjing-local-bridge");
-      const savedCloudEngines = window.localStorage.getItem("manjing-cloud-engines");
-      if (savedKey.startsWith("pk_")) setApiKey(savedKey);
-      if (savedDraft) setStory(savedDraft);
-      if (savedAgents) {
+      void (async () => {
+        type SavedSettings = {
+          agentConfigs?: Partial<Record<AgentRole, AgentConfig>>;
+          customModels?: CustomModel[];
+          pollinationsKey?: string;
+          bridge?: { url?: string; token?: string; lipsync?: boolean };
+          cloudEngines?: { libtvKey?: string; libtvSessionId?: string; libtvProjectUrl?: string; seedanceKey?: string; seedanceModel?: string };
+          workspace?: { projectTitle?: string; story?: string; style?: string; targetDuration?: number; aspect?: "9:16" | "16:9"; voiceEnabled?: boolean; bgmEnabled?: boolean; voice?: string; musicPrompt?: string; subtitleScale?: number; subtitleColor?: string; musicVolume?: number; scriptImported?: boolean };
+        };
+        const startingFresh = window.localStorage.getItem(NEW_STUDIO_KEY) === "1";
+        const requestedProjectId = window.localStorage.getItem(OPEN_STUDIO_PROJECT_KEY) || "";
+        if (startingFresh) {
+          window.localStorage.removeItem(NEW_STUDIO_KEY);
+          window.localStorage.removeItem(STUDIO_SESSION_KEY);
+          window.localStorage.removeItem("manjing-text-draft");
+          setStory("");
+          setScriptImported(false);
+          setProjectTitle("未命名项目");
+          editorProjectIdRef.current = `studio-${Date.now().toString(36)}`;
+        }
+        if (requestedProjectId) window.localStorage.removeItem(OPEN_STUDIO_PROJECT_KEY);
+        let savedSession: StudioSession | null = null;
+        if (!startingFresh) {
+          try { savedSession = JSON.parse(window.localStorage.getItem(STUDIO_SESSION_KEY) || "null") as StudioSession | null; } catch { savedSession = null; }
+        }
+        let restoredProject = null as Awaited<ReturnType<typeof loadEditorProjectById>>;
+        const mediaProjectId = requestedProjectId || savedSession?.projectId || "";
+        if (mediaProjectId) restoredProject = await loadEditorProjectById(mediaProjectId).catch(() => null);
+        let desktop: SavedSettings = {};
         try {
-          const parsed = JSON.parse(savedAgents) as Partial<Record<AgentRole, AgentConfig>>;
-          const merged = { ...makeTeam("free"), ...parsed };
+          const response = await fetch("/api/desktop/settings", { cache: "no-store" });
+          if (response.ok) desktop = await response.json() as SavedSettings;
+        } catch {
+          desktop = {};
+        }
+        if (!active) return;
+        const savedKey = desktop.pollinationsKey || window.localStorage.getItem("manjing-pollinations-key") || "";
+        const savedDraft = startingFresh ? "" : window.localStorage.getItem("manjing-text-draft");
+        const savedAgents = desktop.agentConfigs || (() => {
+          try { return JSON.parse(window.localStorage.getItem("manjing-agent-team") || "null") as Partial<Record<AgentRole, AgentConfig>> | null; } catch { return null; }
+        })();
+        const savedBridge = desktop.bridge || (() => {
+          try { return JSON.parse(window.localStorage.getItem("manjing-local-bridge") || "null") as SavedSettings["bridge"]; } catch { return undefined; }
+        })();
+        const savedCloudEngines = desktop.cloudEngines || (() => {
+          try { return JSON.parse(window.localStorage.getItem("manjing-cloud-engines") || "null") as SavedSettings["cloudEngines"]; } catch { return undefined; }
+        })();
+        const savedWorkspace = startingFresh ? undefined : desktop.workspace || (() => {
+          try { return JSON.parse(window.localStorage.getItem("manjing-workspace") || "null") as SavedSettings["workspace"]; } catch { return undefined; }
+        })();
+        if (savedKey) setApiKey(savedKey);
+        if (savedWorkspace?.story || savedDraft) setStory(savedWorkspace?.story || savedDraft || SAMPLE_STORY);
+        if (savedAgents) {
+          const merged = { ...makeTeam("free"), ...savedAgents };
           setAgentConfigs(merged);
           setMode(AGENT_ROLES.some(({ id }) => !["horde", "browser"].includes(merged[id].adapter)) ? "cloud" : "community");
-        } catch {
-          window.localStorage.removeItem("manjing-agent-team");
         }
-      }
-      if (savedBridge) {
-        try {
-          const parsed = JSON.parse(savedBridge) as { url?: string; token?: string; lipsync?: boolean };
-          setBridgeUrl(parsed.url || "");
-          setBridgeToken(parsed.token || "");
-          setLipsyncEnabled(Boolean(parsed.lipsync));
-        } catch {
-          window.localStorage.removeItem("manjing-local-bridge");
+        if (savedBridge) {
+          setBridgeUrl(savedBridge.url || "");
+          setBridgeToken(savedBridge.token || "");
+          setLipsyncEnabled(Boolean(savedBridge.lipsync));
         }
-      }
-      if (savedCloudEngines) {
-        try {
-          const parsed = JSON.parse(savedCloudEngines) as { libtvKey?: string; libtvSessionId?: string; libtvProjectUrl?: string; seedanceKey?: string; seedanceModel?: string };
-          setLibtvAccessKey(parsed.libtvKey || "");
-          setLibtvSessionId(parsed.libtvSessionId || "");
-          setLibtvProjectUrl(parsed.libtvProjectUrl || "");
-          setSeedanceApiKey(parsed.seedanceKey || "");
-          setSeedanceModel(parsed.seedanceModel || "doubao-seedance-1-0-pro-250528");
-        } catch {
-          window.localStorage.removeItem("manjing-cloud-engines");
+        if (savedCloudEngines) {
+          setLibtvAccessKey(savedCloudEngines.libtvKey || "");
+          setLibtvSessionId(savedCloudEngines.libtvSessionId || "");
+          setLibtvProjectUrl(savedCloudEngines.libtvProjectUrl || "");
+          setSeedanceApiKey(savedCloudEngines.seedanceKey || "");
+          setSeedanceModel(savedCloudEngines.seedanceModel || "doubao-seedance-1-5-pro-251215");
         }
-      }
-      setCustomModels(loadCustomModels());
-      setAgentTeamLoaded(true);
+        if (savedWorkspace) {
+          if (savedWorkspace.projectTitle) setProjectTitle(savedWorkspace.projectTitle);
+          if (savedWorkspace.style && STYLE_PROMPTS[savedWorkspace.style]) setStyle(savedWorkspace.style);
+          if (typeof savedWorkspace.targetDuration === "number") setTargetDuration(savedWorkspace.targetDuration);
+          if (savedWorkspace.aspect === "9:16" || savedWorkspace.aspect === "16:9") setAspect(savedWorkspace.aspect);
+          if (typeof savedWorkspace.voiceEnabled === "boolean") setVoiceEnabled(savedWorkspace.voiceEnabled);
+          if (typeof savedWorkspace.bgmEnabled === "boolean") setBgmEnabled(savedWorkspace.bgmEnabled);
+          if (savedWorkspace.voice) setVoice(savedWorkspace.voice);
+          if (savedWorkspace.musicPrompt) setMusicPrompt(savedWorkspace.musicPrompt);
+          if (typeof savedWorkspace.subtitleScale === "number") setSubtitleScale(savedWorkspace.subtitleScale);
+          if (savedWorkspace.subtitleColor) setSubtitleColor(savedWorkspace.subtitleColor);
+          if (typeof savedWorkspace.musicVolume === "number") setMusicVolume(savedWorkspace.musicVolume);
+          setScriptImported(savedWorkspace.scriptImported === true);
+        }
+        if (requestedProjectId && !restoredProject) {
+          try {
+            const drafts = JSON.parse(window.localStorage.getItem(STUDIO_DRAFTS_KEY) || "{}") as Record<string, StudioSession>;
+            if (drafts[requestedProjectId]) savedSession = drafts[requestedProjectId];
+          } catch { /* keep the latest session fallback */ }
+        }
+        const snapshot = (requestedProjectId && restoredProject?.studioSnapshot ? restoredProject.studioSnapshot : savedSession) as Partial<StudioSession> | null;
+        if (snapshot && !startingFresh) {
+          const sessionScenes = Array.isArray(snapshot.scenes) ? snapshot.scenes as Scene[] : [];
+          const restoredScenes = sessionScenes.map((scene) => {
+            const visual = restoredProject?.clips.find((clip) => clip.id === `${scene.id}-visual`);
+            const audio = restoredProject?.clips.find((clip) => clip.id === `${scene.id}-audio`);
+            return {
+              ...scene,
+              imageUrl: visual?.type === "image" ? visual.url : durableMediaUrl(scene.imageUrl),
+              videoUrl: visual?.type === "video" ? visual.url : durableMediaUrl(scene.videoUrl),
+              audioUrl: audio?.url || durableMediaUrl(scene.audioUrl),
+            };
+          });
+          if (snapshot.projectId || restoredProject?.id) editorProjectIdRef.current = String(restoredProject?.id || snapshot.projectId);
+          if (snapshot.projectTitle) setProjectTitle(snapshot.projectTitle);
+          if (snapshot.story) setStory(snapshot.story);
+          if (snapshot.style && STYLE_PROMPTS[snapshot.style]) setStyle(snapshot.style);
+          if (typeof snapshot.targetDuration === "number") setTargetDuration(snapshot.targetDuration);
+          if (snapshot.aspect === "9:16" || snapshot.aspect === "16:9") setAspect(snapshot.aspect);
+          if (Array.isArray(snapshot.characters)) setCharacters(snapshot.characters as CharacterAsset[]);
+          if (restoredScenes.length) setScenes(restoredScenes);
+          if (typeof snapshot.selected === "number") setSelected(Math.max(0, Math.min(restoredScenes.length - 1, snapshot.selected)));
+          if (snapshot.phase) setPhase(snapshot.phase as Phase);
+          if (typeof snapshot.progress === "number") setProgress(snapshot.progress);
+          if (snapshot.statusText) setStatusText(snapshot.statusText);
+          if (Array.isArray(snapshot.activityLog)) setActivityLog(snapshot.activityLog as ActivityEvent[]);
+          if (snapshot.musicPrompt) setMusicPrompt(snapshot.musicPrompt);
+          setMusicUrl(restoredProject?.clips.find((clip) => clip.id === "project-music")?.url || durableMediaUrl(snapshot.musicUrl) || "");
+          setExportUrl(restoredProject?.finalVideo?.url || durableMediaUrl(snapshot.exportUrl) || "");
+        } else if (requestedProjectId && restoredProject) {
+          editorProjectIdRef.current = restoredProject.id;
+          const visuals = restoredProject.clips.filter((clip) => clip.type === "video" || clip.type === "image");
+          const reconstructed = visuals.map((clip, index) => ({ id: clip.id.replace(/-visual$/, ""), title: clip.name, visual: clip.name, action: "已保存的生成镜头", shot: "镜头", camera: "保持原镜头", dialogue: "", speaker: "", emotion: "自然", sfx: "", characters: [], duration: clip.duration, imageUrl: clip.type === "image" ? clip.url : undefined, videoUrl: clip.type === "video" ? clip.url : undefined, status: "ready" as SceneStatus }));
+          setProjectTitle(restoredProject.name); setScenes(reconstructed); setPhase("ready"); setProgress(100); setStatusText("已从项目资产恢复镜头"); setExportUrl(restoredProject.finalVideo?.url || "");
+        }
+        const models = Array.isArray(desktop.customModels) ? desktop.customModels.filter((item) => item?.id && item?.role && item?.model) : loadCustomModels();
+        setCustomModels(models);
+        if (desktop.customModels) {
+          try { saveCustomModels(models); } catch { /* localStorage fallback is optional in the desktop app */ }
+        }
+        setAgentTeamLoaded(true);
+      })();
     });
-    return () => window.cancelAnimationFrame(frame);
+    return () => { active = false; window.cancelAnimationFrame(frame); };
   }, []);
+
+  useEffect(() => {
+    if (!agentTeamLoaded) return;
+    const raw = window.localStorage.getItem("manjing-studio-library-import");
+    if (!raw) return;
+    window.localStorage.removeItem("manjing-studio-library-import");
+    let ids: string[] = [];
+    try { ids = JSON.parse(raw) as string[]; } catch { ids = []; }
+    if (!Array.isArray(ids) || !ids.length) return;
+    setImportMessage("正在从独立资产库载入选中资产…");
+    void loadLibraryAssets(ids).then((items) => applyLibraryAssets(items)).catch((reason) => setError(reason instanceof Error ? reason.message : "资产库导入失败"));
+  }, [agentTeamLoaded]);
+
+  useEffect(() => {
+    if (!agentTeamLoaded) return;
+    void fetch("/api/desktop/volcengine-sdk", { cache: "no-store" }).then(async (response) => {
+      if (response.ok) setVolcengineSdk(await response.json() as { installed: boolean; version: string; signerReady: boolean; note: string });
+      else setVolcengineSdk({ installed: false, version: "", signerReady: false, note: "网页版不加载本机 SDK；Windows 独立版会自动检测。" });
+    }).catch(() => setVolcengineSdk({ installed: false, version: "", signerReady: false, note: "网页版不加载本机 SDK；Windows 独立版会自动检测。" }));
+  }, [agentTeamLoaded]);
 
   useEffect(() => {
     const refresh = () => setCustomModels(loadCustomModels());
@@ -556,6 +953,49 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   useEffect(() => {
     if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceKey: seedanceApiKey, seedanceModel }));
   }, [libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, agentTeamLoaded]);
+
+  useEffect(() => {
+    if (!agentTeamLoaded) return;
+    const workspace = { projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported };
+    window.localStorage.setItem("manjing-workspace", JSON.stringify(workspace));
+    const timer = window.setTimeout(() => { void persistDesktopSettings().catch(() => undefined); }, 300);
+    return () => window.clearTimeout(timer);
+  }, [agentTeamLoaded, agentConfigs, customModels, apiKey, bridgeUrl, bridgeToken, lipsyncEnabled, libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported]);
+
+  useEffect(() => {
+    if (!agentTeamLoaded) return;
+    const session: StudioSession = {
+      version: 2,
+      projectId: editorProjectIdRef.current,
+      projectTitle,
+      story,
+      style,
+      targetDuration,
+      aspect,
+      characters: characters.map(serializableCharacter),
+      scenes: scenes.map(serializableScene),
+      selected,
+      phase,
+      progress,
+      statusText,
+      activityLog: activityLog.slice(0, 120),
+      musicPrompt,
+      musicUrl: durableMediaUrl(musicUrl),
+      exportUrl: durableMediaUrl(exportUrl),
+      updatedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(STUDIO_SESSION_KEY, JSON.stringify(session));
+    if (story.trim() || scenes.length || phase !== "idle") {
+      try {
+        const drafts = JSON.parse(window.localStorage.getItem(STUDIO_DRAFTS_KEY) || "{}") as Record<string, StudioSession>;
+        drafts[session.projectId] = session;
+        window.localStorage.setItem(STUDIO_DRAFTS_KEY, JSON.stringify(Object.fromEntries(Object.entries(drafts).sort((a, b) => Date.parse(b[1].updatedAt) - Date.parse(a[1].updatedAt)).slice(0, 30))));
+        const saved = JSON.parse(window.localStorage.getItem("manjing-projects") || "[]") as Array<{ id?: string }>;
+        const card = { id: session.projectId, title: projectTitle || "未命名漫剧", story: story.trim().slice(0, 120) || `${scenes.length} 个分镜`, updatedAt: "刚刚", duration: formatTime(totalDuration || targetDuration), status: phase === "ready" ? "待精剪" : phase === "error" ? "制作中断" : "制作中", source: "studio" as const, durable: false };
+        window.localStorage.setItem("manjing-projects", JSON.stringify([card, ...saved.filter((item) => item.id !== card.id)].slice(0, 30)));
+      } catch { /* a private browsing quota should not interrupt production */ }
+    }
+  }, [agentTeamLoaded, projectTitle, story, style, targetDuration, aspect, characters, scenes, selected, phase, progress, statusText, activityLog, musicPrompt, musicUrl, exportUrl]);
 
   useEffect(() => {
     if (!playing || !totalDuration) return;
@@ -648,6 +1088,256 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   function updateAgentConfig(role: AgentRole, patch: Partial<AgentConfig>) {
     setAgentConfigs((current) => ({ ...current, [role]: { ...current[role], ...patch } }));
+    setRoleSaveState({ role, state: "idle", message: "配置已修改，点击下方按钮保存并应用" });
+  }
+
+  function desktopSettingsPayload(configs = agentConfigs, models = customModels) {
+    return {
+      version: 1,
+      agentConfigs: configs,
+      customModels: models,
+      pollinationsKey: apiKey,
+      bridge: { url: bridgeUrl, token: bridgeToken, lipsync: lipsyncEnabled },
+      cloudEngines: { libtvKey: libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceKey: seedanceApiKey, seedanceModel },
+      workspace: { projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported },
+      savedAt: new Date().toISOString(),
+    };
+  }
+
+  async function persistDesktopSettings(configs = agentConfigs, models = customModels) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch("/api/desktop/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(desktopSettingsPayload(configs, models)),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+    } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") throw new Error("本机配置写入超过 6 秒，操作已解除锁定，请重试");
+      throw reason;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  function changeDirectApiMode(role: AgentRole, adapter: DiscoverableApiMode) {
+    const defaults: Record<AgentRole, string> = { director: "", writer: "", image: "", video: "seedance-2.0", voice: "tts", editor: "" };
+    setAgentConfigs((current) => {
+      const previous = current[role];
+      return {
+        ...current,
+        [role]: {
+          // Choosing an API mode starts a fresh direct-role configuration. Do
+          // not silently overwrite whichever saved custom model happened to be
+          // selected before the user opened this form.
+          preset: `direct-${role}`,
+          adapter,
+          model: previous.adapter === adapter ? previous.model : defaults[role],
+          endpoint: previous.adapter === adapter && previous.endpoint ? previous.endpoint : API_MODE_DEFAULT_ENDPOINTS[adapter],
+          apiKey: previous.adapter === adapter ? previous.apiKey : "",
+        },
+      };
+    });
+    setMode("cloud");
+    setRoleModelOptions((current) => ({ ...current, [role]: [] }));
+    setRoleSaveState({ role, state: "idle", message: `已切换为${API_MODE_LABELS[adapter]}，填写后请点击保存并应用` });
+  }
+
+  async function discoverCurrentAgentModels(role: AgentRole) {
+    const config = agentConfigs[role];
+    if (!apiModesForRole(role).includes(config.adapter as DiscoverableApiMode)) return;
+    const adapter = config.adapter as DiscoverableApiMode;
+    const endpoint = config.endpoint || API_MODE_DEFAULT_ENDPOINTS[adapter];
+    if (!validAgentEndpoint(endpoint)) {
+      setRoleSaveState({ role, state: "error", message: "请先填写有效的 API 地址" });
+      return;
+    }
+    setRoleModelLoading(role);
+    setRoleSaveState({ role, state: "saving", message: "正在连接 API 并读取模型列表…" });
+    try {
+      const models = await discoverApiModels({ mode: adapter, endpoint, apiKey: config.apiKey || (adapter === "pollinations" ? apiKey : "") });
+      setRoleModelOptions((current) => ({ ...current, [role]: models }));
+      updateAgentConfig(role, { endpoint, model: models.some((item) => item.id === config.model) ? config.model : models[0].id });
+      setRoleSaveState({ role, state: "idle", message: `已读取 ${models.length} 个模型，请选择后点击“保存此岗位 API 并立即应用”` });
+    } catch (reason) {
+      setRoleModelOptions((current) => ({ ...current, [role]: [] }));
+      setRoleSaveState({ role, state: "error", message: reason instanceof Error ? reason.message : "读取模型失败" });
+    } finally {
+      setRoleModelLoading(null);
+    }
+  }
+
+  async function saveCurrentAgentApi(role: AgentRole) {
+    if (roleModelWriteRef.current) return;
+    const config = agentConfigs[role];
+    if (!config.model.trim()) {
+      setRoleSaveState({ role, state: "error", message: "请先填写或选择模型 ID" });
+      return;
+    }
+    if (apiModesForRole(role).includes(config.adapter as DiscoverableApiMode) && !validAgentEndpoint(config.endpoint || API_MODE_DEFAULT_ENDPOINTS[config.adapter as DiscoverableApiMode])) {
+      setRoleSaveState({ role, state: "error", message: "请填写有效的 HTTPS API 地址或本机 localhost 地址" });
+      return;
+    }
+    if (config.adapter === "pollinations" && !(config.apiKey || apiKey).startsWith("pk_")) {
+      setRoleSaveState({ role, state: "error", message: "Pollinations 需要填写以 pk_ 开头的发布密钥" });
+      return;
+    }
+    const normalized = {
+      ...config,
+      endpoint: config.endpoint || (apiModesForRole(role).includes(config.adapter as DiscoverableApiMode) ? API_MODE_DEFAULT_ENDPOINTS[config.adapter as DiscoverableApiMode] : ""),
+    };
+    const existing = customModels.find((item) => item.role === role && item.id === normalized.preset);
+    const libraryId = existing?.id || `custom-${role}-direct`;
+    const libraryModel: CustomModel = {
+      id: libraryId,
+      role,
+      name: existing && existing.name !== existing.model ? existing.name : normalized.model,
+      adapter: normalized.adapter as CustomModel["adapter"],
+      model: normalized.model,
+      endpoint: normalized.endpoint,
+      apiKey: normalized.apiKey,
+      note: existing?.note || "从岗位 API 设置保存",
+    };
+    const nextModels = [libraryModel, ...customModels.filter((item) => item.id !== libraryId)].slice(0, 60);
+    const applied = { ...normalized, preset: libraryId };
+    const next = { ...agentConfigs, [role]: applied };
+    setMode(normalized.adapter === "horde" || normalized.adapter === "browser" ? mode : "cloud");
+    setRoleSaveState({ role, state: "saving", message: "正在保存岗位配置并同步到“我的模型”…" });
+    roleModelWriteRef.current = role;
+    try {
+      await persistDesktopSettings(next, nextModels);
+      saveCustomModels(nextModels);
+      setCustomModels(nextModels);
+      setAgentConfigs(next);
+      window.localStorage.setItem("manjing-agent-team", JSON.stringify(next));
+      setRoleSaveState({ role, state: "saved", message: `${AGENT_ROLES.find((item) => item.id === role)?.title || "当前岗位"} API 已保存、立即应用并同步到“我的模型”，下次打开会自动恢复` });
+      setError("");
+    } catch (reason) {
+      setRoleSaveState({ role, state: "error", message: reason instanceof Error ? `保存失败：${reason.message}` : "保存失败，请重试" });
+    } finally {
+      roleModelWriteRef.current = null;
+    }
+  }
+
+  function toggleQuickModel(role: AgentRole) {
+    if (quickModelRole === role) {
+      setQuickModelRole(null);
+      setQuickModelMessage("");
+      setQuickModelOptions([]);
+      return;
+    }
+    setQuickModelRole(role);
+    setQuickModelDraft({ name: "", adapter: "webhook", model: "", endpoint: "", apiKey: "", note: "" });
+    setQuickModelMessage("");
+    setQuickModelOptions([]);
+  }
+
+  function changeQuickApiMode(adapter: DiscoverableApiMode) {
+    setQuickModelDraft((value) => ({ ...value, adapter, endpoint: API_MODE_DEFAULT_ENDPOINTS[adapter], model: "" }));
+    setQuickModelOptions([]);
+    setQuickModelMessage("");
+  }
+
+  async function discoverQuickModels() {
+    const endpoint = quickModelDraft.endpoint.trim() || API_MODE_DEFAULT_ENDPOINTS[quickModelDraft.adapter];
+    if (!validAgentEndpoint(endpoint)) {
+      setQuickModelMessage("请先填写有效的 HTTPS API 地址，或本机 localhost 地址");
+      return;
+    }
+    setQuickModelLoading(true);
+    setQuickModelMessage("正在连接接口并读取模型列表…");
+    try {
+      const models = await discoverApiModels({
+        mode: quickModelDraft.adapter,
+        endpoint,
+        apiKey: quickModelDraft.apiKey.trim(),
+      });
+      setQuickModelOptions(models);
+      setQuickModelDraft((value) => ({ ...value, endpoint, model: models.some((item) => item.id === value.model) ? value.model : models[0].id }));
+      setQuickModelMessage(`连接成功，已读取 ${models.length} 个模型，请选择后保存`);
+    } catch (reason) {
+      setQuickModelOptions([]);
+      setQuickModelMessage(reason instanceof Error ? reason.message : "读取模型失败，请检查 API 模式、地址和密钥");
+    } finally {
+      setQuickModelLoading(false);
+    }
+  }
+
+  async function saveQuickModel(role: AgentRole) {
+    if (quickModelSaveRef.current) return;
+    const modelId = quickModelDraft.model.trim();
+    const name = quickModelDraft.name.trim() || modelId;
+    const endpoint = quickModelDraft.endpoint.trim() || API_MODE_DEFAULT_ENDPOINTS[quickModelDraft.adapter];
+    const apiKeyValue = quickModelDraft.apiKey.trim();
+    if (!modelId) {
+      setQuickModelMessage("请先读取并选择模型，或手动填写模型 ID");
+      return;
+    }
+    if (!validAgentEndpoint(endpoint)) {
+      setQuickModelMessage("请填写有效的 HTTPS 接口，或本机 localhost 地址");
+      return;
+    }
+    const custom: CustomModel = {
+      id: `custom-${role}-${Date.now().toString(36)}`,
+      role,
+      name,
+      adapter: quickModelDraft.adapter,
+      model: modelId,
+      endpoint,
+      apiKey: apiKeyValue,
+      note: quickModelDraft.note.trim() || "工作台内添加的自定义模型",
+    };
+    const next = [custom, ...customModels.filter((item) => item.id !== custom.id)].slice(0, 60);
+    const nextConfigs = {
+      ...agentConfigs,
+      [role]: { preset: custom.id, adapter: custom.adapter, model: custom.model, endpoint: custom.endpoint, apiKey: custom.apiKey },
+    };
+    quickModelSaveRef.current = true;
+    setQuickModelSaving(true);
+    try {
+      await persistDesktopSettings(nextConfigs, next);
+      saveCustomModels(next);
+      setCustomModels(next);
+      setAgentConfigs(nextConfigs);
+      window.localStorage.setItem("manjing-agent-team", JSON.stringify(nextConfigs));
+      setMode("cloud");
+      setQuickModelDraft({ name: "", adapter: "webhook", model: "", endpoint: "", apiKey: "", note: "" });
+      setQuickModelOptions([]);
+      setQuickModelMessage(`${custom.name} 已保存并应用到 ${AGENT_ROLES.find((item) => item.id === role)?.title || "当前岗位"}`);
+      setError("");
+    } catch {
+      setQuickModelMessage("保存失败：本机模型库暂时不可写，请重启软件后重试");
+    } finally {
+      quickModelSaveRef.current = false;
+      setQuickModelSaving(false);
+    }
+  }
+
+  async function deleteRoleCustomModel(role: AgentRole, id: string) {
+    if (roleModelWriteRef.current) return;
+    const target = customModels.find((item) => item.id === id && item.role === role);
+    if (!target) return;
+    const nextModels = customModels.filter((item) => item.id !== id);
+    const fallback = configFromPreset(role, AGENT_PRESETS[role][0].id);
+    const nextConfigs = agentConfigs[role].preset === id ? { ...agentConfigs, [role]: fallback } : agentConfigs;
+    setRoleSaveState({ role, state: "saving", message: `正在删除“${target.name}”并同步本机配置…` });
+    roleModelWriteRef.current = role;
+    try {
+      await persistDesktopSettings(nextConfigs, nextModels);
+      saveCustomModels(nextModels);
+      setCustomModels(nextModels);
+      setAgentConfigs(nextConfigs);
+      window.localStorage.setItem("manjing-agent-team", JSON.stringify(nextConfigs));
+      setRoleModelOptions((current) => ({ ...current, [role]: (current[role] || []).filter((item) => item.id !== target.id) }));
+      setRoleSaveState({ role, state: "saved", message: agentConfigs[role].preset === id ? `已删除“${target.name}”，${AGENT_ROLES.find((item) => item.id === role)?.title}已自动切回免费默认模型` : `已删除“${target.name}”` });
+    } catch (reason) {
+      setRoleSaveState({ role, state: "error", message: reason instanceof Error ? `删除失败：${reason.message}` : "删除失败，请重试" });
+    } finally {
+      roleModelWriteRef.current = null;
+    }
   }
 
   function applySeedanceEngine() {
@@ -699,6 +1389,21 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setError("");
   }
 
+  function applyVibeVoiceRole() {
+    const base = normalizedBridgeUrl();
+    if (!validAgentEndpoint(base)) {
+      setError("请先填写有效的漫镜桥接地址");
+      return;
+    }
+    setAgentConfigs((current) => ({
+      ...current,
+      voice: { preset: "vibevoice-realtime-voice", adapter: "webhook", model: "VibeVoice-Realtime-0.5B", endpoint: `${base}/v1/vibevoice/audio`, apiKey: bridgeToken.trim() },
+    }));
+    setMode("cloud");
+    setConfiguringRole(null);
+    setError("");
+  }
+
   function applyBridgeStack() {
     const base = normalizedBridgeUrl();
     if (!validAgentEndpoint(base)) {
@@ -731,7 +1436,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const nodes = data.nodes || {};
       const workflows = data.workflows || {};
       const readyCount = Object.values(nodes).filter(Boolean).length;
-      setBridgeHealth({ state: readyCount === 3 && workflows.image && workflows.video ? "ready" : "partial", message: readyCount ? `${readyCount}/3 个模型节点在线` : "桥接服务在线，但模型节点未启动", nodes, workflows });
+      const totalCount = Object.keys(nodes).length;
+      setBridgeHealth({ state: readyCount === totalCount && workflows.image && workflows.video ? "ready" : "partial", message: readyCount ? `${readyCount}/${totalCount} 个模型节点在线` : "桥接服务在线，但模型节点未启动", nodes, workflows });
     } catch (reason) {
       setBridgeHealth({ state: "error", message: reason instanceof Error ? reason.message : "无法连接桥接服务" });
     }
@@ -769,10 +1475,28 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return response;
   }
 
-  async function webhookText(role: "director" | "writer" | "editor", payload: Record<string, unknown>) {
-    const response = await callAgentWebhook(role, payload);
-    const data = await response.json() as { text?: string; content?: string; result?: string };
-    const text = data.text || data.content || data.result;
+  async function customApiText(role: "director" | "writer" | "editor", payload: Record<string, unknown>) {
+    const config = agentConfigs[role];
+    if (!CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) throw new Error(`${agentName(role)}不支持当前文本任务`);
+    if (!validAgentEndpoint(config.endpoint)) throw new Error(`${agentName(role)}需要填写 HTTPS API 地址或本机 localhost 地址`);
+    const response = await fetch("/api/desktop/invoke", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: config.adapter,
+        endpoint: config.endpoint,
+        apiKey: config.apiKey,
+        model: config.model,
+        role,
+        task: payload.task,
+        system: payload.system,
+        prompt: payload.prompt,
+        payload,
+      }),
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+    const data = await response.json() as { text?: string };
+    const text = data.text;
     if (!text) throw new Error(`${agentName(role)}没有返回文本结果`);
     return text;
   }
@@ -853,14 +1577,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function generateStoryboard(run: number) {
     const count = Math.max(3, Math.min(8, Math.ceil(productionDuration / 15)));
     const config = agentConfigs.writer;
+    const sourceText = scriptImported ? `这是用户已经完成并锁定的剧本。不得改写剧情、人物关系或结局，只把原剧本结构化拆成分镜：\n${story.trim()}` : story.trim();
     if (config.adapter === "horde") {
-      const task = await startHorde("story", { story: story.trim(), style, count: Math.min(4, count), role: "writer", model: config.model });
+      const task = await startHorde("story", { story: sourceText, style, count: Math.min(4, count), role: "writer", model: config.model });
       const result = await pollHorde("text", task.id, run);
       return String(result.text || "");
     }
-    const system = `你是专业 AI 漫剧编剧和分镜师。把故事改编成恰好 ${count} 个连续、可拍摄的短剧镜头，只返回 JSON，所有内容使用简体中文。先建立最多 4 个固定角色，再写分镜和生成提示词。结构：{"title":"标题","music":"无歌词配乐描述","characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观跨镜头必须一致；每镜都要推动剧情，结尾形成钩子；不要复述用户原文。`;
-    const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n故事：${story.trim()}`;
-    if (config.adapter === "webhook") return webhookText("writer", { task: "storyboard", system, prompt: user, count, duration: productionDuration });
+    const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。" : "把故事改编为可拍摄短剧。"}输出恰好 ${count} 个连续镜头，只返回 JSON，所有内容使用简体中文。先建立最多 4 个固定角色，再写分镜和生成提示词。结构：{"title":"标题","music":"无歌词配乐描述","characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观跨镜头必须一致；每镜都要推动剧情，结尾形成钩子。`;
+    const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n${scriptImported ? "用户定稿剧本" : "故事"}：${story.trim()}`;
+    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("writer", { task: "storyboard", system, prompt: user, count, duration: productionDuration });
     return pollinationsText("writer", system, user);
   }
 
@@ -881,65 +1606,182 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const system = "你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜，修复格式、人物一致性、时长、节奏和结尾钩子。保留同一 JSON 结构，只返回修订后的完整 JSON，不要解释。";
     const user = `原故事：${story.trim()}\n视觉风格：${style}\n编剧初稿：${draft}`;
-    if (config.adapter === "webhook") return webhookText("director", { task: "review_storyboard", system, prompt: user, draft });
+    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("director", { task: "review_storyboard", system, prompt: user, draft });
     return pollinationsText("director", system, user);
   }
 
-  async function seedanceVideo(prompt: string, options: { references?: string[]; duration?: number } = {}) {
+  async function seedanceRequest(path: string, init: RequestInit, label: string, maxAttempts = 3) {
+    let lastResponse: Response | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutMs = path.includes("?url=") ? 380000 : 160000;
+      const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const requestPaths = path.startsWith("/api/seedance")
+          ? [path.replace("/api/seedance", "/api/desktop/seedance"), path]
+          : [path];
+        let response: Response | null = null;
+        let desktopFailure: unknown = null;
+        for (let pathIndex = 0; pathIndex < requestPaths.length; pathIndex += 1) {
+          try {
+            const candidate = await fetch(requestPaths[pathIndex], { ...init, cache: "no-store", signal: controller.signal });
+            if (pathIndex === 0 && requestPaths.length > 1 && candidate.status === 404) continue;
+            response = candidate;
+            break;
+          } catch (reason) {
+            desktopFailure = reason;
+            if (pathIndex === requestPaths.length - 1) throw reason;
+          }
+        }
+        if (!response) throw desktopFailure || new Error("内置 Seedance 通道没有返回响应");
+        lastResponse = response;
+        const transient = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
+        const retryInfo = transient ? await response.clone().json().catch(() => null) as { done?: boolean; retryable?: boolean } | null : null;
+        const shouldStop = Boolean(retryInfo?.done) || retryInfo?.retryable === false;
+        if (!transient || shouldStop || attempt === maxAttempts - 1) return response;
+        setStatusText(`${label}遇到网络波动，正在自动重连 ${attempt + 1}/${maxAttempts - 1}`);
+      } catch (reason) {
+        if (attempt === maxAttempts - 1) {
+          const detail = reason instanceof DOMException && reason.name === "AbortError" ? `连接等待超过 ${Math.round(timeoutMs / 1000)} 秒` : "桌面端与内置 Seedance 通道的连接被中断";
+          throw new Error(`${label}失败：${detail}。无需安装火山引擎 SDK；请检查网络或代理后再次点击“重新运行视频 AI”`);
+        }
+        setStatusText(`${label}连接中断，正在自动重连 ${attempt + 1}/${maxAttempts - 1}`);
+      } finally {
+        window.clearTimeout(timeout);
+      }
+      await wait(900 * (attempt + 1));
+    }
+    if (lastResponse) return lastResponse;
+    throw new Error(`${label}失败：没有收到接口响应`);
+  }
+
+  async function videoReferences(scene: Scene) {
+    const fallback = scene.remoteImageUrl ? [scene.remoteImageUrl] : [];
+    if (agentConfigs.video.adapter !== "seedance" || !scene.imageUrl) return fallback;
+    try {
+      const response = await fetch(scene.imageUrl);
+      if (!response.ok) return fallback;
+      const normalized = await normalizeImageBlobForAspect(await response.blob(), aspect);
+      const dataUrl = await blobToDataUrl(normalized);
+      return dataUrl.startsWith("data:image/") ? [dataUrl] : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function seedancePendingTasks() {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(SEEDANCE_PENDING_KEY) || "{}") as Record<string, SeedancePendingTask>;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveSeedancePendingTask(key: string, task?: SeedancePendingTask) {
+    const tasks = seedancePendingTasks();
+    if (task) tasks[key] = task;
+    else delete tasks[key];
+    window.localStorage.setItem(SEEDANCE_PENDING_KEY, JSON.stringify(tasks));
+  }
+
+  async function seedanceVideo(prompt: string, options: { references?: string[]; duration?: number; resumeKey?: string } = {}) {
     const config = agentConfigs.video;
     if (config.apiKey.trim().length < 8) throw new Error("即梦 Seedance 需要火山方舟 API Key");
-    const created = await fetch("/api/seedance", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "create",
-        apiKey: config.apiKey.trim(),
-        model: config.model,
-        prompt,
-        ratio: aspect,
-        duration: options.duration,
-        imageUrl: options.references?.[0] || "",
-      }),
-    });
-    if (!created.ok) throw new Error(await responseError(created));
-    const task = await created.json() as { id?: string };
-    if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
+    const resumeKey = options.resumeKey || `${config.model}:${prompt.slice(0, 120)}`;
+    const pending = seedancePendingTasks()[resumeKey];
+    const canResume = Boolean(pending?.id && pending.model === config.model && Date.now() - pending.createdAt < 6 * 24 * 60 * 60 * 1000);
+    let taskId = canResume ? pending.id : "";
+    if (taskId) {
+      setStatusText(`正在恢复上次中断的 Seedance 任务 ${taskId.slice(-8)}`);
+      recordActivity("video", `已找到未完成任务 ${taskId.slice(-8)}，继续查询，不重复创建和扣费`, "warning");
+    } else {
+      const created = await seedanceRequest("/api/seedance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          requestId: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : uid(),
+          apiKey: config.apiKey.trim(),
+          model: config.model,
+          prompt,
+          ratio: aspect,
+          duration: options.duration,
+          imageUrl: options.references?.[0] || "",
+        }),
+      }, "创建 Seedance 视频任务", 2);
+      if (!created.ok) throw new Error(await responseError(created));
+      const task = await created.json() as { id?: string };
+      if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
+      taskId = task.id;
+      saveSeedancePendingTask(resumeKey, { id: taskId, model: config.model, createdAt: Date.now() });
+    }
     const activeRun = runRef.current;
     for (let attempt = 0; attempt < 180; attempt += 1) {
       if (runRef.current !== activeRun) throw new Error("任务已取消");
       await wait(attempt === 0 ? 2500 : 6000);
-      const checked = await fetch("/api/seedance", {
+      const checked = await seedanceRequest("/api/seedance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "status", apiKey: config.apiKey.trim(), id: task.id }),
-      });
-      if (!checked.ok) throw new Error(await responseError(checked));
+        body: JSON.stringify({ action: "status", apiKey: config.apiKey.trim(), id: taskId }),
+      }, "查询 Seedance 任务");
+      if (!checked.ok) {
+        const data = await checked.clone().json().catch(() => null) as { done?: boolean } | null;
+        if (checked.status === 400 || checked.status === 404 || data?.done) saveSeedancePendingTask(resumeKey);
+        throw new Error(await responseError(checked));
+      }
       const status = await checked.json() as { done?: boolean; status?: string; videoUrl?: string };
       setStatusText(`即梦 Seedance 正在生成动态镜头（${status.status === "running" ? "生成中" : "排队中"}）`);
       if (!status.done) continue;
       if (!status.videoUrl) throw new Error("即梦 Seedance 任务完成但没有返回视频");
-      const media = await fetch(`/api/seedance?url=${encodeURIComponent(status.videoUrl)}`);
+      const media = await seedanceRequest(`/api/seedance?url=${encodeURIComponent(status.videoUrl)}`, { method: "GET" }, "下载 Seedance 视频");
       if (!media.ok) throw new Error(await responseError(media));
-      const blob = await media.blob();
+      let blob: Blob;
+      try {
+        blob = await media.blob();
+      } catch {
+        throw new Error("Seedance 视频已生成，但下载内容在写入漫镜时中断；任务编号仍已保留，请重新运行视频 AI 继续下载");
+      }
       if (!blob.type.startsWith("video/")) throw new Error("即梦 Seedance 返回的文件不是视频");
+      saveSeedancePendingTask(resumeKey);
       return { url: URL.createObjectURL(blob), blob, remoteUrl: status.videoUrl };
     }
-    throw new Error("即梦 Seedance 生成等待超时，请稍后重试");
+    throw new Error("即梦 Seedance 仍在生成；任务编号已经保存，再次点击“重新运行视频 AI”会继续查询，不会重复创建任务");
   }
 
   async function pollinationsMedia(
     kind: "image" | "audio" | "video",
     prompt: string,
     index = 0,
-    options: { references?: string[]; voiceName?: string; duration?: number; music?: boolean } = {},
+    options: { references?: string[]; voiceName?: string; duration?: number; music?: boolean; resumeKey?: string; imageAspect?: "9:16" | "16:9" } = {},
   ) {
     const role: "image" | "video" | "voice" = kind === "image" ? "image" : kind === "video" ? "video" : "voice";
     const config = agentConfigs[role];
+    const mediaAspect = kind === "image" ? options.imageAspect || aspect : aspect;
+    if (config.adapter === "openai") {
+      if (kind !== "image") throw new Error("OpenAI 兼容图片接口只能用于生图岗位");
+      if (!validAgentEndpoint(config.endpoint)) throw new Error("生图 AI 需要填写 OpenAI 兼容 API 地址");
+      const response = await fetch("/api/desktop/image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "openai", endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, prompt, aspect: mediaAspect }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const data = await response.json() as { dataUrl?: string };
+      if (!data.dataUrl?.startsWith("data:image/")) throw new Error("OpenAI 兼容生图接口没有返回图片");
+      const blob = await normalizeImageBlobForAspect(await (await fetch(data.dataUrl)).blob(), mediaAspect);
+      return { url: URL.createObjectURL(blob), blob };
+    }
     if (config.adapter === "seedance") {
       if (kind !== "video") throw new Error("即梦 Seedance 只能用于视频岗位");
       return seedanceVideo(prompt, options);
     }
-    if (config.adapter === "webhook") return webhookMedia(role, { task: kind, prompt, index, aspect, ...options });
+    if (config.adapter === "webhook") {
+      const media = await webhookMedia(role, { task: kind, prompt, index, aspect: mediaAspect, ...options });
+      if (kind !== "image") return media;
+      const blob = await normalizeImageBlobForAspect(media.blob, mediaAspect);
+      return { url: URL.createObjectURL(blob), blob, remoteUrl: "" };
+    }
     if (config.adapter !== "pollinations") throw new Error(`${agentName(role)}不支持当前云端媒体任务`);
     const key = agentKey(role);
     if (!key.startsWith("pk_")) throw new Error(`${agentName(role)}需要 Pollinations 发布密钥`);
@@ -948,8 +1790,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (kind === "image") {
       const params = new URLSearchParams({
         model: options.references?.length ? config.model || "kontext" : config.model === "kontext" ? "zimage" : config.model || "zimage",
-        width: aspect === "9:16" ? "768" : "1280",
-        height: aspect === "9:16" ? "1280" : "720",
+        width: mediaAspect === "9:16" ? "720" : "1280",
+        height: mediaAspect === "9:16" ? "1280" : "720",
         seed: String(Math.abs(story.length * 97 + index * 7919)),
         enhance: "true",
         safe: "true",
@@ -980,9 +1822,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const response = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
     if (!response.ok) throw new Error(await responseError(response));
-    const blob = await response.blob();
+    const receivedBlob = await response.blob();
     const expected = kind === "image" ? "image/" : kind === "audio" ? "audio/" : "video/";
-    if (!blob.type.startsWith(expected)) throw new Error(`${kind === "image" ? "图片" : kind === "audio" ? "配音" : "视频"}服务返回了无效文件`);
+    if (!receivedBlob.type.startsWith(expected)) throw new Error(`${kind === "image" ? "图片" : kind === "audio" ? "配音" : "视频"}服务返回了无效文件`);
+    const blob = kind === "image" ? await normalizeImageBlobForAspect(receivedBlob, mediaAspect) : receivedBlob;
     return { url: URL.createObjectURL(blob), blob };
   }
 
@@ -1000,15 +1843,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return data.url;
   }
 
-  async function makeImage(scene: Scene, index: number, run: number, characterGuide = "") {
-    const prompt = `${STYLE_PROMPTS[style]}, premium animated film keyframe, one coherent scene rather than a comic page, polished linework, expressive eyes and natural hands, cinematic color grading, layered foreground middle ground and background for 2.5D motion, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, no typography, no speech bubbles, no panel borders`;
-    if (agentConfigs.image.adapter === "pollinations" || agentConfigs.image.adapter === "webhook") return (await pollinationsMedia("image", prompt, index)).url;
-    const task = await startHorde("image", { prompt, aspect, model: agentConfigs.image.model });
+  async function makeImage(scene: Scene, index: number, run: number, characterGuide = "", outputAspect: "9:16" | "16:9" = aspect, promptOverride = "") {
+    const prompt = promptOverride || `${frameVisualPrompt(style)}, one coherent scene rather than a comic page, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, correct anatomy and natural hands, layered foreground middle ground and background for camera motion, no typography, no speech bubbles, no panel borders`;
+    if (["openai", "pollinations", "webhook"].includes(agentConfigs.image.adapter)) return (await pollinationsMedia("image", prompt, index, { imageAspect: outputAspect })).url;
+    const task = await startHorde("image", { prompt, aspect: outputAspect, model: agentConfigs.image.model });
     const result = await pollHorde("image", task.id, run);
     const remote = String(result.imageUrl || "");
     const response = await fetch(`/api/media?url=${encodeURIComponent(remote)}`);
     if (!response.ok) throw new Error(await responseError(response));
-    return URL.createObjectURL(await response.blob());
+    return URL.createObjectURL(await normalizeImageBlobForAspect(await response.blob(), outputAspect));
   }
 
   async function applyEditorPlan(work: Scene[]) {
@@ -1019,7 +1862,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const system = "你是短视频剪辑师。根据剧情调整镜头顺序和单镜头时长，只返回 JSON：{\"order\":[\"镜头id\"],\"durations\":{\"镜头id\":6}}。不要删除镜头；每镜 2–30 秒；总时长尽量接近目标。";
     const prompt = `目标时长：${productionDuration} 秒\n镜头：${JSON.stringify(compactScenes)}`;
     let raw = "";
-    if (config.adapter === "webhook") raw = await webhookText("editor", { task: "edit_plan", system, prompt, scenes: compactScenes, duration: productionDuration });
+    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) raw = await customApiText("editor", { task: "edit_plan", system, prompt, scenes: compactScenes, duration: productionDuration });
     else raw = await pollinationsText("editor", system, prompt);
     try {
       const parsed = JSON.parse(raw.replace(/```json/gi, "").replace(/```/g, "").trim()) as { order?: string[]; durations?: Record<string, number> };
@@ -1033,11 +1876,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   async function syncScenesToEditor(sourceScenes: Scene[], finalVideoUrl = "", source: "studio" | "libtv" = "studio", openEditor = false) {
+    if (editorSyncRef.current) return false;
     if (!sourceScenes.length) {
       setError("还没有可导入剪辑台的镜头");
       return false;
     }
+    editorSyncRef.current = true;
     setEditorSyncState("saving");
+    setEditorSyncProgress(0);
     let start = 0;
     const clips: EditorProjectClip[] = [];
     for (const scene of sourceScenes) {
@@ -1059,28 +1905,47 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       start += scene.duration;
     }
+    if (musicUrl) clips.push({
+      id: "project-music", name: "项目配乐", type: "audio", url: musicUrl,
+      duration: start, sourceDuration: start, trimStart: 0, trimEnd: start, start: 0,
+      volume: musicVolume, speed: 1, filter: "none", transition: "cut",
+    });
     try {
       await persistEditorProject({
-        id: `studio-${Date.now().toString(36)}`,
+        id: editorProjectIdRef.current,
         name: projectTitle || "未命名漫剧",
         aspect,
         source,
         clips,
         finalVideo: finalVideoUrl ? { url: finalVideoUrl } : undefined,
         editorNote: `${agentName("editor")}已完成镜头顺序、节奏、字幕与混音方案，可继续人工精剪。`,
+        studioSnapshot: {
+          version: 2, projectId: editorProjectIdRef.current, projectTitle, story, style, targetDuration, aspect,
+          characters: characters.map(serializableCharacter), scenes: sourceScenes.map(serializableScene), selected,
+          phase: finalVideoUrl ? "ready" : phase, progress: finalVideoUrl ? 100 : progress, statusText,
+          activityLog: activityLog.slice(0, 120), musicPrompt, updatedAt: new Date().toISOString(),
+        },
+      }, {
+        onProgress: ({ completed, total }) => setEditorSyncProgress(total ? Math.round((completed / total) * 100) : 100),
       });
       const savedProjects = localStorage.getItem("manjing-projects");
       let projects: Array<Record<string, unknown>> = [];
       try { projects = savedProjects ? JSON.parse(savedProjects) as Array<Record<string, unknown>> : []; } catch { projects = []; }
-      const projectCard = { id: `studio-${projectTitle || "current"}`, title: projectTitle || "未命名漫剧", story: story.trim().slice(0, 120), updatedAt: "刚刚", duration: formatTime(sourceScenes.reduce((sum, scene) => sum + scene.duration, 0)), status: finalVideoUrl ? "已完成" : "剪辑中" };
+      const projectCard = { id: editorProjectIdRef.current, title: projectTitle || "未命名漫剧", story: story.trim().slice(0, 120), updatedAt: "刚刚", duration: formatTime(sourceScenes.reduce((sum, scene) => sum + scene.duration, 0)), status: finalVideoUrl ? "已完成" : "剪辑中", source, durable: true };
       localStorage.setItem("manjing-projects", JSON.stringify([projectCard, ...projects.filter((item) => item.id !== projectCard.id)].slice(0, 20)));
+      setEditorSyncProgress(100);
       setEditorSyncState("ready");
-      if (openEditor) window.location.assign("/editor");
+      if (openEditor) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
+        window.location.assign("/editor");
+      }
       return true;
     } catch (reason) {
       setEditorSyncState("error");
       setError(reason instanceof Error ? `导入剪辑台失败：${reason.message}` : "导入剪辑台失败");
       return false;
+    } finally {
+      editorSyncRef.current = false;
     }
   }
 
@@ -1096,6 +1961,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const run = Date.now();
     runRef.current = run;
+    editorProjectIdRef.current = `libtv-${run.toString(36)}`;
     setLibtvRunning(true);
     setLibtvSessionId("");
     setLibtvProjectUrl("");
@@ -1120,7 +1986,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       `视觉风格：${style}`,
       `画面比例：${aspect}`,
       `目标总时长：${productionDuration} 秒`,
-      "请完成剧本、固定角色设定、连续分镜、角色一致性图片、人物动态视频、中文配音、字幕、配乐和剪辑成片。镜头必须有动作、表情、运镜和连续表演。输出完整视频，并保留可下载的中间图片和视频素材。",
+      voiceEnabled
+        ? "请完成剧本、固定角色设定、连续分镜、角色一致性图片、人物动态视频、中文配音、字幕、配乐和剪辑成片。人物说话时口型与配音同步。"
+        : `不要生成任何人物对白、旁白或人声音轨；输出无配音成片。${bgmEnabled ? "可以保留无歌词背景音乐和环境音。" : "同时不要生成背景音乐。"}`,
+      "镜头必须有动作、表情、运镜和连续表演。输出完整视频，并保留可下载的中间图片和视频素材。",
     ].join("\n");
     try {
       const created = await fetch("/api/libtv", {
@@ -1138,7 +2007,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       recordActivity("director", "LibTV 项目已建立，可随时打开云端画布查看", "done");
       recordActivity("image", "LibTV 正在锁定角色形象并绘制连续关键帧");
       recordActivity("video", "LibTV 已排入动态视频与镜头表演任务");
-      recordActivity("voice", "LibTV 将在视频完成后生成配音和声音");
+      recordActivity("voice", voiceEnabled ? "LibTV 将在视频完成后生成配音和声音" : "一键漫剧配音已关闭，LibTV 将跳过人声", voiceEnabled ? "running" : "warning");
       recordActivity("editor", "LibTV 剪辑代理等待上游素材交付");
 
       for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -1171,7 +2040,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           id: uid(),
           title: `LibTV 成片 ${index + 1}`,
           visual: "LibTV 完整 AI 漫剧输出",
-          action: "已由 LibTV 完成动态表演、配音与剪辑",
+          action: voiceEnabled ? "已由 LibTV 完成动态表演、配音与剪辑" : "已由 LibTV 完成无配音动态表演与剪辑",
           shot: "成片",
           camera: "LibTV 自动导演",
           dialogue: "",
@@ -1198,7 +2067,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         recordActivity("writer", "剧本与分镜已交付", "done");
         recordActivity("image", `${images.length} 项角色与分镜素材已交付`, "done");
         recordActivity("video", `${videos.length} 项动态视频已交付`, "done");
-        recordActivity("voice", "配音与声音已写入 LibTV 成片", "done");
+        recordActivity("voice", voiceEnabled ? "配音与声音已写入 LibTV 成片" : "已按设置跳过人声配音", "done");
         recordActivity("editor", "最终成片已导入漫镜剪辑台", "done");
         await syncScenesToEditor(imported, imported[0]?.videoUrl || "", "libtv");
         return;
@@ -1265,92 +2134,89 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setLibtvPollingPaused(next);
   }
 
-  async function createLibTvCanvas() {
-    if (libtvAccessKey.trim().length < 8 || libtvSending) return setError("请先填写 LibTV Access Key");
-    setLibtvSending(true);
-    try {
-      const response = await fetch("/api/libtv", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "change-project", accessKey: libtvAccessKey.trim() }),
-      });
-      if (!response.ok) throw new Error(await responseError(response));
-      const project = await response.json() as { projectUrl?: string };
-      setLibtvProjectUrl(project.projectUrl || "");
-      setLibtvSessionId("");
-      setLibtvMessages([]);
-      setLibtvResults([]);
-      setLibtvCanvasOpen(true);
-      setStatusText("已创建新的 LibTV 空白画布，可开始一键制作");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "创建 LibTV 画布失败");
-    } finally {
-      setLibtvSending(false);
-    }
+  function createLibTvCanvas() {
+    if (libtvSending) return;
+    const document = createCanvasFromStudio({ title: projectTitle, story, characters, scenes });
+    setStatusText("已创建本机制片画布，正在打开");
+    recordActivity("director", "已把当前剧本、角色和分镜导入本机制片画布", "done");
+    window.location.assign(`/canvas?id=${encodeURIComponent(document.id)}`);
   }
 
   async function generateAll() {
     if (story.trim().length < 8 || !["idle", "ready", "error"].includes(phase)) return;
-    const missingPollinationsKey = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "pollinations" && !agentKey(id).startsWith("pk_"));
+    const hasLockedStoryboard = scenes.length > 0;
+    const roleNeeded = (role: AgentRole) => {
+      if (role === "writer" || role === "director") return !hasLockedStoryboard;
+      if (role === "image") return !hasLockedStoryboard || characters.some((item) => !item.imageUrl) || scenes.some((item) => !item.imageUrl && !item.videoUrl);
+      if (role === "video") return agentConfigs.video.adapter !== "browser" && (!hasLockedStoryboard || scenes.some((item) => !item.videoUrl));
+      if (role === "voice") return voiceEnabled && agentConfigs.voice.adapter !== "browser" && (!hasLockedStoryboard || scenes.some((item) => item.dialogue.trim() && !item.audioUrl));
+      return true;
+    };
+    const missingPollinationsKey = AGENT_ROLES.find(({ id }) => roleNeeded(id) && agentConfigs[id].adapter === "pollinations" && !agentKey(id).startsWith("pk_"));
     if (missingPollinationsKey) {
       setError(`${missingPollinationsKey.title}需要填写以 pk_ 开头的 Pollinations 发布密钥`);
       return;
     }
-    if (agentConfigs.video.adapter === "seedance" && agentConfigs.video.apiKey.trim().length < 8) {
+    if (roleNeeded("video") && agentConfigs.video.adapter === "seedance" && agentConfigs.video.apiKey.trim().length < 8) {
       setConfiguringRole("video");
       setError("即梦 Seedance 需要填写火山方舟 API Key");
       return;
     }
-    const missingWebhook = AGENT_ROLES.find(({ id }) => agentConfigs[id].adapter === "webhook" && !validAgentEndpoint(agentConfigs[id].endpoint));
-    if (missingWebhook) {
-      setConfiguringRole(missingWebhook.id);
-      setError(`${missingWebhook.title}需要填写 HTTPS Webhook 地址`);
+    const missingCustomApi = AGENT_ROLES.find(({ id }) => roleNeeded(id) && CUSTOM_TEXT_ADAPTERS.includes(agentConfigs[id].adapter) && !validAgentEndpoint(agentConfigs[id].endpoint));
+    if (missingCustomApi) {
+      setConfiguringRole(missingCustomApi.id);
+      setError(`${missingCustomApi.title}需要填写 HTTPS API 地址或本机 localhost 地址`);
       return;
     }
     const run = Date.now();
     runRef.current = run;
+    editorProjectIdRef.current = `studio-${run.toString(36)}`;
     setError("");
     setExportUrl("");
     setMusicUrl("");
-    setCharacters([]);
     setShowFilm(false);
     setPlaying(false);
     setTime(0);
     setActivityLog([]);
-    setPhase("story");
-    setProgress(5);
-    setStatusText("AI 正在理解故事并编写分镜");
-    recordActivity("writer", `${agentName("writer")}开始改编剧本和拆分镜头`);
+    setPhase(hasLockedStoryboard ? "characters" : "story");
+    setProgress(hasLockedStoryboard ? 15 : 5);
+    setStatusText(hasLockedStoryboard ? "已锁定用户分镜，正在检查缺少的生产素材" : scriptImported ? "已导入剧本，AI 只负责结构化拆镜" : "AI 正在理解故事并编写分镜");
+    recordActivity("writer", hasLockedStoryboard ? "用户分镜已锁定，跳过编剧岗位" : scriptImported ? "用户剧本已锁定，只拆分镜头，不改写剧情" : `${agentName("writer")}开始改编剧本和拆分镜头`, hasLockedStoryboard ? "done" : "running");
+    let activeRole: AgentRole = hasLockedStoryboard ? "image" : "writer";
     try {
-      let raw = await generateStoryboard(run);
-      recordActivity("writer", "剧本初稿与分镜提示词已交付", "done");
-      setProgress(10);
-      recordActivity("director", `${agentName("director")}开始复核节奏、角色一致性和结尾钩子`);
-      try {
-        const reviewed = await directorReview(raw, run);
-        parseStoryboard(reviewed, productionDuration);
-        raw = reviewed;
-        recordActivity("director", "导演复核通过，已锁定制作稿", "done");
-      } catch {
-        if (runRef.current !== run) throw new Error("任务已取消");
-        setStatusText("导演复核暂时不可用，保留编剧初稿继续制作");
-        recordActivity("director", "免费导演未及时交稿，已采用编剧初稿继续制作", "warning");
-      }
-      setProgress(15);
       let storyboard: Storyboard;
-      try {
-        storyboard = parseStoryboard(raw, productionDuration);
-      } catch (reason) {
-        if (agentConfigs.writer.adapter !== "horde") throw reason;
-        let partial: Storyboard | null = null;
+      if (hasLockedStoryboard) {
+        storyboard = { title: projectTitle || "用户导入项目", music: musicPrompt || "cinematic instrumental soundtrack, no vocals", characters: characters.map((item) => ({ ...item })), scenes: scenes.map((item) => ({ ...item })) };
+        recordActivity("director", "用户分镜视为已定稿，跳过导演复核", "done");
+      } else {
+        let raw = await generateStoryboard(run);
+        recordActivity("writer", scriptImported ? "已按用户剧本交付结构化分镜" : "剧本初稿与分镜提示词已交付", "done");
+        setProgress(10);
+        activeRole = "director";
+        recordActivity("director", `${agentName("director")}开始复核节奏、角色一致性和结尾钩子`);
         try {
-          partial = parseStoryboard(raw, productionDuration, 1);
-        } catch {
-          partial = null;
+          const reviewed = await directorReview(raw, run);
+          parseStoryboard(reviewed, productionDuration);
+          raw = reviewed;
+          recordActivity("director", "导演复核通过，已锁定制作稿", "done");
+        } catch (reason) {
+          if (runRef.current !== run) throw new Error("任务已取消");
+          const detail = reason instanceof Error ? reason.message : "接口没有返回有效结果";
+          if (agentConfigs.director.adapter !== "horde") throw new Error(`${agentName("director")}复核失败：${detail}`);
+          setStatusText("AI Horde 免费导演排队超时，保留编剧初稿继续制作");
+          recordActivity("director", `AI Horde 免费导演未及时交稿（${detail}），已采用编剧初稿继续制作`, "warning");
         }
-        setStatusText("免费编剧输出不完整，漫镜正在自动补全分镜");
-        storyboard = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
-        recordActivity("writer", "免费输出被截断，漫镜已补齐缺失镜头", "warning");
+        setProgress(15);
+        try {
+          storyboard = parseStoryboard(raw, productionDuration);
+        } catch (reason) {
+          if (agentConfigs.writer.adapter !== "horde") throw reason;
+          let partial: Storyboard | null = null;
+          try { partial = parseStoryboard(raw, productionDuration, 1); } catch { partial = null; }
+          setStatusText("免费编剧输出不完整，漫镜正在自动补全分镜");
+          storyboard = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
+          recordActivity("writer", "免费输出被截断，漫镜已补齐缺失镜头", "warning");
+        }
       }
       setProjectTitle(storyboard.title);
       setMusicPrompt(storyboard.music);
@@ -1361,38 +2227,54 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setSelected(0);
 
       setPhase("characters");
+      activeRole = "image";
       recordActivity("image", `${agentName("image")}开始生成角色设定与一致性参考`);
+      let generatedCharacters = 0;
       for (let index = 0; index < cast.length; index += 1) {
         const character = cast[index];
+        if (character.imageUrl) {
+          cast = cast.map((item) => item.id === character.id ? { ...item, status: "ready" as const } : item);
+          setCharacters(cast);
+          setProgress(10 + Math.round(((index + 1) / Math.max(1, cast.length)) * 16));
+          continue;
+        }
         setStatusText(`正在建立角色资产 ${index + 1}/${cast.length}：${character.name}`);
         cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
         setCharacters(cast);
-        const characterPrompt = `${STYLE_PROMPTS[style]}, premium animation character design, ${character.name}, ${character.role}, ${character.appearance}, full body and face close-up, correct anatomy and natural hands, clean neutral background, exact fixed facial features and costume, polished linework, no typography`;
+        const characterPrompt = characterSheetPrompt(style, character);
         if (agentConfigs.image.adapter !== "horde") {
-          const asset = await pollinationsMedia("image", characterPrompt, 50 + index);
+          const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9" });
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : assetUploadKey ? await uploadPollinationsMedia(asset.blob, `character-${index + 1}.png`, assetUploadKey) : "";
-          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, status: "ready" as const } : item);
+          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
         } else {
           const referenceScene: Scene = { id: uid(), title: character.name, visual: characterPrompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-          const imageUrl = await makeImage(referenceScene, 50 + index, run);
-          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, status: "ready" as const } : item);
+          const imageUrl = await makeImage(referenceScene, 50 + index, run, "", "16:9", characterPrompt);
+          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
         }
+        generatedCharacters += 1;
         setCharacters(cast);
         setProgress(10 + Math.round(((index + 1) / cast.length) * 16));
       }
-      recordActivity("image", `${cast.length} 个角色资产已建立，开始绘制连续分镜`);
+      recordActivity("image", `${cast.length - generatedCharacters} 个用户角色资产已复用，${generatedCharacters} 个缺失角色已补齐；开始检查连续分镜`);
 
       setPhase("images");
+      let generatedFrames = 0;
       for (let index = 0; index < work.length; index += 1) {
         const scene = work[index];
+        if (scene.imageUrl || scene.videoUrl) {
+          work = work.map((item) => item.id === scene.id ? { ...item, status: "ready" as SceneStatus } : item);
+          setScenes(work);
+          setProgress(26 + Math.round(((index + 1) / Math.max(1, work.length)) * (agentConfigs.video.adapter !== "browser" ? 18 : 48)));
+          continue;
+        }
         setStatusText(`正在制作第 ${index + 1}/${work.length} 个一致性分镜`);
         updateScene(scene.id, { status: "painting" });
         const presentCast = cast.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
         const castForScene = presentCast.length ? presentCast : cast.slice(0, 2);
         const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
         if (agentConfigs.image.adapter !== "horde") {
-          const framePrompt = `${STYLE_PROMPTS[style]}, premium animated film keyframe, one coherent scene rather than a comic page, exact identities and costumes from the character references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, cinematic composition and color grading, layered depth for 2.5D camera motion, coherent spatial layout, no text, no speech bubbles, no panel borders`;
+          const framePrompt = `${frameVisualPrompt(style)}, one coherent scene rather than a comic page, exact identities and costumes from the character references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, layered depth for camera motion, coherent spatial layout, no text, no speech bubbles, no panel borders`;
           const frame = await pollinationsMedia("image", framePrompt, index, { references: castForScene.map((item) => item.remoteUrl).filter(Boolean) as string[] });
           const frameUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : frameUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`, frameUploadKey) : "";
@@ -1401,45 +2283,63 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const imageUrl = await makeImage(scene, index, run, characterGuide);
           work = work.map((item) => (item.id === scene.id ? { ...item, imageUrl, status: "ready" as SceneStatus } : item));
         }
+        generatedFrames += 1;
         setScenes(work);
         setProgress(26 + Math.round(((index + 1) / work.length) * (agentConfigs.video.adapter !== "browser" ? 18 : 48)));
       }
-      recordActivity("image", `${work.length} 张分镜关键帧已生成`, "done");
+      recordActivity("image", `${work.length - generatedFrames} 个用户画面/视频已复用，${generatedFrames} 张缺失分镜已生成`, "done");
 
       if (agentConfigs.video.adapter !== "browser") {
         setPhase("video");
+        activeRole = "video";
         recordActivity("video", `${agentName("video")}开始把关键帧生成原生动态镜头`);
+        let generatedClips = 0;
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
+          if (scene.videoUrl) {
+            work = work.map((item) => item.id === scene.id ? { ...item, status: "ready" as SceneStatus } : item);
+            setScenes(work);
+            setProgress(44 + Math.round(((index + 1) / Math.max(1, work.length)) * 26));
+            continue;
+          }
+          if (!scene.imageUrl) continue;
           setStatusText(`正在让镜头真正动起来 ${index + 1}/${work.length}：${scene.action}`);
           work = work.map((item) => item.id === scene.id ? { ...item, status: "animating" as SceneStatus } : item);
           setScenes(work);
-          const motionPrompt = `${STYLE_PROMPTS[style]}, preserve the exact character identity, face, hair and costume from the start frame. ${scene.action}. Camera: ${scene.camera}. ${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement. One continuous cinematic shot, coherent physics, no subtitles, no cuts.`;
-          const clip = await pollinationsMedia("video", motionPrompt, index, { references: scene.remoteImageUrl ? [scene.remoteImageUrl] : [], duration: scene.duration });
+          const motionPrompt = `${motionVisualPrompt(style)}, preserve the exact character identity, face, hair and costume from the start frame. ${scene.action}. Camera: ${scene.camera}. ${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement. One continuous cinematic shot, coherent physics, no subtitles, no cuts.`;
+          const clip = await pollinationsMedia("video", motionPrompt, index, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
           work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(10, scene.duration)), status: "ready" as SceneStatus } : item);
+          generatedClips += 1;
           setScenes(work);
           setProgress(44 + Math.round(((index + 1) / work.length) * 26));
         }
-        recordActivity("video", `${work.length} 个动态视频镜头已生成`, "done");
+        recordActivity("video", `${work.length - generatedClips} 个用户视频已复用，${generatedClips} 个缺失动态镜头已生成`, "done");
       } else {
         recordActivity("video", "免费模式使用 2.5D 运镜、景深和光影动画，不包含人物肢体生成", "warning");
       }
 
       if (voiceEnabled && agentConfigs.voice.adapter !== "browser") {
         setPhase("voice");
+        activeRole = "voice";
         recordActivity("voice", `${agentName("voice")}开始逐镜生成角色配音`);
+        let generatedVoices = 0;
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
+          if (scene.audioUrl || !scene.dialogue.trim()) {
+            setProgress(70 + Math.round(((index + 1) / Math.max(1, work.length)) * 13));
+            continue;
+          }
           setStatusText(`正在生成 ${scene.speaker} 的${scene.emotion}配音 ${index + 1}/${work.length}`);
           updateScene(scene.id, { status: "voicing" });
           const castVoice = cast.find((character) => character.name === scene.speaker)?.voice || voice;
           const speech = await pollinationsMedia("audio", scene.dialogue, index, { voiceName: castVoice });
           const audioSeconds = await mediaDuration(speech.url);
           work = work.map((item) => item.id === scene.id ? { ...item, audioUrl: speech.url, duration: Math.max(item.duration, Math.ceil(audioSeconds + 0.6)), status: "ready" as SceneStatus } : item);
+          generatedVoices += 1;
           setScenes(work);
           setProgress(70 + Math.round(((index + 1) / work.length) * 13));
         }
-        recordActivity("voice", `${work.length} 条角色音轨已生成`, "done");
+        recordActivity("voice", `${work.filter((item) => item.audioUrl).length - generatedVoices} 条用户音轨已复用，${generatedVoices} 条缺失配音已生成`, "done");
       } else if (voiceEnabled) {
         recordActivity("voice", "免费模式使用设备中文语音预览，不会写入可下载音轨", "warning");
       } else {
@@ -1453,6 +2353,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         } else {
           try {
             setPhase("video");
+            activeRole = "video";
             recordActivity("video", `MuseTalk 开始为 ${eligible.length} 个镜头生成中文口型`);
             for (let index = 0; index < eligible.length; index += 1) {
               const scene = eligible[index];
@@ -1478,11 +2379,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       let generatedMusicUrl = "";
       if (bgmEnabled && agentConfigs.voice.adapter !== "browser") {
         setPhase("music");
+        activeRole = "voice";
         setStatusText("正在生成与剧情节奏匹配的无歌词配乐");
         const soundtrack = await pollinationsMedia("audio", storyboard.music, 0, { music: true, duration: work.reduce((sum, item) => sum + item.duration, 0) });
         generatedMusicUrl = soundtrack.url;
         setMusicUrl(soundtrack.url);
       }
+      activeRole = "editor";
       recordActivity("editor", `${agentName("editor")}开始调整顺序、节奏、字幕和混音`);
       work = await applyEditorPlan(work);
       setScenes(work);
@@ -1496,18 +2399,259 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setPhase("error");
       setError(reason instanceof Error ? reason.message : "生成失败，请重试");
       setStatusText("生成中断");
-      recordActivity("director", reason instanceof Error ? `制作中断：${reason.message}` : "制作中断", "error");
+      recordActivity(activeRole, reason instanceof Error ? `制作中断：${reason.message}` : "制作中断", "error");
     }
   }
 
   function cancelGeneration() {
     runRef.current = Date.now();
     setLibtvRunning(false);
+    setRetryingRole(null);
     setPhase(scenes.length ? "ready" : "idle");
     setStatusText("已停止当前任务");
   }
 
+  function roleConnectionProblem(role: AgentRole) {
+    const config = agentConfigs[role];
+    if (config.adapter === "pollinations" && !agentKey(role).startsWith("pk_")) return `${AGENT_ROLES.find((item) => item.id === role)?.title}需要填写 Pollinations 发布密钥`;
+    if (config.adapter === "seedance" && config.apiKey.trim().length < 8) return "视频 AI 需要填写火山方舟 API Key";
+    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter) && !validAgentEndpoint(config.endpoint)) return `${AGENT_ROLES.find((item) => item.id === role)?.title}需要填写 HTTPS API 地址或本机 localhost 地址`;
+    return "";
+  }
+
+  function canRerunRole(role: AgentRole) {
+    if (role === "writer") return story.trim().length >= 8;
+    if (role === "director" || role === "image" || role === "voice") return scenes.length > 0;
+    if (role === "video") return scenes.some((scene) => scene.imageUrl);
+    return scenes.some((scene) => scene.imageUrl || scene.videoUrl);
+  }
+
+  async function rerunRole(role: AgentRole) {
+    if (retryingRole || busy || !canRerunRole(role)) return;
+    const connectionProblem = roleConnectionProblem(role);
+    if (connectionProblem) {
+      setConfiguringRole(role);
+      setError(connectionProblem);
+      return;
+    }
+    const run = Date.now();
+    runRef.current = run;
+    setRetryingRole(role);
+    setError("");
+    setPlaying(false);
+    setShowFilm(false);
+    recordActivity(role, `${agentName(role)}正在从上次中断处重新运行`);
+    try {
+      if (role === "writer") {
+        setPhase("story");
+        setProgress(5);
+        setStatusText("编剧 AI 正在重新生成剧本与分镜");
+        const raw = await generateStoryboard(run);
+        let next: Storyboard;
+        try {
+          next = parseStoryboard(raw, productionDuration);
+        } catch (reason) {
+          if (agentConfigs.writer.adapter !== "horde") throw reason;
+          let partial: Storyboard | null = null;
+          try { partial = parseStoryboard(raw, productionDuration, 1); } catch { partial = null; }
+          next = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
+        }
+        invalidateExport();
+        setMusicUrl("");
+        setProjectTitle(next.title);
+        setMusicPrompt(next.music);
+        setCharacters(next.characters);
+        setScenes(next.scenes);
+        setSelected(0);
+        setProgress(15);
+        recordActivity("writer", `新剧本与 ${next.scenes.length} 个分镜已交付`, "done");
+        (["director", "image", "video", "voice", "editor"] as AgentRole[]).forEach((downstream) => recordActivity(downstream, "上游剧本已更新，等待按需重新运行", "warning"));
+        setStatusText("编剧已重新交付；可继续运行导演或其他岗位");
+        setPhase("ready");
+        return;
+      }
+
+      if (role === "director") {
+        setPhase("story");
+        setProgress(Math.max(10, progress));
+        setStatusText("导演 AI 正在重新复核当前剧本与分镜");
+        const reviewedRaw = await directorReview(storyboardDraft(projectTitle, musicPrompt, characters, scenes), run);
+        const reviewed = mergeReviewedStoryboard(parseStoryboard(reviewedRaw, productionDuration), characters, scenes);
+        invalidateExport();
+        setProjectTitle(reviewed.title);
+        setMusicPrompt(reviewed.music);
+        setCharacters(reviewed.characters);
+        setScenes(reviewed.scenes);
+        recordActivity("director", "导演复核已重新交付，现有图片、视频和配音均已保留", "done");
+        recordActivity("image", "导演稿已更新，现有素材已保留；如画面不匹配可重新运行生图岗位", "warning");
+        setStatusText("导演复核完成，现有素材没有被清空");
+        setPhase("ready");
+        return;
+      }
+
+      if (role === "image") {
+        setPhase("images");
+        let cast = characters.map((character) => ({ ...character }));
+        let work = scenes.map((scene) => ({ ...scene }));
+        const missingCharacters = cast.filter((character) => !character.imageUrl || character.status === "error" || character.sheetVersion !== 2);
+        for (let targetIndex = 0; targetIndex < missingCharacters.length; targetIndex += 1) {
+          const character = missingCharacters[targetIndex];
+          setStatusText(`生图 AI 正在补跑角色资产 ${targetIndex + 1}/${missingCharacters.length}：${character.name}`);
+          cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
+          setCharacters(cast);
+          const prompt = characterSheetPrompt(style, character);
+          if (agentConfigs.image.adapter !== "horde") {
+            const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9" });
+            const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
+            const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-retry-${targetIndex + 1}.png`, uploadKey) : "";
+            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
+          } else {
+            const referenceScene: Scene = { id: uid(), title: character.name, visual: prompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
+            const imageUrl = await makeImage(referenceScene, 50 + targetIndex, run, "", "16:9", prompt);
+            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
+          }
+          setCharacters(cast);
+        }
+        let targets = work.filter((scene) => !scene.imageUrl || scene.status === "error").map((scene) => scene.id);
+        if (!targets.length && work[selected]) targets = [work[selected].id];
+        for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+          const sceneIndex = work.findIndex((scene) => scene.id === targets[targetIndex]);
+          const scene = work[sceneIndex];
+          if (!scene) continue;
+          setStatusText(`生图 AI 正在补跑分镜 ${targetIndex + 1}/${targets.length}：${scene.title}`);
+          work = work.map((item) => item.id === scene.id ? { ...item, status: "painting" as SceneStatus } : item);
+          setScenes(work);
+          const presentCast = cast.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
+          const castForScene = presentCast.length ? presentCast : cast.slice(0, 2);
+          if (agentConfigs.image.adapter !== "horde") {
+            const prompt = `${frameVisualPrompt(style)}, one coherent scene, exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, layered depth, no text, no speech bubbles, no panel borders`;
+            const frame = await pollinationsMedia("image", prompt, sceneIndex, { references: castForScene.map((item) => item.remoteUrl).filter(Boolean) as string[] });
+            const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
+            const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : uploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${sceneIndex + 1}-retry.png`, uploadKey) : "";
+            if (scene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.imageUrl);
+            if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
+            work = work.map((item) => item.id === scene.id ? { ...item, imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" as SceneStatus } : item);
+          } else {
+            const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
+            const imageUrl = await makeImage(scene, sceneIndex, run, characterGuide);
+            if (scene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.imageUrl);
+            if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
+            work = work.map((item) => item.id === scene.id ? { ...item, imageUrl, videoUrl: undefined, status: "ready" as SceneStatus } : item);
+          }
+          setScenes(work);
+          setProgress(26 + Math.round(((targetIndex + 1) / targets.length) * 18));
+        }
+        invalidateExport();
+        recordActivity("image", `生图岗位补跑完成：${missingCharacters.length} 个角色、${targets.length} 个分镜`, "done");
+        setStatusText("生图岗位重新运行完成，其他已完成素材保持不变");
+        setPhase("ready");
+        return;
+      }
+
+      if (role === "video") {
+        if (agentConfigs.video.adapter === "browser") {
+          recordActivity("video", "本地 2.5D 运镜无需排队；重新合成时会自动应用", "warning");
+          setStatusText("本地运镜已就绪，可重新运行剪辑岗位合成成片");
+          setPhase("ready");
+          return;
+        }
+        setPhase("video");
+        let work = scenes.map((scene) => ({ ...scene }));
+        let targets = work.filter((scene) => scene.imageUrl && (!scene.videoUrl || scene.status === "error")).map((scene) => scene.id);
+        if (!targets.length) {
+          const fallback = work[selected]?.imageUrl ? work[selected] : work.find((scene) => scene.imageUrl);
+          if (fallback) targets = [fallback.id];
+        }
+        for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+          const sceneIndex = work.findIndex((scene) => scene.id === targets[targetIndex]);
+          const scene = work[sceneIndex];
+          if (!scene) continue;
+          setStatusText(`视频 AI 正在补跑动态镜头 ${targetIndex + 1}/${targets.length}：${scene.title}`);
+          work = work.map((item) => item.id === scene.id ? { ...item, status: "animating" as SceneStatus } : item);
+          setScenes(work);
+          const prompt = `${motionVisualPrompt(style)}, preserve exact character identity, face, hair and costume from the start frame. ${scene.action}. Camera: ${scene.camera}. ${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement. One continuous cinematic shot, coherent physics, no subtitles, no cuts.`;
+          const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
+          if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
+          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(10, scene.duration)), status: "ready" as SceneStatus } : item);
+          setScenes(work);
+          setProgress(44 + Math.round(((targetIndex + 1) / targets.length) * 26));
+        }
+        invalidateExport();
+        recordActivity("video", `视频岗位补跑完成：${targets.length} 个动态镜头`, "done");
+        setStatusText("视频岗位重新运行完成，已有图片和配音均已保留");
+        setPhase("ready");
+        return;
+      }
+
+      if (role === "voice") {
+        if (!voiceEnabled) throw new Error("请先打开自动配音开关");
+        if (agentConfigs.voice.adapter === "browser") {
+          recordActivity("voice", "系统中文语音会在播放时即时朗读，无需云端重跑", "warning");
+          setStatusText("设备语音已就绪；它不会生成可下载音轨");
+          setPhase("ready");
+          return;
+        }
+        setPhase("voice");
+        let work = scenes.map((scene) => ({ ...scene }));
+        let targets = work.filter((scene) => scene.dialogue.trim() && (!scene.audioUrl || scene.status === "error")).map((scene) => scene.id);
+        if (!targets.length) {
+          const fallback = work[selected]?.dialogue.trim() ? work[selected] : work.find((scene) => scene.dialogue.trim());
+          if (fallback) targets = [fallback.id];
+        }
+        for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+          const sceneIndex = work.findIndex((scene) => scene.id === targets[targetIndex]);
+          const scene = work[sceneIndex];
+          if (!scene) continue;
+          setStatusText(`配音 AI 正在补跑角色音轨 ${targetIndex + 1}/${targets.length}：${scene.speaker}`);
+          work = work.map((item) => item.id === scene.id ? { ...item, status: "voicing" as SceneStatus } : item);
+          setScenes(work);
+          const castVoice = characters.find((character) => character.name === scene.speaker)?.voice || voice;
+          const speech = await pollinationsMedia("audio", scene.dialogue, sceneIndex, { voiceName: castVoice });
+          const audioSeconds = await mediaDuration(speech.url);
+          if (scene.audioUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.audioUrl);
+          work = work.map((item) => item.id === scene.id ? { ...item, audioUrl: speech.url, duration: Math.max(item.duration, Math.ceil(audioSeconds + 0.6)), status: "ready" as SceneStatus } : item);
+          setScenes(work);
+          setProgress(70 + Math.round(((targetIndex + 1) / targets.length) * 13));
+        }
+        if (bgmEnabled && !musicUrl) {
+          setStatusText("声音岗位正在补跑剧情配乐");
+          const soundtrack = await pollinationsMedia("audio", musicPrompt || "cinematic instrumental soundtrack, no vocals", 0, { music: true, duration: work.reduce((sum, scene) => sum + scene.duration, 0) });
+          setMusicUrl(soundtrack.url);
+        }
+        invalidateExport();
+        recordActivity("voice", `配音岗位补跑完成：${targets.length} 条角色音轨${bgmEnabled ? "，配乐已检查" : ""}`, "done");
+        setStatusText("配音岗位重新运行完成，已有画面和视频均已保留");
+        setPhase("ready");
+        return;
+      }
+
+      setPhase("exporting");
+      setStatusText("剪辑 AI 正在重新分析节奏并合成成片");
+      const edited = await applyEditorPlan(scenes.map((scene) => ({ ...scene })));
+      setScenes(edited);
+      const exported = await exportFilm(edited, true, musicUrl);
+      if (!exported) throw new Error("剪辑合成未完成");
+      recordActivity("editor", "剪辑岗位重新运行完成，新的成片已交付", "done");
+    } catch (reason) {
+      if (runRef.current !== run) return;
+      if (role === "image") {
+        setCharacters((items) => items.map((item) => item.status === "generating" ? { ...item, status: "error" as const } : item));
+        setScenes((items) => items.map((item) => item.status === "painting" ? { ...item, status: "error" as SceneStatus } : item));
+      }
+      if (role === "video") setScenes((items) => items.map((item) => item.status === "animating" ? { ...item, status: "error" as SceneStatus } : item));
+      if (role === "voice") setScenes((items) => items.map((item) => item.status === "voicing" ? { ...item, status: "error" as SceneStatus } : item));
+      const message = reason instanceof Error ? reason.message : `${AGENT_ROLES.find((item) => item.id === role)?.title}重新运行失败`;
+      setPhase("error");
+      setError(message);
+      setStatusText(`${AGENT_ROLES.find((item) => item.id === role)?.title}重新运行中断`);
+      recordActivity(role, `重新运行中断：${message}`, "error");
+    } finally {
+      setRetryingRole(null);
+    }
+  }
+
   async function regenerateImage(scene: Scene, index: number) {
+    if (sceneActionRef.current) return;
     if (agentConfigs.image.adapter === "pollinations" && !agentKey("image").startsWith("pk_")) {
       setError("生图 AI 需要先填写发布密钥");
       return;
@@ -1518,6 +2662,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       return;
     }
     const run = Date.now();
+    const actionId = `image:${scene.id}`;
+    sceneActionRef.current = actionId;
+    setSceneAction({ id: scene.id, type: "image" });
     runRef.current = run;
     setError("");
     updateScene(scene.id, { status: "painting" });
@@ -1526,7 +2673,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (scene.imageUrl) URL.revokeObjectURL(scene.imageUrl);
       if (agentConfigs.image.adapter !== "horde") {
         const presentCast = characters.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
-        const frame = await pollinationsMedia("image", `${STYLE_PROMPTS[style]}, premium animated film keyframe, one coherent scene, preserve the exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, cinematic composition and color grading, layered depth, no text, no speech bubbles, no panel borders`, index, { references: presentCast.map((item) => item.remoteUrl).filter(Boolean) as string[] });
+        const frame = await pollinationsMedia("image", `${frameVisualPrompt(style)}, one coherent scene, preserve the exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, layered depth, no text, no speech bubbles, no panel borders`, index, { references: presentCast.map((item) => item.remoteUrl).filter(Boolean) as string[] });
         const revisionUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : revisionUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}-revision.png`, revisionUploadKey) : "";
         updateScene(scene.id, { imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" });
@@ -1540,10 +2687,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       updateScene(scene.id, { status: "error" });
       setError(reason instanceof Error ? reason.message : "画面生成失败");
       recordActivity("image", `“${scene.title}”重绘失败`, "error");
+    } finally {
+      if (sceneActionRef.current === actionId) {
+        sceneActionRef.current = "";
+        setSceneAction(null);
+      }
     }
   }
 
   async function generateVideo(scene: Scene) {
+    if (sceneActionRef.current) return;
     if (agentConfigs.video.adapter === "browser") {
       setConfiguringRole("video");
       setError("当前是免费本地运镜样片，请为视频 AI 选择 Seedance 或自定义视频接口");
@@ -1563,11 +2716,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setError("请先配置视频 AI 的 Webhook");
       return;
     }
+    const actionId = `video:${scene.id}`;
+    sceneActionRef.current = actionId;
+    setSceneAction({ id: scene.id, type: "video" });
     setError("");
     updateScene(scene.id, { status: "animating" });
     recordActivity("video", `${agentName("video")}正在重做“${scene.title}”的动态表演`);
     try {
-      const clip = await pollinationsMedia("video", `${STYLE_PROMPTS[style]}, preserve exact character identity and costume. ${scene.action}. Camera: ${scene.camera}. Natural expressions and coherent motion, one continuous shot, no text.`, 0, { references: scene.remoteImageUrl ? [scene.remoteImageUrl] : [], duration: scene.duration });
+      const clip = await pollinationsMedia("video", `${motionVisualPrompt(style)}, preserve exact character identity and costume. ${scene.action}. Camera: ${scene.camera}. Natural expressions and coherent motion, one continuous shot, no text.`, 0, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
       if (scene.videoUrl) URL.revokeObjectURL(scene.videoUrl);
       updateScene(scene.id, { videoUrl: clip.url, status: "ready", duration: Math.max(4, Math.min(10, scene.duration)) });
       recordActivity("video", `“${scene.title}”的原生动态镜头已交付`, "done");
@@ -1575,6 +2731,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       updateScene(scene.id, { status: "error" });
       setError(reason instanceof Error ? reason.message : "动态镜头生成失败");
       recordActivity("video", `“${scene.title}”视频生成失败`, "error");
+    } finally {
+      if (sceneActionRef.current === actionId) {
+        sceneActionRef.current = "";
+        setSceneAction(null);
+      }
     }
   }
 
@@ -1653,6 +2814,121 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     recordActivity("editor", `已复制镜头“${source.title}”`, "done");
   }
 
+  function importedScene(name: string, index: number): Scene {
+    const lead = characters[0]?.name || "主角";
+    return { id: uid(), title: name.replace(/\.[^.]+$/, "").slice(0, 60) || `导入镜头 ${index + 1}`, visual: "用户导入的镜头资产", action: "根据导入素材延续自然动作与镜头表现", shot: "中景", camera: "缓慢推进", dialogue: "", speaker: lead, emotion: "自然", sfx: "", characters: lead === "主角" ? [] : [lead], duration: 6, status: "ready", motion: "push", motionIntensity: 1, transition: "fade", filter: "none", speed: 1, volume: 1, subtitleEnabled: true, subtitlePosition: "bottom", model: "本机资产库" };
+  }
+
+  function applyLibraryAssets(imported: LibraryAsset[]) {
+    if (!imported.length) return;
+    let nextCharacters = characters.map((item) => ({ ...item }));
+    let nextScenes = scenes.map((item) => ({ ...item }));
+    let characterIndex = 0;
+    let imageIndex = 0;
+    let videoIndex = 0;
+    let audioIndex = 0;
+    for (const asset of imported) {
+      if (!asset.url) continue;
+      const looksLikeCharacter = asset.mediaType === "image" && (asset.category === "character" || /角色|人物|character|turnaround|三视图|四视图/i.test(asset.name));
+      if (looksLikeCharacter) {
+        const existing = nextCharacters[characterIndex];
+        if (existing) nextCharacters[characterIndex] = { ...existing, imageUrl: asset.url, sheetVersion: 2, status: "ready" };
+        else nextCharacters.push({ id: uid(), name: asset.name.replace(/\.[^.]+$/, "").slice(0, 30) || `角色 ${characterIndex + 1}`, role: "用户导入角色", appearance: "以用户导入的角色设定图为唯一外观参考", voice, imageUrl: asset.url, sheetVersion: 2, status: "ready" });
+        characterIndex += 1;
+        continue;
+      }
+      const field = asset.mediaType === "image" ? "imageUrl" : asset.mediaType === "video" ? "videoUrl" : "audioUrl";
+      const slot = asset.mediaType === "image" ? imageIndex++ : asset.mediaType === "video" ? videoIndex++ : audioIndex++;
+      while (nextScenes.length <= slot) nextScenes.push(importedScene(asset.name, nextScenes.length));
+      const target = nextScenes[slot];
+      nextScenes[slot] = { ...target, [field]: asset.url, duration: asset.duration > 0 ? Math.max(1, Math.min(30, asset.duration)) : target.duration, status: "ready", model: "本机资产库" };
+    }
+    setCharacters(nextCharacters);
+    setScenes(nextScenes);
+    setSelected(0);
+    setPhase("ready");
+    setError("");
+    invalidateExport();
+    setImportMessage(`已导入 ${imported.length} 项资产；角色图、分镜图、视频和音频会分别跳过对应生成步骤`);
+    recordActivity("image", `已从独立资产库导入 ${imported.filter((item) => item.mediaType === "image").length} 项图片资产`, "done");
+    if (imported.some((item) => item.mediaType === "video")) recordActivity("video", "用户视频资产已锁定，生成时自动跳过已有镜头", "done");
+    if (imported.some((item) => item.mediaType === "audio")) recordActivity("voice", "用户音频资产已锁定，配音时自动跳过已有音轨", "done");
+  }
+
+  async function importScriptFile(file?: File) {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let content = text.trim();
+      if (file.name.toLowerCase().endsWith(".json")) {
+        const payload = JSON.parse(text) as Record<string, unknown>;
+        content = String(payload.script || payload.story || payload.premise || payload.content || "").trim();
+      }
+      if (content.length < 8) throw new Error("剧本内容太短或文件格式不正确");
+      setStory(content.slice(0, 50000));
+      setScriptImported(true);
+      setImportMessage(`已导入剧本“${file.name}”；AI 不再改写剧情，只在缺少分镜时负责结构化拆镜`);
+      recordActivity("writer", "用户剧本已导入，原创编剧步骤已跳过", "done");
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "剧本导入失败");
+    }
+  }
+
+  async function importStoryboardFile(file?: File) {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text) as Record<string, unknown>;
+      const storyboard = parseStoryboard(text, Number(payload.duration) || productionDuration, 1);
+      const rawScenes = Array.isArray(payload.scenes) ? payload.scenes as Array<Record<string, unknown>> : [];
+      const rawCharacters = Array.isArray(payload.characters) ? payload.characters as Array<Record<string, unknown>> : [];
+      const importedScenes = storyboard.scenes.map((scene, index) => {
+        const source = rawScenes[index] || {};
+        const imageUrl = String(source.imageUrl || source.image || "");
+        const videoUrl = String(source.videoUrl || source.video || "");
+        const audioUrl = String(source.audioUrl || source.audio || "");
+        return { ...scene, imageUrl: /^https?:\/\//i.test(imageUrl) ? imageUrl : undefined, videoUrl: /^https?:\/\//i.test(videoUrl) ? videoUrl : undefined, audioUrl: /^https?:\/\//i.test(audioUrl) ? audioUrl : undefined, status: imageUrl || videoUrl || audioUrl ? "ready" as SceneStatus : "queued" as SceneStatus };
+      });
+      const importedCharacters = storyboard.characters.map((character, index) => {
+        const reference = String(rawCharacters[index]?.imageUrl || rawCharacters[index]?.reference || "");
+        return { ...character, imageUrl: /^https?:\/\//i.test(reference) ? reference : undefined, remoteUrl: /^https?:\/\//i.test(reference) ? reference : undefined, sheetVersion: reference ? 2 as const : undefined, status: reference ? "ready" as const : character.status };
+      });
+      setProjectTitle(String(payload.title || storyboard.title).slice(0, 60));
+      if (payload.premise || payload.story) { setStory(String(payload.premise || payload.story).slice(0, 50000)); setScriptImported(true); }
+      if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
+      if (typeof payload.style === "string" && STYLE_PROMPTS[payload.style]) setStyle(payload.style);
+      setMusicPrompt(String(payload.music || storyboard.music));
+      setCharacters(importedCharacters);
+      setScenes(importedScenes);
+      setSelected(0);
+      setPhase("ready");
+      setProgress(15);
+      setError("");
+      invalidateExport();
+      setImportMessage(`已导入 ${importedScenes.length} 个分镜；编剧和导演步骤会自动跳过`);
+      recordActivity("writer", "用户分镜已导入，编剧步骤已跳过", "done");
+      recordActivity("director", "使用用户锁定分镜，导演复核步骤已跳过", "done");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "分镜导入失败");
+    }
+  }
+
+  async function importProductionAssets(files: FileList | null) {
+    if (!files?.length) return;
+    try {
+      setImportMessage("正在保存资产到独立资产库…");
+      const imported: LibraryAsset[] = [];
+      for (const file of Array.from(files).slice(0, 40)) {
+        const category: LibraryAssetCategory = file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : /角色|人物|character|turnaround|三视图|四视图/i.test(file.name) ? "character" : "scene";
+        imported.push(await saveLibraryFile(file, { category }));
+      }
+      applyLibraryAssets(imported);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "资产导入失败");
+    }
+  }
+
   function replaceSceneMedia(scene: Scene, kind: "image" | "video" | "audio", file?: File) {
     if (!file) return;
     const field = kind === "image" ? "imageUrl" : kind === "video" ? "videoUrl" : "audioUrl";
@@ -1729,6 +3005,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const importedScenes = (payload.scenes as Scene[]).slice(0, 50).map((scene, index) => ({ ...scene, id: uid(), title: String(scene.title || `镜头 ${index + 1}`), duration: Math.max(1, Math.min(30, Number(scene.duration) || 6)), status: scene.imageUrl || scene.videoUrl ? "ready" as SceneStatus : "queued" as SceneStatus }));
       setProjectTitle(String(payload.projectTitle || "导入的漫镜工程").slice(0, 60));
       setStory(String(payload.story || "导入工程的故事梗概"));
+      setScriptImported(true);
       if (typeof payload.style === "string" && STYLE_PROMPTS[payload.style]) setStyle(payload.style);
       if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
       setTargetDuration(Number(payload.targetDuration) || 0);
@@ -1790,6 +3067,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const movieOffsets = movieScenes.map((_, index) => movieScenes.slice(0, index).reduce((sum, item) => sum + item.duration, 0));
     const movieDuration = movieScenes.reduce((sum, item) => sum + item.duration, 0);
+    const exportRun = runRef.current;
+    let activeStream: MediaStream | null = null;
+    let activeAudioContext: AudioContext | null = null;
+    let activeRecorder: MediaRecorder | null = null;
+    let activeVisuals: Array<HTMLImageElement | HTMLVideoElement> = [];
     setPlaying(false);
     setShowFilm(false);
     setPhase("exporting");
@@ -1804,22 +3086,39 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       canvas.height = height;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("无法创建视频画布");
-      const visuals = await Promise.all(movieScenes.map(loadVisual));
+      const visuals: Array<HTMLImageElement | HTMLVideoElement> = [];
+      for (let index = 0; index < movieScenes.length; index += 1) {
+        if (runRef.current !== exportRun) throw new Error("导出已取消");
+        setStatusText(`正在加载剪辑素材 ${index + 1}/${movieScenes.length}`);
+        visuals.push(await loadVisual(movieScenes[index]));
+        if (index % 2 === 1) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
+      activeVisuals = visuals;
       const audioContext = new AudioContext();
+      activeAudioContext = audioContext;
       const destination = audioContext.createMediaStreamDestination();
-      const buffers = await Promise.all(movieScenes.map(async (scene) => {
-        if (!scene.audioUrl) return null;
-        const bytes = await (await fetch(scene.audioUrl)).arrayBuffer();
-        return audioContext.decodeAudioData(bytes);
-      }));
+      const buffers: Array<AudioBuffer | null> = [];
+      for (let index = 0; index < movieScenes.length; index += 1) {
+        if (runRef.current !== exportRun) throw new Error("导出已取消");
+        const scene = movieScenes[index];
+          if (!voiceEnabled || !scene.audioUrl) buffers.push(null);
+        else {
+          const response = await fetch(scene.audioUrl);
+          if (!response.ok) throw new Error(`无法读取第 ${index + 1} 个镜头的配音`);
+          buffers.push(await audioContext.decodeAudioData(await response.arrayBuffer()));
+        }
+        if (index % 2 === 1) await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
       const soundtrackBuffer = sourceMusicUrl
         ? await audioContext.decodeAudioData(await (await fetch(sourceMusicUrl)).arrayBuffer())
         : null;
       const canvasStream = canvas.captureStream(30);
       const stream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
+      activeStream = stream;
       const choices = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"];
       const mimeType = choices.find((choice) => MediaRecorder.isTypeSupported(choice)) || "";
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType, videoBitsPerSecond: 5_000_000 } : undefined);
+      activeRecorder = recorder;
       const chunks: Blob[] = [];
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
       recorder.start(500);
@@ -1849,8 +3148,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       const started = performance.now() + 120;
       let visualIndex = -1;
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         const render = (now: number) => {
+          if (runRef.current !== exportRun) {
+            reject(new Error("导出已取消"));
+            return;
+          }
           const elapsed = Math.max(0, (now - started) / 1000);
           if (elapsed >= movieDuration) {
             resolve();
@@ -1916,9 +3219,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       recorder.stop();
       await new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
+      activeRecorder = null;
       visuals.forEach((item) => { if (item instanceof HTMLVideoElement) item.pause(); });
       stream.getTracks().forEach((track) => track.stop());
+      activeStream = null;
       await audioContext.close();
+      activeAudioContext = null;
       const finalType = recorder.mimeType || "video/webm";
       const blob = new Blob(chunks, { type: finalType });
       if (exportUrl) URL.revokeObjectURL(exportUrl);
@@ -1932,9 +3238,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       await syncScenesToEditor(movieScenes, url, "studio");
       return true;
     } catch (reason) {
+      if (runRef.current !== exportRun) {
+        setPhase(movieScenes.length ? "ready" : "idle");
+        setStatusText("已停止视频合成，现有镜头和素材均已保留");
+        return false;
+      }
       setPhase("error");
       setError(reason instanceof Error ? reason.message : "视频导出失败");
       return false;
+    } finally {
+      activeVisuals.forEach((item) => { if (item instanceof HTMLVideoElement) item.pause(); });
+      activeStream?.getTracks().forEach((track) => track.stop());
+      if (activeRecorder && activeRecorder.state !== "inactive") activeRecorder.stop();
+      if (activeAudioContext && activeAudioContext.state !== "closed") await activeAudioContext.close().catch(() => undefined);
     }
   }
 
@@ -1946,8 +3262,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     anchor.click();
   }
 
-  const busy = libtvRunning || !["idle", "ready", "error"].includes(phase);
+  const busy = Boolean(retryingRole) || libtvRunning || !["idle", "ready", "error"].includes(phase);
   const visibleProgress = phase === "exporting" ? exportProgress : progress;
+  const failedRole = AGENT_ROLES.find((role) => activityByRole[role.id]?.state === "error")?.id;
   const selectedScene = scenes[selected];
   const nativeVideoEnabled = agentConfigs.video.adapter !== "browser";
   const generatedVoiceEnabled = agentConfigs.voice.adapter !== "browser";
@@ -1978,22 +3295,43 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         <div className="creation-grid">
           <div className="story-panel">
             <label htmlFor="story">故事梗概</label>
-            <textarea id="story" value={story} onChange={(event) => setStory(event.target.value)} maxLength={1200} placeholder="例如：末班地铁上，女孩遇见了十年后的自己……" />
-            <div className="text-meta"><button onClick={() => setStory("末班地铁上，女孩发现对面的乘客竟是十年后的自己。车门打开前，她只有三分钟改变人生。")}>换一个灵感</button><span>{story.length} / 1200</span></div>
+            <textarea id="story" value={story} onChange={(event) => setStory(event.target.value)} maxLength={50000} placeholder="输入故事梗概，或者在下方直接导入完整剧本……" />
+            <div className="text-meta"><button onClick={() => { setStory("末班地铁上，女孩发现对面的乘客竟是十年后的自己。车门打开前，她只有三分钟改变人生。"); setScriptImported(false); }}>换一个灵感</button><span>{story.length} / 50000</span></div>
           </div>
           <div className="settings-panel">
-            <label>视觉风格</label>
-            <div className="choice-grid">{Object.keys(STYLE_PROMPTS).map((item) => <button key={item} className={style === item ? "active" : ""} onClick={() => setStyle(item)}>{item}</button>)}</div>
+            <section className={`studio-voice-setting ${voiceEnabled ? "enabled" : "disabled"}`}>
+              <header>
+                <div><span>ONE-CLICK VOICE</span><b>一键漫剧自动配音</b><small>{voiceEnabled ? "已开启 · 生成分角色对白并写入最终成片" : "已关闭 · 跳过配音岗位，输出无对白成片"}</small></div>
+                <button type="button" className={`toggle ${voiceEnabled ? "on" : ""}`} aria-label="一键漫剧自动配音" aria-pressed={voiceEnabled} onClick={() => setVoiceEnabled((value) => !value)}><i /></button>
+              </header>
+              <div className="studio-voice-provider"><span>当前配音岗位</span><b>{agentName("voice")}</b><em>{generatedVoiceEnabled ? "生成可下载音轨" : "仅设备语音预览"}</em></div>
+              {voiceEnabled && generatedVoiceEnabled && <label className="studio-voice-select">默认音色<select aria-label="一键漫剧配音音色" value={voice} onChange={(event) => setVoice(event.target.value)}>{VOICES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>}
+              {voiceEnabled && !generatedVoiceEnabled && <p>免费默认配音只能在设备上预览；若要把声音写进成片，请在下方“配音 AI”岗位选择 Pollinations、CosyVoice、VibeVoice 或自定义配音接口。</p>}
+            </section>
+            <div className="style-library-head"><label>视觉风格</label><span>16 种 · 写实 / 动画 / 艺术</span></div>
+            <div className="style-library" role="list" aria-label="漫剧视觉风格库">{STYLE_PRESETS.map((item) => <button type="button" role="listitem" key={item.name} className={`style-card ${style === item.name ? "active" : ""}`} onClick={() => setStyle(item.name)} aria-pressed={style === item.name}>
+              <img src={item.preview} alt="" loading="lazy" />
+              <span><b>{item.name}</b><em>{item.category}</em></span>
+              <small>{item.description}</small>
+            </button>)}</div>
             <div className="duration-setting">
               <div><label htmlFor="target-duration">目标时长</label><b>{targetDuration === 0 ? "自动" : formatTime(targetDuration)}</b></div>
               <input id="target-duration" type="range" min={0} max={120} step={5} value={targetDuration} onChange={(event) => setTargetDuration(Number(event.target.value))} />
               <small><span>0 秒</span><span>{targetDuration === 0 ? "自动判断剧情长度" : "拖动选择成片长度"}</span><span>2 分钟</span></small>
             </div>
             <div className="aspect-setting"><label>画面比例</label><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")}><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option></select></div>
-            <div className="voice-row"><div><label>自动配音</label><small>{generatedVoiceEnabled ? "由配音 AI 生成音轨并写入成片" : "使用设备中文语音预览"}</small></div><button className={`toggle ${voiceEnabled ? "on" : ""}`} aria-label="切换自动配音" onClick={() => setVoiceEnabled((value) => !value)}><i /></button></div>
             {generatedVoiceEnabled && <div className="voice-row"><div><label>剧情配乐</label><small>由声音岗位生成无歌词 BGM 并自动混音</small></div><button className={`toggle ${bgmEnabled ? "on" : ""}`} aria-label="切换剧情配乐" onClick={() => setBgmEnabled((value) => !value)}><i /></button></div>}
-            {generatedVoiceEnabled && voiceEnabled && <select aria-label="配音音色" value={voice} onChange={(event) => setVoice(event.target.value)}>{VOICES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>}
           </div>
+        </div>
+
+        <div className="production-import-hub">
+          <div className="production-import-heading"><div><span>BRING YOUR OWN PRODUCTION</span><h3>已有内容直接导入，不重复生成</h3><p>剧本、分镜、角色图、场景图、视频和配音都能作为生产起点；一键流程只补齐缺少的部分。</p></div><a href="/assets">打开独立资产库 ↗</a></div>
+          <div className="production-import-actions">
+            <label><i>文</i><span><b>导入剧本</b><small>TXT / MD / JSON · 跳过原创编剧</small></span><input type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" onChange={(event) => { void importScriptFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
+            <label><i>镜</i><span><b>导入分镜</b><small>漫镜 JSON · 跳过编剧和导演</small></span><input type="file" accept=".json,application/json" onChange={(event) => { void importStoryboardFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
+            <label><i>资</i><span><b>导入本机资产</b><small>图片 / 视频 / 音频 · 自动分类保存</small></span><input type="file" multiple accept="image/*,video/*,audio/*" onChange={(event) => { void importProductionAssets(event.target.files); event.currentTarget.value = ""; }} /></label>
+          </div>
+          <div className="production-import-state"><b>{scenes.length ? `${scenes.length} 个分镜` : scriptImported ? "剧本已锁定" : "等待导入"}</b><span>{importMessage}</span><div><em className={scriptImported ? "ready" : ""}>剧本</em><em className={scenes.length ? "ready" : ""}>分镜</em><em className={characters.some((item) => item.imageUrl) ? "ready" : ""}>角色</em><em className={scenes.some((item) => item.imageUrl) ? "ready" : ""}>画面</em><em className={scenes.some((item) => item.videoUrl) ? "ready" : ""}>视频</em><em className={scenes.some((item) => item.audioUrl) ? "ready" : ""}>声音</em></div></div>
         </div>
 
         <div className="ai-team">
@@ -2004,18 +3342,41 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               const presets = AGENT_PRESETS[role.id];
               const roleCustomModels = customModels.filter((item) => item.role === role.id);
               return <article key={role.id} className={`agent-card ${config.adapter}`}>
-                <div className="agent-card-top"><i>{role.icon}</i><div><b>{role.title}</b><span>{role.duty}</span></div><em>{config.adapter === "horde" || config.adapter === "browser" ? "免费" : config.adapter === "webhook" ? "自定义" : config.adapter === "seedance" ? "官方" : "已托管"}</em></div>
-                <select aria-label={`选择${role.title}`} value={config.preset} onChange={(event) => selectAgentPreset(role.id, event.target.value)}><optgroup label="漫镜预设">{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}</optgroup>{roleCustomModels.length > 0 && <optgroup label="我的模型">{roleCustomModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.model}</option>)}</optgroup>}</select>
+                <div className="agent-card-top"><i>{role.icon}</i><div><b>{role.title}</b><span>{role.duty}</span></div><em>{config.adapter === "horde" || config.adapter === "browser" ? "免费" : CUSTOM_TEXT_ADAPTERS.includes(config.adapter) ? "自定义" : config.adapter === "seedance" ? "官方" : "已托管"}</em></div>
+                <select aria-label={`选择${role.title}`} value={config.preset} onChange={(event) => selectAgentPreset(role.id, event.target.value)}><optgroup label="漫镜预设">{presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.model}</option>)}</optgroup>{config.preset === `direct-${role.id}` && <optgroup label="当前配置"><option value={config.preset}>手动 API 配置 · {config.model || "待选择模型"}</option></optgroup>}{roleCustomModels.length > 0 && <optgroup label="我的模型">{roleCustomModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.model}</option>)}</optgroup>}</select>
                 <div className="agent-model"><span>当前模型</span><b>{config.model}</b><small>{presets.find((item) => item.id === config.preset)?.note || roleCustomModels.find((item) => item.id === config.preset)?.note}</small></div>
                 <div className="recommend-row"><span>推荐</span>{role.recommends.map((item) => <i key={item}>{item}</i>)}</div>
                 <button className="agent-config-button" onClick={() => setConfiguringRole(configuringRole === role.id ? null : role.id)}>{configuringRole === role.id ? "收起设置" : "配置模型与接口"}</button>
                 {configuringRole === role.id && <div className="agent-config-panel">
+                  <label>自定义 API 模式<select aria-label={`${role.title}自定义 API 模式`} value={apiModesForRole(role.id).includes(config.adapter as DiscoverableApiMode) ? config.adapter : ""} onChange={(event) => { if (event.target.value) changeDirectApiMode(role.id, event.target.value as DiscoverableApiMode); }}><option value="">请选择 API 模式</option>{apiModesForRole(role.id).map((modeName) => <option key={modeName} value={modeName}>{API_MODE_LABELS[modeName]}</option>)}</select></label>
                   <label>模型 ID<input value={config.model} onChange={(event) => updateAgentConfig(role.id, { model: event.target.value })} placeholder="模型名称或 ID" /></label>
-                  {config.adapter === "webhook" && <label>Webhook 地址<input value={config.endpoint} onChange={(event) => updateAgentConfig(role.id, { endpoint: event.target.value.trim() })} placeholder="https://..." /></label>}
-                  {(config.adapter === "pollinations" || config.adapter === "webhook" || config.adapter === "seedance") && <label>{config.adapter === "seedance" ? "火山方舟 API Key（必填）" : "岗位专用 API 密钥（可选）"}<input type="password" value={config.apiKey} onChange={(event) => updateAgentConfig(role.id, { apiKey: event.target.value.trim() })} placeholder={config.adapter === "pollinations" ? "留空则使用下方统一密钥" : config.adapter === "seedance" ? "火山方舟控制台生成的 API Key" : "Bearer token，可留空"} /></label>}
-                  {config.adapter === "webhook" && <small>漫镜会 POST role、model、task 和输入内容；接口返回 text，或可下载的 url。需允许浏览器跨域访问。</small>}
-                  {config.adapter === "seedance" && <small>通过漫镜的安全代理提交异步任务并轮询结果；密钥不写入网站服务器，只保存在当前浏览器。</small>}
-                  <a className="add-custom-model-link" href={`/models#custom`}>＋ 为{role.title}添加自定义模型</a>
+                  {CUSTOM_TEXT_ADAPTERS.includes(config.adapter) && <label>API 地址<input value={config.endpoint} onChange={(event) => updateAgentConfig(role.id, { endpoint: event.target.value.trim() })} placeholder="https://... 或 http://localhost:端口" /></label>}
+                  {(config.adapter === "pollinations" || CUSTOM_TEXT_ADAPTERS.includes(config.adapter) || config.adapter === "seedance") && <label>{config.adapter === "seedance" ? "火山方舟 API Key（必填）" : "岗位专用 API 密钥（可选）"}<input type="password" value={config.apiKey} onChange={(event) => updateAgentConfig(role.id, { apiKey: event.target.value.trim() })} onBlur={() => { if (config.apiKey.trim() && apiModesForRole(role.id).includes(config.adapter as DiscoverableApiMode)) void discoverCurrentAgentModels(role.id); }} placeholder={config.adapter === "pollinations" ? "留空则使用下方统一密钥" : config.adapter === "seedance" ? "火山方舟控制台生成的 API Key" : "粘贴后离开输入框将自动读取模型"} /></label>}
+                  {apiModesForRole(role.id).includes(config.adapter as DiscoverableApiMode) && <button type="button" className="agent-api-discover" onClick={() => void discoverCurrentAgentModels(role.id)} disabled={roleModelLoading === role.id}>{roleModelLoading === role.id ? "正在连接并读取模型…" : "测试连接并读取该 API 的模型"}</button>}
+                  {!!roleModelOptions[role.id]?.length && <label>该 API 返回的模型<select value={config.model} onChange={(event) => updateAgentConfig(role.id, { model: event.target.value })}>{roleModelOptions[role.id]?.map((item) => <option key={item.id} value={item.id}>{item.name === item.id ? item.id : `${item.name} · ${item.id}`}</option>)}</select></label>}
+                  {["director", "writer", "editor"].includes(role.id) && CUSTOM_TEXT_ADAPTERS.includes(config.adapter) && <small>当前模式：{API_MODE_LABELS[config.adapter as DiscoverableApiMode]}。请求由独立版在本机直连；编剧/导演最长等待 120 秒，剪辑最长等待 90 秒，超时后可保留成果重新运行。</small>}
+                  {role.id === "image" && config.adapter === "openai" && <small>OpenAI 生图模式会调用所填地址的 <code>/images/generations</code>，可用于 OpenAI 官方或兼容的生图服务。</small>}
+                  {["image", "video", "voice"].includes(role.id) && config.adapter === "webhook" && <small>漫镜会 POST role、model、task 和输入内容；接口需返回媒体文件或可下载的 url。</small>}
+                  {config.adapter === "seedance" && <small>通过漫镜的安全代理提交异步任务并轮询结果；密钥不写入网站服务器，只持久保存在这台电脑。</small>}
+                  {apiModesForRole(role.id).includes(config.adapter as DiscoverableApiMode) && <button type="button" className="agent-api-save" onClick={() => void saveCurrentAgentApi(role.id)} disabled={roleSaveState.role === role.id && roleSaveState.state === "saving"}>{roleSaveState.role === role.id && roleSaveState.state === "saving" ? "正在保存…" : "保存此岗位 API 并立即应用"}</button>}
+                  {roleSaveState.role === role.id && roleSaveState.message && <p className={`agent-api-status ${roleSaveState.state}`} role="status">{roleSaveState.message}</p>}
+                  {roleCustomModels.length > 0 && <div className="agent-saved-models"><div><b>我的自定义模型</b><span>{roleCustomModels.length} 个</span></div>{roleCustomModels.map((model) => <article key={model.id}><span><b>{model.name}</b><small>{model.model} · {API_MODE_LABELS[model.adapter as DiscoverableApiMode] || model.adapter}</small></span><ConfirmButton onConfirm={() => deleteRoleCustomModel(role.id, model.id)} disabled={roleSaveState.role === role.id && roleSaveState.state === "saving"} ariaLabel={`删除自定义模型${model.name}`} confirmLabel="确认删除">删除</ConfirmButton></article>)}</div>}
+                  <button type="button" className="add-custom-model-link" onClick={() => toggleQuickModel(role.id)}>{quickModelRole === role.id ? "－ 收起自定义模型" : `＋ 为${role.title}添加自定义模型`}</button>
+                  {quickModelRole === role.id && <div className="quick-custom-model">
+                    <div><b>添加到 {role.title}</b><small>选择模式 → 填写 API → 读取模型 → 提交应用</small></div>
+                    <div className="quick-custom-grid">
+                      <label>API 模式<select value={quickModelDraft.adapter} onChange={(event) => changeQuickApiMode(event.target.value as DiscoverableApiMode)}>{apiModesForRole(role.id).map((modeName) => <option key={modeName} value={modeName}>{API_MODE_LABELS[modeName]}</option>)}</select></label>
+                      <label>API Base URL / 接口地址<input value={quickModelDraft.endpoint} onChange={(event) => setQuickModelDraft((value) => ({ ...value, endpoint: event.target.value }))} placeholder={API_MODE_DEFAULT_ENDPOINTS[quickModelDraft.adapter] || "https://... 或 http://localhost:端口"} /></label>
+                      <label>API Key（本机保存）<input type="password" value={quickModelDraft.apiKey} onChange={(event) => setQuickModelDraft((value) => ({ ...value, apiKey: event.target.value }))} onBlur={() => { if (quickModelDraft.apiKey.trim() && quickModelDraft.endpoint.trim()) void discoverQuickModels(); }} placeholder="粘贴后离开输入框将自动读取模型" /></label>
+                      <button type="button" className="quick-model-discover" onClick={() => void discoverQuickModels()} disabled={quickModelLoading}>{quickModelLoading ? "正在连接并读取…" : "测试连接并读取模型列表"}</button>
+                      {quickModelOptions.length > 0 && <label>接口返回的模型<select value={quickModelDraft.model} onChange={(event) => setQuickModelDraft((value) => ({ ...value, model: event.target.value }))}>{quickModelOptions.map((item) => <option key={item.id} value={item.id}>{item.name === item.id ? item.id : `${item.name} · ${item.id}`}</option>)}</select></label>}
+                      <label>模型 ID（也可手动填写）<input value={quickModelDraft.model} onChange={(event) => setQuickModelDraft((value) => ({ ...value, model: event.target.value }))} placeholder="读取后自动填入，或手动输入" /></label>
+                      <label>显示名称（可选）<input value={quickModelDraft.name} onChange={(event) => setQuickModelDraft((value) => ({ ...value, name: event.target.value }))} placeholder={`默认使用模型 ID，也可写“我的${role.title}”`} /></label>
+                      <label>备注（可选）<input value={quickModelDraft.note} onChange={(event) => setQuickModelDraft((value) => ({ ...value, note: event.target.value }))} placeholder="能力或用途" /></label>
+                    </div>
+                    <button type="button" className="quick-custom-save" onClick={() => void saveQuickModel(role.id)} disabled={quickModelSaving || quickModelLoading}>{quickModelSaving ? "正在写入并应用…" : "提交、保存并应用到当前岗位"}</button>
+                    {quickModelMessage && <p role="status" className="quick-custom-message">{quickModelMessage}</p>}
+                  </div>}
                 </div>}
               </article>;
             })}
@@ -2031,17 +3392,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         </div>
 
         <div className="cloud-engine-hub">
-          <div className="cloud-engine-heading"><div><span>PRODUCTION ENGINES</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；Seedance 方舟 API 负责把单个分镜变成真正会动的视频。</p></div><em>密钥仅存当前浏览器</em></div>
+          <div className="cloud-engine-heading"><div><span>PRODUCTION ENGINES</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；Seedance 方舟 API 负责把单个分镜变成真正会动的视频。</p></div><em>配置持久保存在本机</em></div>
           <div className="cloud-engine-grid">
             <article className={`cloud-engine-card libtv-card ${libtvCanvasOpen && (libtvSessionId || libtvProjectUrl) ? "canvas-open" : ""}`}>
               <div className="engine-title"><i>剧</i><div><b>LibTV 一键漫剧</b><span>剧本 → 角色 → 分镜 → 视频 → 配音 → 成片</span></div><em>全流程</em></div>
               <p>直接调用 LibTV 官方 Agent 接口创建完整项目。生成过程可在漫镜查看，也可打开 LibTV 无限画布继续精修。</p>
               <label>LibTV Access Key<input type="password" value={libtvAccessKey} onChange={(event) => setLibtvAccessKey(event.target.value.trim())} placeholder="填写 LIBTV_ACCESS_KEY" /></label>
-              <div className="engine-actions"><button onClick={() => void generateWithLibTv()} disabled={busy || story.trim().length < 8}>{libtvRunning ? "LibTV 正在制作…" : "一键生成完整 AI 漫剧"}</button><button className="secondary" onClick={() => void createLibTvCanvas()} disabled={libtvSending || libtvRunning}>新建空白画布</button>{(libtvSessionId || libtvProjectUrl) && <button className="secondary" onClick={() => setLibtvCanvasOpen((value) => !value)}>{libtvCanvasOpen ? "收起制片画布" : "查看制片画布"}</button>}<a href="https://github.com/libtv-labs/libtv-skills" target="_blank" rel="noreferrer">官方 OpenAPI ↗</a></div>
+              <div className="engine-actions"><button onClick={() => void generateWithLibTv()} disabled={busy || story.trim().length < 8}>{libtvRunning ? "LibTV 正在制作…" : "一键生成完整 AI 漫剧"}</button><button className="secondary" onClick={createLibTvCanvas} disabled={libtvSending}>新建本机制片画布</button>{(libtvSessionId || libtvProjectUrl) && <button className="secondary" onClick={() => setLibtvCanvasOpen((value) => !value)}>{libtvCanvasOpen ? "收起 LibTV 进度" : "查看 LibTV 进度"}</button>}<a href="https://github.com/libtv-labs/libtv-skills" target="_blank" rel="noreferrer">官方 OpenAPI ↗</a></div>
               {libtvSessionId && <div className="engine-task"><b>云端任务已建立</b><span>{libtvSessionId}</span></div>}
               {!!libtvResults.length && <div className="engine-results">{libtvResults.slice(0, 8).map((item, index) => {
                 const source = `/api/libtv?url=${encodeURIComponent(item.url)}`;
-                return <a key={`${item.url}-${index}`} href={source} download={`libtv-${index + 1}.${item.kind === "video" ? "mp4" : "png"}`} title="下载素材">{item.kind === "video" ? <video src={source} muted playsInline /> : <img src={source} alt={`LibTV 生成素材 ${index + 1}`} />}<span>{item.kind === "video" ? "视频" : "图片"} {index + 1}</span></a>;
+                return <a key={`${item.url}-${index}`} href={source} download={`libtv-${index + 1}.${item.kind === "video" ? "mp4" : "png"}`} title="下载素材">{item.kind === "video" ? <i className="video-thumbnail-placeholder">▶</i> : <img src={source} alt={`LibTV 生成素材 ${index + 1}`} loading="lazy" />}<span>{item.kind === "video" ? "视频" : "图片"} {index + 1}</span></a>;
               })}</div>}
               {libtvCanvasOpen && (libtvSessionId || libtvProjectUrl) && <div className="libtv-canvas">
                 <div className="libtv-canvas-head"><div><span>LIVE PRODUCTION CANVAS</span><b>LibTV 制片画布</b><small>由官方会话消息与素材结果实时构建</small></div><div>{libtvRunning && <button onClick={toggleLibTvPolling}>{libtvPollingPaused ? "继续自动刷新" : "暂停自动刷新"}</button>}<button onClick={() => void refreshLibTvCanvas()} disabled={!libtvSessionId || libtvSending}>{libtvSending ? "刷新中…" : "立即刷新"}</button>{libtvProjectUrl && <a href={libtvProjectUrl} target="_blank" rel="noreferrer">进入官方无限画布 ↗</a>}</div></div>
@@ -2061,33 +3422,36 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <label>模型 ID 或 Endpoint ID<input value={seedanceModel} onChange={(event) => setSeedanceModel(event.target.value.trim())} placeholder="doubao-seedance-… 或 ep-…" /></label>
               <div className="engine-actions"><button onClick={applySeedanceEngine}>{agentConfigs.video.adapter === "seedance" ? "更新 Seedance 视频岗位" : "应用到视频 AI 岗位"}</button><a href="https://www.volcengine.com/docs/82379/1520758" target="_blank" rel="noreferrer">方舟官方 API ↗</a><a href="https://www.volcengine.com/docs/85621/1756900" target="_blank" rel="noreferrer">即梦视觉 API ↗</a></div>
               <div className={`engine-active ${agentConfigs.video.adapter === "seedance" ? "on" : ""}`}><i />{agentConfigs.video.adapter === "seedance" ? `已启用：${agentConfigs.video.model}` : "尚未应用，当前视频岗位保持不变"}</div>
-              <p className="api-identity-note"><b>认证别混用：</b>Seedance 方舟接口填写 ARK_API_KEY；即梦视觉 API 使用 VOLC_ACCESS_KEY + VOLC_SECRET_KEY，需要签名调用，可在“模型与 Key”里添加为自定义视频模型。</p>
+              <div className={`volc-sdk-state ${volcengineSdk?.installed ? "ready" : "checking"}`}><i>{volcengineSdk?.installed ? "✓" : "…"}</i><span><b>{volcengineSdk?.installed ? `火山引擎官方 SDK ${volcengineSdk.version} 已内置` : "正在检测内置火山 SDK"}</b><small>{volcengineSdk?.note || "Windows 独立版启动后自动加载，不需要用户另外安装或升级。"}</small></span></div>
+              <p className="api-identity-note"><b>认证别混用：</b>Seedance 方舟视频生成按官方接口填写 ARK_API_KEY；内置 SDK 同时提供 AK/SK 签名能力。用户不需要在电脑上另外安装 SDK。</p>
             </article>
           </div>
           <p className="cloud-engine-note"><b>真实能力边界：</b>LibTV 和即梦的接口代码可以接入，但云端生成需要平台有效额度；漫镜不会伪装成免费算力，也不会把访问密钥写进部署配置。</p>
         </div>
 
         <div className="opensource-hub">
-          <div className="opensource-heading"><div><span>OPEN SOURCE NODES</span><h3>开源本地节点中心</h3><p>用一个统一桥接地址，把你自己的 ComfyUI/Wan2.2、CosyVoice 和 MuseTalk 接入漫镜。</p></div><div><a href="/manjing-local-bridge.zip" download>下载本地桥接服务</a><button onClick={applyBridgeStack}>一键应用开源三节点</button></div></div>
+          <div className="opensource-heading"><div><span>OPEN SOURCE NODES</span><h3>开源本地节点中心</h3><p>统一连接 ComfyUI/Wan2.2、CosyVoice、MuseTalk、MoneyPrinterTurbo 与 VibeVoice。</p></div><div><a href="/manjing-local-bridge.zip" download>下载本地桥接服务</a><button onClick={applyBridgeStack}>应用中文基础节点</button></div></div>
           <div className="bridge-config"><label>桥接服务地址<input value={bridgeUrl} onChange={(event) => { setBridgeUrl(event.target.value.trim()); setBridgeHealth({ state: "idle", message: "地址已修改，等待检测" }); }} placeholder="https://你的桥接地址 或 http://127.0.0.1:8765" /></label><label>桥接密钥<input type="password" value={bridgeToken} onChange={(event) => setBridgeToken(event.target.value.trim())} placeholder="与本地 .env 中的 BRIDGE_TOKEN 相同" /></label><button onClick={() => void testBridgeConnection()} disabled={bridgeHealth.state === "testing"}>{bridgeHealth.state === "testing" ? "检测中…" : "检测连接"}</button><em className={bridgeHealth.state}>{bridgeHealth.message}</em></div>
           <div className="opensource-nodes">
             <article className={bridgeHealth.nodes?.comfyui ? "online" : "offline"}><div className="node-top"><i>影</i><div><b>ComfyUI · Wan2.2</b><span>生图、角色一致性、图生视频与人物动画</span></div><em>{bridgeHealth.nodes?.comfyui ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.workflows?.image ? "ready" : ""}>生图工作流</span><span className={bridgeHealth.workflows?.video ? "ready" : ""}>视频工作流</span></div><div className="node-actions"><button onClick={() => applyBridgeRole("image")}>用于生图岗位</button><button onClick={() => applyBridgeRole("video")}>用于视频岗位</button><a href="https://github.com/Wan-Video/Wan2.2" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
             <article className={bridgeHealth.nodes?.cosyvoice ? "online" : "offline"}><div className="node-top"><i>声</i><div><b>CosyVoice</b><span>中文角色配音、情绪指令与声音复刻</span></div><em>{bridgeHealth.nodes?.cosyvoice ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.nodes?.cosyvoice ? "ready" : ""}>FastAPI 服务</span><span>本机生成音轨</span></div><div className="node-actions"><button onClick={() => applyBridgeRole("voice")}>用于配音岗位</button><a href="https://github.com/FunAudioLLM/CosyVoice" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
             <article className={bridgeHealth.nodes?.musetalk ? "online" : "offline"}><div className="node-top"><i>口</i><div><b>MuseTalk 1.5</b><span>在配音完成后，为人物镜头生成中文口型</span></div><em>{bridgeHealth.nodes?.musetalk ? "在线" : "未检测"}</em></div><div className="lipsync-toggle"><div><b>生成后自动做口型</b><span>失败时保留原视频，不中断整片</span></div><button className={`toggle ${lipsyncEnabled ? "on" : ""}`} onClick={() => setLipsyncEnabled((value) => !value)}><i /></button></div><div className="node-actions"><a href="https://github.com/TMElyralab/MuseTalk" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
+            <article className={bridgeHealth.nodes?.moneyprinter ? "online" : "offline"}><div className="node-top"><i>剪</i><div><b>MoneyPrinterTurbo</b><span>把工作台素材顺序拼接、配音、字幕并自动出片</span></div><em>{bridgeHealth.nodes?.moneyprinter ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.nodes?.moneyprinter ? "ready" : ""}>官方任务 API</span><span>FFmpeg 成片</span></div><div className="node-actions"><a href="/editor">前往剪辑台使用</a><a href="https://github.com/harry0703/MoneyPrinterTurbo" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
+            <article className={bridgeHealth.nodes?.vibevoice ? "online" : "offline"}><div className="node-top"><i>语</i><div><b>VibeVoice Realtime</b><span>微软 0.5B 流式配音，实验性英文单角色节点</span></div><em>{bridgeHealth.nodes?.vibevoice ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.nodes?.vibevoice ? "ready" : ""}>24 kHz 实时音频</span><span className={bridgeHealth.nodes?.vibevoice_asr ? "ready" : ""}>ASR 可选</span></div><div className="node-actions"><button onClick={applyVibeVoiceRole}>用于配音岗位</button><a href="https://github.com/microsoft/VibeVoice" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>
           </div>
-          <p className="opensource-note"><b>免费指的是代码和模型可自托管，不代表显卡免费。</b>Wan2.2 需要 NVIDIA GPU；网站不能替你在普通浏览器里运行大型视频模型。桥接服务只保存在你的电脑，接口与密钥仍由你控制。</p>
+          <p className="opensource-note"><b>免费指代码或模型可自托管，不代表显卡与第三方服务免费。</b>VibeVoice Realtime 目前主要面向英文单角色；中文多角色优先使用 CosyVoice。MoneyPrinterTurbo 和大型视频模型需要本机 FFmpeg、模型与相应算力，所有开源节点均为可选。</p>
         </div>
 
         <div className="generate-row">
           <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑</small></button>
-          {busy && phase !== "exporting" && <button className="cancel-button" onClick={cancelGeneration}>停止</button>}
+          {busy && <button className="cancel-button" onClick={cancelGeneration}>{phase === "exporting" ? "停止合成" : "停止"}</button>}
         </div>
-        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><b>{error || statusText}</b><span>{error ? "请检查对应 AI 岗位的接口设置后重试。" : `${visibleProgress}%`}</span></div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
+        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{error && failedRole && <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
         {(activityLog.length > 0 || busy) && <div className="workflow-monitor">
           <div className="workflow-heading"><div><b>AI 制作现场</b><span>每个岗位正在做什么、用了哪个模型、交付了什么，都实时记录</span></div><em>{busy ? "制作直播中" : "本次流程已保存"}</em></div>
           <div className="workflow-roles">{AGENT_ROLES.map((role) => {
             const latest = activityByRole[role.id];
-            return <article key={role.id} className={latest?.state || "waiting"}><i>{role.icon}</i><div><b>{role.title}</b><span>{latest?.message || "等待上游交付"}</span><small>{agentName(role.id)}</small></div><em>{latest?.state === "running" ? "工作中" : latest?.state === "done" ? "已交付" : latest?.state === "warning" ? "已降级" : latest?.state === "error" ? "中断" : "等待"}</em></article>;
+            return <article key={role.id} className={latest?.state || "waiting"}><i>{role.icon}</i><div><b>{role.title}</b><span>{latest?.message || "等待上游交付"}</span><small>{agentName(role.id)}</small></div><aside><em>{latest?.state === "running" ? "工作中" : latest?.state === "done" ? "已交付" : latest?.state === "warning" ? "已降级" : latest?.state === "error" ? "中断" : "等待"}</em><button type="button" onClick={() => void rerunRole(role.id)} disabled={busy || !canRerunRole(role.id)} aria-label={`重新运行${role.title}`}>{retryingRole === role.id ? "运行中…" : latest?.state === "error" ? "重新运行" : "再运行"}</button></aside></article>;
           })}</div>
           <div className="workflow-log"><b>制作记录</b><div>{activityLog.length ? activityLog.map((item) => <p key={item.id} className={item.state}><time>{item.time}</time><span>{AGENT_ROLES.find((role) => role.id === item.role)?.title}</span>{item.message}</p>) : <p><time>--:--</time><span>制片组</span>任务开始后，这里会显示每一步真实进度</p>}</div></div>
         </div>}
@@ -2117,10 +3481,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             <button onClick={downloadStoryboard}><i>镜</i><span><b>下载分镜</b><small>JSON · 可交给其他模型继续制作</small></span></button>
             <button onClick={downloadProject}><i>工</i><span><b>保存工程</b><small>JSON · 保留剪辑参数，稍后再改</small></span></button>
             <button onClick={downloadFilm} disabled={!exportUrl}><i>片</i><span><b>下载成片</b><small>{exportUrl ? "视频文件已就绪" : "重新合成后可下载"}</small></span></button>
-            <button className="send-to-editor" onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}><i>剪</i><span><b>{editorSyncState === "saving" ? "正在整理素材" : "进入专业剪辑台"}</b><small>{editorSyncState === "ready" ? "AI 工程已同步，可继续精剪" : "自动带入视频、图片、配音和字幕"}</small></span></button>
+            <button className="send-to-editor" onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}><i>剪</i><span><b>{editorSyncState === "saving" ? `正在逐个整理素材 ${editorSyncProgress}%` : "进入专业剪辑台"}</b><small>{editorSyncState === "ready" ? "AI 工程已同步，可继续精剪" : "自动带入视频、图片、配音和字幕"}</small></span></button>
           </div>
           <div className="media-bin">{scenes.map((scene, index) => <article key={scene.id} className={selected === index ? "selected" : ""} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}>
-            <div className="media-bin-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{String(index + 1).padStart(2, "0")}</span>}</div>
+            <div className="media-bin-thumb">{scene.imageUrl ? <img src={scene.imageUrl} alt="" loading="lazy" /> : scene.videoUrl ? <span className="video-thumbnail-placeholder">▶</span> : <span>{String(index + 1).padStart(2, "0")}</span>}</div>
             <div><b>{String(index + 1).padStart(2, "0")} · {scene.title}</b><small>{scene.videoUrl ? "原生视频" : scene.imageUrl ? "2.5D 图片镜头" : "等待画面"} · {scene.duration} 秒</small></div>
             <div className="media-downloads">{scene.imageUrl && <button onClick={(event) => { event.stopPropagation(); void downloadAsset(scene.imageUrl as string, `${projectTitle}-${index + 1}-${scene.title}`, "png"); }}>图片</button>}{scene.videoUrl && <button onClick={(event) => { event.stopPropagation(); void downloadAsset(scene.videoUrl as string, `${projectTitle}-${index + 1}-${scene.title}`, "mp4"); }}>视频</button>}{scene.audioUrl && <button onClick={(event) => { event.stopPropagation(); void downloadAsset(scene.audioUrl as string, `${projectTitle}-${index + 1}-${scene.speaker}-配音`, "mp3"); }}>配音</button>}</div>
           </article>)}</div>
@@ -2129,19 +3493,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         {!scenes.length ? <div className="empty-work"><div className="empty-orbit"><span>✦</span></div><h3>你的第一部漫剧还没开机</h3><p>在上方输入故事并点击“一键生成 AI 漫剧”，完成后这里会直接出现可播放成片。</p></div> : <><div className="workbench">
           <div className="preview-column">
             <div className={`stage ${aspect === "9:16" ? "portrait" : "landscape"} ${showFilm && exportUrl ? "film-ready" : ""}`}>
-              {showFilm && exportUrl ? <video src={exportUrl} controls autoPlay playsInline muted={!generatedVoiceEnabled || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} muted loop playsInline style={{ filter: previewFilter }} /> : current?.imageUrl ? <img className={`motion-preview motion-${current.motion || "push"}`} key={current.imageUrl} src={current.imageUrl} alt={current.visual} style={{ filter: previewFilter, animationDuration: `${Math.max(3, current.duration)}s` }} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "视频 AI 正在生成角色动态表演" : current?.status === "painting" ? "生图 AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
+              {showFilm && exportUrl ? <video src={exportUrl} preload="metadata" controls autoPlay playsInline muted={!generatedVoiceEnabled || !voiceEnabled} /> : current?.videoUrl ? <video ref={videoRef} key={current.videoUrl} src={current.videoUrl} preload="metadata" muted loop playsInline style={{ filter: previewFilter }} /> : current?.imageUrl ? <img className={`motion-preview motion-${current.motion || "push"}`} key={current.imageUrl} src={current.imageUrl} alt={current.visual} style={{ filter: previewFilter, animationDuration: `${Math.max(3, current.duration)}s` }} /> : <div className="stage-placeholder"><span>{String(currentIndex + 1).padStart(2, "0")}</span><p>{current?.status === "animating" ? "视频 AI 正在生成角色动态表演" : current?.status === "painting" ? "生图 AI 正在绘制一致性关键帧" : "等待生成镜头"}</p></div>}
               {showFilm && exportUrl ? <div className="film-corner">AI 漫剧成片</div> : current && <><div className="stage-shade" /><div className="stage-label"><span>{String(currentIndex + 1).padStart(2, "0")}</span><b>{current.title}</b></div>{current.subtitleEnabled !== false && <div className={`subtitle ${current.subtitlePosition || "bottom"}`} style={{ color: subtitleColor, fontSize: `${14 * subtitleScale}px` }}>“{current.dialogue}”</div>}</>}
             </div>
-            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={() => void openInProfessionalEditor()}>进入专业剪辑台</button><button onClick={downloadFilm}>下载成片</button></div> : <>
+            {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}>{editorSyncState === "saving" ? `整理素材 ${editorSyncProgress}%` : "进入专业剪辑台"}</button><button onClick={downloadFilm}>下载成片</button></div> : <>
               <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
               <div className="export-panel"><div><b>{nativeVideoEnabled ? "重新合成 AI 漫剧" : "重新生成流程样片"}</b><span>{nativeVideoEnabled && generatedVoiceEnabled && voiceEnabled ? "动态表演、字幕、分角色配音与配乐将写入视频" : "关键帧、运镜、转场和字幕将写入样片"}</span></div><button onClick={() => void exportFilm()} disabled={phase === "exporting"}>{phase === "exporting" ? `正在录制 ${exportProgress}%` : nativeVideoEnabled ? "生成 AI 漫剧成片" : "生成低动态样片"}</button></div>
-              {exportUrl && <div className="export-result"><video src={exportUrl} controls playsInline /><div><b>已有漫剧成片</b><span>可以返回成片模式播放，或重新剪辑。</span><button onClick={() => setShowFilm(true)}>播放成片</button><button onClick={downloadFilm}>下载成片</button></div></div>}
+              {exportUrl && <div className="export-result"><video src={exportUrl} preload="metadata" controls playsInline /><div><b>已有漫剧成片</b><span>可以返回成片模式播放，或重新剪辑。</span><button onClick={() => setShowFilm(true)}>播放成片</button><button onClick={downloadFilm}>下载成片</button></div></div>}
             </>}
           </div>
 
           <div className="timeline-panel">
             <div className="timeline-title"><div><b>智能分镜</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
-            <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.imageUrl ? "一致性关键帧" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
+            <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.imageUrl ? <img src={scene.imageUrl} alt="" loading="lazy" /> : scene.videoUrl ? <span className="video-thumbnail-placeholder">▶</span> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.imageUrl ? "一致性关键帧" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
             {selectedScene && <div className="scene-editor">
               <div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")} · 属性检查器</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button onClick={() => duplicateScene(selected)}>复制</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div>
               <div className="local-media-tools"><label>替换图片<input type="file" accept="image/*" onChange={(event) => { replaceSceneMedia(selectedScene, "image", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>导入视频<input type="file" accept="video/*" onChange={(event) => { replaceSceneMedia(selectedScene, "video", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>导入配音<input type="file" accept="audio/*" onChange={(event) => { replaceSceneMedia(selectedScene, "audio", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
@@ -2154,7 +3518,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
               <div className="subtitle-switch"><div><b>显示本镜字幕</b><span>关闭后对白仍保留在剧本中</span></div><button className={`toggle ${selectedScene.subtitleEnabled !== false ? "on" : ""}`} onClick={() => updateScene(selectedScene.id, { subtitleEnabled: selectedScene.subtitleEnabled === false })}><i /></button></div>
               <label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label>
-              <div className="editor-actions"><button onClick={() => regenerateImage(selectedScene, selected)}>让生图 AI 重做</button><button className="video-action" onClick={() => generateVideo(selectedScene)}>{nativeVideoEnabled ? "让视频 AI 重做" : "配置视频 AI"}</button></div>
+              <div className="editor-actions"><button onClick={() => void regenerateImage(selectedScene, selected)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "image" ? "生图 AI 正在重做…" : "让生图 AI 重做"}</button><button className="video-action" onClick={() => void generateVideo(selectedScene)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "video" ? "视频 AI 正在重做…" : nativeVideoEnabled ? "让视频 AI 重做" : "配置视频 AI"}</button></div>
             </div>}
           </div>
         </div>
@@ -2183,7 +3547,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
                 <div className="playhead" style={{ left: totalDuration ? (time / totalDuration) * timelineWidth : 0 }}><i /></div>
                 <div className="timeline-track video-track">
                   {scenes.map((scene, index) => <button type="button" draggable key={scene.id} className={`video-clip ${selected === index ? "selected" : ""} ${draggingScene === index ? "dragging" : ""}`} style={{ width: Math.max(50, (scene.duration / Math.max(totalDuration, 1)) * timelineWidth) }} onDragStart={() => setDraggingScene(index)} onDragEnd={() => setDraggingScene(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (draggingScene !== null) reorderScene(draggingScene, index); setDraggingScene(null); }} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }} aria-label={`选择并拖动镜头 ${scene.title}`}>
-                    <span className="clip-thumb">{scene.videoUrl ? <video src={scene.videoUrl} muted /> : scene.imageUrl ? <img src={scene.imageUrl} alt="" /> : <i>{String(index + 1).padStart(2, "0")}</i>}</span><b>{scene.title}</b><small>{scene.duration} 秒</small>
+                    <span className="clip-thumb">{scene.imageUrl ? <img src={scene.imageUrl} alt="" loading="lazy" /> : scene.videoUrl ? <i className="video-thumbnail-placeholder">▶</i> : <i>{String(index + 1).padStart(2, "0")}</i>}</span><b>{scene.title}</b><small>{scene.duration} 秒</small>
                   </button>)}
                 </div>
                 <div className="timeline-track voice-track">

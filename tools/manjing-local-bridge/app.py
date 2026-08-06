@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import mimetypes
 import os
+import re
 import secrets
 import time
 import wave
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import httpx
+from websockets.asyncio.client import connect as websocket_connect
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,13 +31,16 @@ WORKFLOW_DIR.mkdir(exist_ok=True)
 COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 COSYVOICE_URL = os.getenv("COSYVOICE_URL", "http://127.0.0.1:50000").rstrip("/")
 MUSETALK_URL = os.getenv("MUSETALK_URL", "http://127.0.0.1:8000").rstrip("/")
+MONEYPRINTER_URL = os.getenv("MONEYPRINTER_URL", "http://127.0.0.1:8080").rstrip("/")
+VIBEVOICE_URL = os.getenv("VIBEVOICE_URL", "http://127.0.0.1:3000").rstrip("/")
+VIBEVOICE_ASR_URL = os.getenv("VIBEVOICE_ASR_URL", "").rstrip("/")
 BRIDGE_TOKEN = os.getenv("BRIDGE_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 COSYVOICE_MODE = os.getenv("COSYVOICE_MODE", "sft").strip().lower()
 COSYVOICE_SPK_ID = os.getenv("COSYVOICE_SPK_ID", "中文女").strip()
 COSYVOICE_SAMPLE_RATE = int(os.getenv("COSYVOICE_SAMPLE_RATE", "22050"))
 
-app = FastAPI(title="漫镜本地桥接服务", version="1.0.0")
+app = FastAPI(title="漫镜本地桥接服务", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in os.getenv("ALLOW_ORIGINS", "*").split(",") if item.strip()],
@@ -55,6 +61,33 @@ def authorize(authorization: str | None) -> None:
 def public_url(request: Request, filename: str) -> str:
     base = PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
     return f"{base}/files/{filename}"
+
+
+def unwrap_upstream(payload: Any, service: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail=f"{service} 返回了无法识别的数据")
+    status = payload.get("status")
+    if isinstance(status, int) and status >= 400:
+        raise HTTPException(status_code=502, detail=str(payload.get("message") or f"{service} 请求失败"))
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail=f"{service} 返回内容不完整")
+    return data
+
+
+async def moneyprinter_request(method: str, path: str, **kwargs: Any) -> httpx.Response:
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=1800.0), follow_redirects=True) as client:
+            response = await client.request(method, f"{MONEYPRINTER_URL}{path}", **kwargs)
+            response.raise_for_status()
+            return response
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="MoneyPrinterTurbo 响应超时，请检查本地服务和 FFmpeg") from exc
+    except httpx.HTTPStatusError as exc:
+        message = exc.response.text[:500].strip() or f"HTTP {exc.response.status_code}"
+        raise HTTPException(status_code=502, detail=f"MoneyPrinterTurbo：{message}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="无法连接 MoneyPrinterTurbo，请先启动其 API 服务") from exc
 
 
 def workflow_path(kind: str) -> Path:
@@ -170,13 +203,20 @@ async def health(authorization: str | None = Header(default=None)) -> dict[str, 
                 return (await client.get(url)).status_code < 500
             except Exception:
                 return False
+        checks = {
+            "comfyui": f"{COMFYUI_URL}/system_stats",
+            "cosyvoice": f"{COSYVOICE_URL}/docs",
+            "musetalk": f"{MUSETALK_URL}/health",
+            "moneyprinter": f"{MONEYPRINTER_URL}/docs",
+            "vibevoice": f"{VIBEVOICE_URL}/config",
+        }
+        if VIBEVOICE_ASR_URL:
+            checks["vibevoice_asr"] = f"{VIBEVOICE_ASR_URL}/health"
+        states = await asyncio.gather(*(reachable(url) for url in checks.values()))
         return {
             "status": "healthy",
-            "nodes": {
-                "comfyui": await reachable(f"{COMFYUI_URL}/system_stats"),
-                "cosyvoice": await reachable(f"{COSYVOICE_URL}/docs"),
-                "musetalk": await reachable(f"{MUSETALK_URL}/health"),
-            },
+            "version": "1.1.0",
+            "nodes": dict(zip(checks.keys(), states)),
             "workflows": {kind: workflow_path(kind).exists() for kind in ("image", "video")},
         }
 
@@ -219,6 +259,163 @@ async def audio(request: Request, authorization: str | None = Header(default=Non
     return {"url": public_url(request, filename), "kind": "audio", "provider": "CosyVoice"}
 
 
+@app.post("/v1/vibevoice/audio")
+async def vibevoice_audio(request: Request, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    """把 VibeVoice Realtime 官方 WebSocket PCM 流转换成可下载 WAV。"""
+    authorize(authorization)
+    payload = await request.json()
+    text = str(payload.get("prompt") or payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="配音文本不能为空")
+    if len(text) > 6000:
+        raise HTTPException(status_code=400, detail="单次 VibeVoice 配音最多 6000 个字符")
+    parsed = urlparse(VIBEVOICE_URL)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise HTTPException(status_code=503, detail="VIBEVOICE_URL 仅允许本机服务地址")
+    voice = str(payload.get("voicePreset") or payload.get("voice") or "").strip()
+    query = {"text": text}
+    if voice:
+        query["voice"] = voice
+    websocket_url = urlunparse(("wss" if parsed.scheme == "https" else "ws", parsed.netloc, "/stream", "", urlencode(query), ""))
+    chunks: list[bytes] = []
+    total_bytes = 0
+    try:
+        async with asyncio.timeout(900):
+            async with websocket_connect(websocket_url, max_size=None, open_timeout=15) as socket:
+                async for message in socket:
+                    if not isinstance(message, bytes):
+                        continue
+                    total_bytes += len(message)
+                    if total_bytes > 256 * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail="VibeVoice 输出超过 256 MB，已停止接收")
+                    chunks.append(message)
+    except HTTPException:
+        raise
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="VibeVoice 生成超过 15 分钟") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="无法连接 VibeVoice Realtime，请确认 3000 端口服务已启动") from exc
+    if not chunks:
+        raise HTTPException(status_code=502, detail="VibeVoice 没有返回音频数据")
+    wav_bytes = io.BytesIO()
+    with wave.open(wav_bytes, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24_000)
+        wav.writeframes(b"".join(chunks))
+    filename = f"vibevoice-{secrets.token_hex(10)}.wav"
+    (OUTPUT_DIR / filename).write_bytes(wav_bytes.getvalue())
+    return {"url": public_url(request, filename), "kind": "audio", "provider": "VibeVoice Realtime 0.5B"}
+
+
+@app.post("/v1/moneyprinter/materials")
+async def moneyprinter_materials(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    authorize(authorization)
+    filename = Path(file.filename or "material.mp4").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".mp4", ".mov", ".avi", ".flv", ".mkv", ".jpg", ".jpeg", ".png"}:
+        raise HTTPException(status_code=400, detail="MoneyPrinterTurbo 仅接收视频或图片素材")
+    content = await file.read()
+    if not content or len(content) > 512 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="素材为空或超过 512 MB")
+    response = await moneyprinter_request(
+        "POST",
+        "/api/v1/video_materials",
+        files={"file": (filename, content, file.content_type or "application/octet-stream")},
+    )
+    data = unwrap_upstream(response.json(), "MoneyPrinterTurbo")
+    uploaded = Path(str(data.get("file") or "")).name
+    if not uploaded:
+        raise HTTPException(status_code=502, detail="MoneyPrinterTurbo 没有返回素材文件名")
+    return {"file": uploaded}
+
+
+@app.post("/v1/moneyprinter/videos")
+async def moneyprinter_videos(request: Request, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    authorize(authorization)
+    payload = await request.json()
+    subject = str(payload.get("subject") or "漫镜自动成片").strip()[:500]
+    script = str(payload.get("script") or "").strip()[:8000]
+    raw_materials = payload.get("materials") if isinstance(payload.get("materials"), list) else []
+    materials = []
+    for item in raw_materials[:100]:
+        if not isinstance(item, dict):
+            continue
+        filename = Path(str(item.get("file") or "")).name
+        if filename:
+            materials.append({"provider": "local", "url": filename, "duration": max(1, min(60, int(item.get("duration") or 5)))})
+    if not materials:
+        raise HTTPException(status_code=400, detail="请先上传至少一个时间线画面或视频素材")
+    body = {
+        "video_subject": subject or "漫镜自动成片",
+        "video_script": script or subject or "漫镜自动成片",
+        "video_aspect": "16:9" if payload.get("aspect") == "16:9" else "9:16",
+        "video_source": "local",
+        "video_materials": materials,
+        "video_concat_mode": "sequential",
+        "video_transition_mode": "Shuffle",
+        "video_clip_duration": max(1, min(30, int(payload.get("clipDuration") or 5))),
+        "match_materials_to_script": False,
+        "video_count": 1,
+        "voice_name": str(payload.get("voiceName") or "zh-CN-XiaoxiaoNeural-Female")[:120],
+        "voice_volume": 1.0,
+        "voice_rate": 1.0,
+        "bgm_type": "",
+        "bgm_volume": 0,
+        "subtitle_enabled": bool(payload.get("subtitleEnabled", True)),
+        "subtitle_position": "bottom",
+        "font_size": 60,
+    }
+    response = await moneyprinter_request("POST", "/api/v1/videos", json=body)
+    data = unwrap_upstream(response.json(), "MoneyPrinterTurbo")
+    task_id = str(data.get("task_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", task_id):
+        raise HTTPException(status_code=502, detail="MoneyPrinterTurbo 没有返回有效任务编号")
+    return {"task_id": task_id}
+
+
+@app.get("/v1/moneyprinter/tasks/{task_id}")
+async def moneyprinter_task(task_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    authorize(authorization)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", task_id):
+        raise HTTPException(status_code=400, detail="任务编号格式不正确")
+    response = await moneyprinter_request("GET", f"/api/v1/tasks/{task_id}")
+    return unwrap_upstream(response.json(), "MoneyPrinterTurbo")
+
+
+@app.get("/v1/moneyprinter/tasks/{task_id}/result")
+async def moneyprinter_result(request: Request, task_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    authorize(authorization)
+    data = await moneyprinter_task(task_id, authorization)
+    if int(data.get("state") or 0) == -1:
+        raise HTTPException(status_code=502, detail=str(data.get("error") or "MoneyPrinterTurbo 任务失败"))
+    outputs = data.get("combined_videos") or data.get("videos") or []
+    if not isinstance(outputs, list) or not outputs:
+        raise HTTPException(status_code=409, detail="MoneyPrinterTurbo 尚未完成成片")
+    source = str(outputs[0])
+    if source.startswith(("http://", "https://")):
+        download_url = source
+    else:
+        download_url = urljoin(f"{MONEYPRINTER_URL}/", source.lstrip("/"))
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=1800.0), follow_redirects=True) as client:
+            output = await client.get(download_url)
+            output.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="MoneyPrinterTurbo 成片文件无法读取") from exc
+    if len(output.content) > 1024 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="MoneyPrinterTurbo 成片超过 1 GB")
+    extension = Path(urlparse(download_url).path).suffix.lower()
+    if extension not in {".mp4", ".mov", ".mkv", ".webm"}:
+        extension = ".mp4"
+    filename = f"moneyprinter-{secrets.token_hex(10)}{extension}"
+    (OUTPUT_DIR / filename).write_bytes(output.content)
+    return {"url": public_url(request, filename), "kind": "video", "provider": "MoneyPrinterTurbo"}
+
+
 @app.post("/v1/lipsync")
 async def lipsync(
     request: Request,
@@ -258,4 +455,3 @@ async def files(filename: str, authorization: str | None = Header(default=None))
     if not path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(path)
-

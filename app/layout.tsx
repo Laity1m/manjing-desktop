@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import NavigationBridge from "./components/NavigationBridge";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://manjing-ai-comic-studio.lingxiangniao03.chatgpt.site"),
+  metadataBase: new URL("http://manjing.localhost"),
   title: "漫镜 · AI 漫剧创作与剪辑工作台",
   description: "从剧本、分镜、角色一致性、动态视频和配音，到浏览器多轨剪辑与成片导出的一站式 AI 漫剧工作台。",
   openGraph: {
@@ -21,5 +22,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="zh-CN"><body>{children}</body></html>;
+  return <html lang="zh-CN"><body><NavigationBridge />{children}</body></html>;
 }

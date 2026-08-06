@@ -1,5 +1,5 @@
 const HORDE_API = "https://aihorde.net/api/v2";
-const CLIENT_AGENT = "ManjingStudio:2.0:https://manjing-ai-comic-studio.lingxiangniao03.chatgpt.site";
+const CLIENT_AGENT = "ManjingStudio-Windows:2.1:desktop";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function json(data: unknown, status = 200) {

@@ -1,16 +1,21 @@
 {
   "name": "manjing-desktop",
-  "version": "1.0.0",
+  "version": "1.3.9",
   "private": true,
-  "description": "漫镜 AI 漫剧工作室 Windows 桌面客户端",
+  "packageManager": "pnpm@11.9.0",
+  "description": "漫镜 AI 漫剧工作室 Windows 原生直载安装版",
   "main": "main.js",
   "author": "漫镜 AI Motion Studio",
   "license": "UNLICENSED",
   "scripts": {
     "dev": "electron .",
     "smoke": "electron . --smoke-test",
+    "smoke:canvas": "electron . --smoke-canvas",
+    "smoke:projects": "electron . --smoke-project-workflow",
+    "smoke:video-audio": "electron . --smoke-video-audio",
+    "smoke:studio-voice": "electron . --smoke-studio-voice",
     "pack": "electron-builder --dir --win --x64",
-    "dist": "electron-builder --win portable --x64"
+    "dist": "electron-builder --win nsis --x64"
   },
   "devDependencies": {
     "electron": "43.2.0",
@@ -19,7 +24,7 @@
   "build": {
     "appId": "com.manjing.desktop",
     "productName": "漫镜",
-    "artifactName": "漫镜-Windows-${version}-${arch}.${ext}",
+    "artifactName": "漫镜-独立安装版-${version}-${arch}.${ext}",
     "asar": true,
     "compression": "maximum",
     "directories": {
@@ -29,23 +34,47 @@
     "files": [
       "main.js",
       "preload.js",
-      "renderer.js",
-      "shell.html",
-      "styles.css",
-      "assets/**/*",
+      "desktop-runtime.js",
       "build/icon.svg",
       "build/icon.png",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "../dist",
+        "to": "desktop-app",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "site-package.json",
+        "to": "desktop-app/package.json"
+      }
+    ],
     "win": {
       "target": [
         {
-          "target": "portable",
-          "arch": ["x64"]
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.png",
       "executableName": "漫镜"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "漫镜",
+      "uninstallDisplayName": "漫镜 AI 漫剧工作室",
+      "deleteAppDataOnUninstall": false
     }
+  },
+  "dependencies": {
+    "@volcengine/openapi": "1.36.2"
   }
 }
