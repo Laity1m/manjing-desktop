@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import SiteNav from "./components/SiteNav";
 import ConfirmButton from "./components/ConfirmButton";
 import { API_MODE_DEFAULT_ENDPOINTS, API_MODE_LABELS, apiModesForRole, discoverApiModels, type DiscoverableApiMode, type DiscoveredModel } from "./lib/custom-api";
@@ -680,6 +682,7 @@ function drawMovingShot(
 }
 
 export default function StudioClient({ surface = "studio" }: { surface?: "studio" | "legacy-editor" }) {
+  const router = useRouter();
   const [story, setStory] = useState(SAMPLE_STORY);
   const [projectTitle, setProjectTitle] = useState("雨夜重逢");
   const [style, setStyle] = useState("国漫电影感");
@@ -1937,7 +1940,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setEditorSyncState("ready");
       if (openEditor) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 60));
-        window.location.assign("/editor");
+        router.push("/editor");
       }
       return true;
     } catch (reason) {
@@ -2139,7 +2142,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const document = createCanvasFromStudio({ title: projectTitle, story, characters, scenes });
     setStatusText("已创建本机制片画布，正在打开");
     recordActivity("director", "已把当前剧本、角色和分镜导入本机制片画布", "done");
-    window.location.assign(`/canvas?id=${encodeURIComponent(document.id)}`);
+    router.push(`/canvas?id=${encodeURIComponent(document.id)}`);
   }
 
   async function generateAll() {
@@ -3301,7 +3304,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <div className="settings-panel">
             <section className={`studio-voice-setting ${voiceEnabled ? "enabled" : "disabled"}`}>
               <header>
-                <div><span>ONE-CLICK VOICE</span><b>一键漫剧自动配音</b><small>{voiceEnabled ? "已开启 · 生成分角色对白并写入最终成片" : "已关闭 · 跳过配音岗位，输出无对白成片"}</small></div>
+                <div><span>一键配音</span><b>一键漫剧自动配音</b><small>{voiceEnabled ? "已开启 · 生成分角色对白并写入最终成片" : "已关闭 · 跳过配音岗位，输出无对白成片"}</small></div>
                 <button type="button" className={`toggle ${voiceEnabled ? "on" : ""}`} aria-label="一键漫剧自动配音" aria-pressed={voiceEnabled} onClick={() => setVoiceEnabled((value) => !value)}><i /></button>
               </header>
               <div className="studio-voice-provider"><span>当前配音岗位</span><b>{agentName("voice")}</b><em>{generatedVoiceEnabled ? "生成可下载音轨" : "仅设备语音预览"}</em></div>
@@ -3325,7 +3328,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         </div>
 
         <div className="production-import-hub">
-          <div className="production-import-heading"><div><span>BRING YOUR OWN PRODUCTION</span><h3>已有内容直接导入，不重复生成</h3><p>剧本、分镜、角色图、场景图、视频和配音都能作为生产起点；一键流程只补齐缺少的部分。</p></div><a href="/assets">打开独立资产库 ↗</a></div>
+          <div className="production-import-heading"><div><span>导入已有素材</span><h3>已有内容直接导入，不重复生成</h3><p>剧本、分镜、角色图、场景图、视频和配音都能作为生产起点；一键流程只补齐缺少的部分。</p></div><Link href="/assets">打开独立资产库 ↗</Link></div>
           <div className="production-import-actions">
             <label><i>文</i><span><b>导入剧本</b><small>TXT / MD / JSON · 跳过原创编剧</small></span><input type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" onChange={(event) => { void importScriptFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
             <label><i>镜</i><span><b>导入分镜</b><small>漫镜 JSON · 跳过编剧和导演</small></span><input type="file" accept=".json,application/json" onChange={(event) => { void importStoryboardFile(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
@@ -3366,7 +3369,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
                     <div><b>添加到 {role.title}</b><small>选择模式 → 填写 API → 读取模型 → 提交应用</small></div>
                     <div className="quick-custom-grid">
                       <label>API 模式<select value={quickModelDraft.adapter} onChange={(event) => changeQuickApiMode(event.target.value as DiscoverableApiMode)}>{apiModesForRole(role.id).map((modeName) => <option key={modeName} value={modeName}>{API_MODE_LABELS[modeName]}</option>)}</select></label>
-                      <label>API Base URL / 接口地址<input value={quickModelDraft.endpoint} onChange={(event) => setQuickModelDraft((value) => ({ ...value, endpoint: event.target.value }))} placeholder={API_MODE_DEFAULT_ENDPOINTS[quickModelDraft.adapter] || "https://... 或 http://localhost:端口"} /></label>
+                      <label>API 接口地址<input value={quickModelDraft.endpoint} onChange={(event) => setQuickModelDraft((value) => ({ ...value, endpoint: event.target.value }))} placeholder={API_MODE_DEFAULT_ENDPOINTS[quickModelDraft.adapter] || "https://... 或 http://localhost:端口"} /></label>
                       <label>API Key（本机保存）<input type="password" value={quickModelDraft.apiKey} onChange={(event) => setQuickModelDraft((value) => ({ ...value, apiKey: event.target.value }))} onBlur={() => { if (quickModelDraft.apiKey.trim() && quickModelDraft.endpoint.trim()) void discoverQuickModels(); }} placeholder="粘贴后离开输入框将自动读取模型" /></label>
                       <button type="button" className="quick-model-discover" onClick={() => void discoverQuickModels()} disabled={quickModelLoading}>{quickModelLoading ? "正在连接并读取…" : "测试连接并读取模型列表"}</button>
                       {quickModelOptions.length > 0 && <label>接口返回的模型<select value={quickModelDraft.model} onChange={(event) => setQuickModelDraft((value) => ({ ...value, model: event.target.value }))}>{quickModelOptions.map((item) => <option key={item.id} value={item.id}>{item.name === item.id ? item.id : `${item.name} · ${item.id}`}</option>)}</select></label>}
@@ -3392,7 +3395,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         </div>
 
         <div className="cloud-engine-hub">
-          <div className="cloud-engine-heading"><div><span>PRODUCTION ENGINES</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；Seedance 方舟 API 负责把单个分镜变成真正会动的视频。</p></div><em>配置持久保存在本机</em></div>
+          <div className="cloud-engine-heading"><div><span>制作引擎</span><h3>专业漫剧云引擎</h3><p>LibTV 负责从故事到成片的一键生产；Seedance 方舟 API 负责把单个分镜变成真正会动的视频。</p></div><em>配置持久保存在本机</em></div>
           <div className="cloud-engine-grid">
             <article className={`cloud-engine-card libtv-card ${libtvCanvasOpen && (libtvSessionId || libtvProjectUrl) ? "canvas-open" : ""}`}>
               <div className="engine-title"><i>剧</i><div><b>LibTV 一键漫剧</b><span>剧本 → 角色 → 分镜 → 视频 → 配音 → 成片</span></div><em>全流程</em></div>
@@ -3405,7 +3408,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
                 return <a key={`${item.url}-${index}`} href={source} download={`libtv-${index + 1}.${item.kind === "video" ? "mp4" : "png"}`} title="下载素材">{item.kind === "video" ? <i className="video-thumbnail-placeholder">▶</i> : <img src={source} alt={`LibTV 生成素材 ${index + 1}`} loading="lazy" />}<span>{item.kind === "video" ? "视频" : "图片"} {index + 1}</span></a>;
               })}</div>}
               {libtvCanvasOpen && (libtvSessionId || libtvProjectUrl) && <div className="libtv-canvas">
-                <div className="libtv-canvas-head"><div><span>LIVE PRODUCTION CANVAS</span><b>LibTV 制片画布</b><small>由官方会话消息与素材结果实时构建</small></div><div>{libtvRunning && <button onClick={toggleLibTvPolling}>{libtvPollingPaused ? "继续自动刷新" : "暂停自动刷新"}</button>}<button onClick={() => void refreshLibTvCanvas()} disabled={!libtvSessionId || libtvSending}>{libtvSending ? "刷新中…" : "立即刷新"}</button>{libtvProjectUrl && <a href={libtvProjectUrl} target="_blank" rel="noreferrer">进入官方无限画布 ↗</a>}</div></div>
+                <div className="libtv-canvas-head"><div><span>实时生产画布</span><b>LibTV 制片画布</b><small>由官方会话消息与素材结果实时构建</small></div><div>{libtvRunning && <button onClick={toggleLibTvPolling}>{libtvPollingPaused ? "继续自动刷新" : "暂停自动刷新"}</button>}<button onClick={() => void refreshLibTvCanvas()} disabled={!libtvSessionId || libtvSending}>{libtvSending ? "刷新中…" : "立即刷新"}</button>{libtvProjectUrl && <a href={libtvProjectUrl} target="_blank" rel="noreferrer">进入官方无限画布 ↗</a>}</div></div>
                 <div className="libtv-node-flow">
                   <article className={libtvMessages.length ? "done" : "running"}><i>1</i><b>剧本与导演</b><span>{libtvMessages.length ? "会话已建立" : "等待指令"}</span></article><em>→</em>
                   <article className={libtvResults.some((item) => item.kind === "image") ? "done" : libtvMessages.length ? "running" : ""}><i>2</i><b>角色与分镜</b><span>{libtvResults.filter((item) => item.kind === "image").length} 张画面</span></article><em>→</em>
@@ -3430,7 +3433,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         </div>
 
         <div className="opensource-hub">
-          <div className="opensource-heading"><div><span>OPEN SOURCE NODES</span><h3>开源本地节点中心</h3><p>统一连接 ComfyUI/Wan2.2、CosyVoice、MuseTalk、MoneyPrinterTurbo 与 VibeVoice。</p></div><div><a href="/manjing-local-bridge.zip" download>下载本地桥接服务</a><button onClick={applyBridgeStack}>应用中文基础节点</button></div></div>
+          <div className="opensource-heading"><div><span>本地开源节点</span><h3>开源本地节点中心</h3><p>统一连接 ComfyUI/Wan2.2、CosyVoice、MuseTalk、MoneyPrinterTurbo 与 VibeVoice。</p></div><div><a href="/manjing-local-bridge.zip" download>下载本地桥接服务</a><button onClick={applyBridgeStack}>应用中文基础节点</button></div></div>
           <div className="bridge-config"><label>桥接服务地址<input value={bridgeUrl} onChange={(event) => { setBridgeUrl(event.target.value.trim()); setBridgeHealth({ state: "idle", message: "地址已修改，等待检测" }); }} placeholder="https://你的桥接地址 或 http://127.0.0.1:8765" /></label><label>桥接密钥<input type="password" value={bridgeToken} onChange={(event) => setBridgeToken(event.target.value.trim())} placeholder="与本地 .env 中的 BRIDGE_TOKEN 相同" /></label><button onClick={() => void testBridgeConnection()} disabled={bridgeHealth.state === "testing"}>{bridgeHealth.state === "testing" ? "检测中…" : "检测连接"}</button><em className={bridgeHealth.state}>{bridgeHealth.message}</em></div>
           <div className="opensource-nodes">
             <article className={bridgeHealth.nodes?.comfyui ? "online" : "offline"}><div className="node-top"><i>影</i><div><b>ComfyUI · Wan2.2</b><span>生图、角色一致性、图生视频与人物动画</span></div><em>{bridgeHealth.nodes?.comfyui ? "在线" : "未检测"}</em></div><div className="node-checks"><span className={bridgeHealth.workflows?.image ? "ready" : ""}>生图工作流</span><span className={bridgeHealth.workflows?.video ? "ready" : ""}>视频工作流</span></div><div className="node-actions"><button onClick={() => applyBridgeRole("image")}>用于生图岗位</button><button onClick={() => applyBridgeRole("video")}>用于视频岗位</button><a href="https://github.com/Wan-Video/Wan2.2" target="_blank" rel="noreferrer">项目说明 ↗</a></div></article>

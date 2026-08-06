@@ -31,13 +31,13 @@ function updateNetwork() {
 
 function routeLabel(pathname) {
   return ({
-    "/": ["创作首页", "MANJING / HOME"],
-    "/studio": ["AI 工作台", "MANJING / AI STUDIO"],
-    "/video": ["自主 AI 视频", "MANJING / FREE VIDEO"],
-    "/editor": ["专业剪辑台", "MANJING / EDITOR"],
-    "/models": ["模型与 Key", "MANJING / MODELS"],
-    "/projects": ["项目与资产", "MANJING / PROJECTS"]
-  })[pathname] || ["漫镜", "MANJING / STUDIO"];
+    "/": ["创作首页", "漫镜 / 首页"],
+    "/studio": ["AI 工作台", "漫镜 / 工作台"],
+    "/video": ["自主 AI 视频", "漫镜 / AI 视频"],
+    "/editor": ["专业剪辑台", "漫镜 / 剪辑台"],
+    "/models": ["模型与 Key", "漫镜 / 模型中心"],
+    "/projects": ["项目与资产", "漫镜 / 项目"]
+  })[pathname] || ["漫镜", "漫镜 / 工作台"];
 }
 
 function navigate(pathname) {

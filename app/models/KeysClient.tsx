@@ -144,27 +144,27 @@ export default function KeysClient() {
 
   return <main className="portal-page keys-page">
     <SiteNav current="models" />
-    <header className="subpage-hero"><p>MODEL CONNECTIONS</p><h1>把每个 AI 岗位，接到最合适的模型。</h1><span>独立版会把密钥与模型配置持久保存在当前电脑，不会写入网站部署文件。正式生成仍会消耗对应平台额度。</span></header>
+    <header className="subpage-hero"><p>模型连接中心</p><h1>把每个 AI 岗位，接到最合适的模型。</h1><span>独立版会把密钥与模型配置持久保存在当前电脑，不会写入网站部署文件。正式生成仍会消耗对应平台额度。</span></header>
     <section className="keys-layout">
       <aside className="provider-list"><div><b>模型提供方</b><span>{PROVIDERS.length} 种连接方式</span></div>{PROVIDERS.map((item) => <button key={item.id} className={selected === item.id ? "active" : ""} onClick={() => setSelected(item.id)}><i className={item.color}>{item.name.slice(0, 1)}</i><span><b>{item.name}</b><small>{item.role}</small></span><em>{item.badge}</em></button>)}</aside>
       <div className="provider-detail">
         <div className="provider-detail-head"><div><span>{provider.badge}</span><h2>{provider.name}</h2><p>{provider.role}</p></div><a href={provider.docs} target={provider.docs.startsWith("http") ? "_blank" : undefined} rel="noreferrer">打开官方说明 ↗</a></div>
         <div className="key-spec-grid"><article><span>密钥名称</span><b>{provider.keyName}</b><button onClick={() => void copyKeyName(provider.keyName)}>{copied === provider.keyName ? "已复制" : "复制名称"}</button></article><article><span>常见格式</span><b>{provider.format}</b></article><article><span>费用说明</span><b>{provider.cost}</b></article></div>
-        <div className="key-walkthrough"><div><span>HOW TO CONNECT</span><h3>四步完成接入</h3></div><ol>{provider.steps.map((step, index) => <li key={step}><i>{String(index + 1).padStart(2, "0")}</i><p>{step}</p></li>)}</ol></div>
+        <div className="key-walkthrough"><div><span>接入教程</span><h3>四步完成接入</h3></div><ol>{provider.steps.map((step, index) => <li key={step}><i>{String(index + 1).padStart(2, "0")}</i><p>{step}</p></li>)}</ol></div>
         <div className="model-tags"><b>可用模型 / 能力</b><div>{provider.models.map((model) => <span key={model}>{model}</span>)}</div></div>
         <div className="key-safety"><i>!</i><div><b>密钥安全提醒</b><p>不要把 Key 发到群聊、截图或公开仓库；不要写进前端源码。漫镜只把你填写的 Key 用于当前请求，并保存在这台电脑的应用数据目录。</p></div></div>
         <a className="provider-apply" href="/studio">前往 AI 工作台配置 <span>→</span></a>
       </div>
     </section>
     <section id="custom" className="custom-model-builder">
-      <div className="custom-model-heading"><div><span>MY MODEL LIBRARY</span><h2>每个 AI 岗位，都能添加自己的模型</h2><p>保存后会直接出现在 AI 工作台对应岗位的下拉列表中，并在下次启动时自动恢复。</p></div><a href="/studio">返回 AI 工作台 →</a></div>
+      <div className="custom-model-heading"><div><span>我的模型库</span><h2>每个 AI 岗位，都能添加自己的模型</h2><p>保存后会直接出现在 AI 工作台对应岗位的下拉列表中，并在下次启动时自动恢复。</p></div><a href="/studio">返回 AI 工作台 →</a></div>
       <div className="custom-model-grid">
         <div className="custom-model-form">
           <div className="custom-role-tabs">{(Object.keys(ROLE_LABELS) as CustomModelRole[]).map((role) => <button key={role} className={draft.role === role ? "active" : ""} onClick={() => changeRole(role)}>{ROLE_LABELS[role]}</button>)}</div>
           <div className="custom-form-fields">
             <label>API 模式<select value={draft.adapter} onChange={(event) => changeAdapter(event.target.value as CustomModelAdapter)}>{apiModesForRole(draft.role).map((modeName) => <option key={modeName} value={modeName}>{API_MODE_LABELS[modeName]}</option>)}{draft.role === "video" && <option value="seedance">Seedance 方舟 API</option>}{["video", "editor"].includes(draft.role) && <option value="browser">浏览器本地处理</option>}</select></label>
-            {isDiscoverableApiMode(draft.adapter) && <label>API Base URL / 接口地址<input value={draft.endpoint} onChange={(event) => setDraft((value) => ({ ...value, endpoint: event.target.value }))} placeholder={API_MODE_DEFAULT_ENDPOINTS[draft.adapter] || "https://your-api.example/v1"} /></label>}
-            {draft.adapter !== "browser" && <label>API Key / Bearer Token<input type="password" value={draft.apiKey} onChange={(event) => setDraft((value) => ({ ...value, apiKey: event.target.value }))} onBlur={() => { if (isDiscoverableApiMode(draft.adapter) && draft.apiKey.trim() && draft.endpoint.trim()) void discoverModels(); }} placeholder="粘贴后离开输入框将自动读取模型" /></label>}
+            {isDiscoverableApiMode(draft.adapter) && <label>API 接口地址<input value={draft.endpoint} onChange={(event) => setDraft((value) => ({ ...value, endpoint: event.target.value }))} placeholder={API_MODE_DEFAULT_ENDPOINTS[draft.adapter] || "https://your-api.example/v1"} /></label>}
+            {draft.adapter !== "browser" && <label>API 密钥 / 令牌<input type="password" value={draft.apiKey} onChange={(event) => setDraft((value) => ({ ...value, apiKey: event.target.value }))} onBlur={() => { if (isDiscoverableApiMode(draft.adapter) && draft.apiKey.trim() && draft.endpoint.trim()) void discoverModels(); }} placeholder="粘贴后离开输入框将自动读取模型" /></label>}
             {isDiscoverableApiMode(draft.adapter) && <button type="button" className="discover-custom-models" onClick={() => void discoverModels()} disabled={modelLoading}>{modelLoading ? "正在连接并读取…" : "测试连接并读取模型列表"}</button>}
             {modelOptions.length > 0 && <label>接口返回的模型<select value={draft.model} onChange={(event) => setDraft((value) => ({ ...value, model: event.target.value }))}>{modelOptions.map((item) => <option key={item.id} value={item.id}>{item.name === item.id ? item.id : `${item.name} · ${item.id}`}</option>)}</select></label>}
             <label>模型 ID（可手动填写）<input value={draft.model} onChange={(event) => setDraft((value) => ({ ...value, model: event.target.value }))} placeholder="读取后自动填入，或手动输入" /></label>

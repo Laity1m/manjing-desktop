@@ -1,6 +1,7 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import SiteNav from "../components/SiteNav";
 import {
@@ -64,11 +65,20 @@ type SeedanceTask = {
 };
 
 const STYLE_PRESETS = ["cinematic", "realistic", "anime", "comics", "3d", "documentary", "cartoon"];
+const STYLE_PRESET_LABELS: Record<string, string> = {
+  cinematic: "电影感",
+  realistic: "写实风",
+  anime: "动漫风",
+  comics: "漫画感",
+  "3d": "3D",
+  documentary: "纪录风",
+  cartoon: "卡通风",
+};
 const BASE_MODELS: Array<{ id: string; name: string; note: string; config: VideoConfig }> = [
   {
     id: "browser-video",
-    name: "Browser 2.5D Render",
-    note: "Local compositor style rendering, for quick preview and reference checks",
+    name: "Browser 2.5D（本地）",
+    note: "本地 2.5D 画布渲染器，用于快速预览与参考查看",
     config: {
       preset: "browser-video",
       adapter: "browser",
@@ -79,8 +89,8 @@ const BASE_MODELS: Array<{ id: string; name: string; note: string; config: Video
   },
   {
     id: "pollinations-video",
-    name: "Pollinations",
-    note: "Need Pollinations API key, supports text-to-video and optional first-frame image",
+    name: "Pollinations 云端",
+    note: "文本生成视频，支持可选首帧图片",
     config: {
       preset: "pollinations-video",
       adapter: "pollinations",
@@ -91,8 +101,8 @@ const BASE_MODELS: Array<{ id: string; name: string; note: string; config: Video
   },
   {
     id: "volc-seedance",
-    name: "Seedance (Volcengine)",
-    note: "ARK endpoint in backend; supports multi-kind references when using seedance-2.0",
+    name: "Seedance（火山）",
+    note: "火山 ARK 引擎；支持文本与多模态参考输入",
     config: {
       preset: "volc-seedance",
       adapter: "seedance",
@@ -105,21 +115,21 @@ const BASE_MODELS: Array<{ id: string; name: string; note: string; config: Video
 
 const ROLE_OPTIONS: Record<ReferenceKind, Array<{ value: ReferenceRole; label: string }>> = {
   image: [
-    { value: "character", label: "Character front / body" },
-    { value: "scene", label: "Scene composition" },
-    { value: "style", label: "Style reference" },
-    { value: "first_frame", label: "First frame" },
-    { value: "last_frame", label: "Last frame" },
+    { value: "character", label: "角色正脸/全身" },
+    { value: "scene", label: "场景构图" },
+    { value: "style", label: "风格参考" },
+    { value: "first_frame", label: "第一帧" },
+    { value: "last_frame", label: "结尾帧" },
   ],
   video: [
-    { value: "motion", label: "Motion sample" },
-    { value: "camera", label: "Camera movement" },
-    { value: "edit", label: "Edit rhythm" },
+    { value: "motion", label: "动作示例" },
+    { value: "camera", label: "镜头运动" },
+    { value: "edit", label: "剪辑节奏" },
   ],
   audio: [
-    { value: "rhythm", label: "Rhythm" },
-    { value: "voice", label: "Voice reference" },
-    { value: "sound", label: "Sound effect" },
+    { value: "rhythm", label: "节奏参考" },
+    { value: "voice", label: "配音参考" },
+    { value: "sound", label: "音效参考" },
   ],
 };
 
@@ -144,7 +154,7 @@ function toDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error(`Failed to read file ${file.name}`));
+    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
     reader.readAsDataURL(file);
   });
 }
@@ -161,31 +171,39 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function asError(error: unknown) {
-  return error instanceof Error ? error.message : "Unknown error";
+  return error instanceof Error ? error.message : "未知错误";
 }
 
 function buildPrompt(prompt: string, style: string, voiceEnabled: boolean, language: string, styleHint: string, script: string) {
   const base = `${style}：${prompt}`;
   if (!voiceEnabled) return base;
-  const extra = script.trim() ? ` voice-over script: ${script.trim()}` : "";
-  return `${base} + voice-over [language=${language}, style=${styleHint}]${extra}`;
+  const extra = script.trim() ? `（配音文本：${script.trim()}）` : "";
+  return `${base} + 配音 [语言=${language}, 风格=${styleHint}]${extra}`;
 }
 
 function videoCapability(config: VideoConfig) {
   if (config.adapter === "seedance") {
-    return { image: 9, video: 3, audio: 3, full: true, label: "Full omni input: image/video/audio references" };
+    return { image: 9, video: 3, audio: 3, full: true, label: "完整多模态输入：图片/视频/音频均可参考" };
   }
   if (config.adapter === "pollinations") {
-    return { image: 1, video: 0, audio: 0, full: false, label: "Only text + optional first_frame image" };
+    return { image: 1, video: 0, audio: 0, full: false, label: "文本生成 + 可选首帧图片" };
   }
   if (config.adapter === "webhook") {
-    return { image: 5, video: 2, audio: 1, full: false, label: "Custom API format is user-defined" };
+    return { image: 5, video: 2, audio: 1, full: false, label: "自定义 API 格式，按接入规则提交参数" };
   }
-  return { image: 0, video: 0, audio: 0, full: false, label: "Browser local model only (local renderer)" };
+  return { image: 0, video: 0, audio: 0, full: false, label: "仅本地渲染（浏览器/本机）" };
 }
 
+const ADAPTER_LABELS: Record<VideoAdapter, string> = {
+  browser: "本地渲染",
+  pollinations: "Pollinations",
+  seedance: "火山 Seedance",
+  webhook: "Webhook",
+};
+
 export default function VideoClient() {
-  const [prompt, setPrompt] = useState("Write a 8 second short emotional cinematic clip.");
+  const router = useRouter();
+  const [prompt, setPrompt] = useState("16秒短片：一个人物在黄昏时分，镜头慢慢推进并完成情绪转折。");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [style, setStyle] = useState("cinematic");
   const [aspect, setAspect] = useState<"9:16" | "16:9">("9:16");
@@ -205,7 +223,7 @@ export default function VideoClient() {
   const [remoteKind, setRemoteKind] = useState<ReferenceKind>("image");
 
   const [result, setResult] = useState<VideoResult | null>(null);
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState("就绪");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -238,7 +256,7 @@ export default function VideoClient() {
       .filter((item) => item.role === "video")
       .map((item) => ({
         id: item.id,
-        name: `${item.name} (Custom)`,
+        name: `${item.name}（自定义）`,
         note: item.note || `${item.adapter}/${item.model}`,
         config: {
           preset: item.id,
@@ -356,7 +374,7 @@ export default function VideoClient() {
       });
     }
     if (!next.length) {
-      setError("Cannot add files: unsupported type or over limit");
+        setError("无法添加素材：文件类型不支持或已到达上限");
       return;
     }
     setReferenceItems((value) => [...value, ...next]);
@@ -366,10 +384,10 @@ export default function VideoClient() {
     if (!remoteUrl) return;
     try {
       const parsed = new URL(remoteUrl);
-      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("invalid protocol");
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("仅支持 http/https 链接");
       const kindLimit = remoteKind === "image" ? 9 : 3;
       if (referenceItems.filter((item) => item.kind === remoteKind).length >= kindLimit) {
-        setError("This kind reached max limit");
+        setError("该类型素材已达上限");
         return;
       }
       const item: ReferenceItem = {
@@ -386,7 +404,7 @@ export default function VideoClient() {
       setRemoteUrl("");
       setError("");
     } catch {
-      setError("Please enter a valid http(s) URL");
+      setError("请输入有效的 http(s) 链接");
     }
   };
 
@@ -429,20 +447,20 @@ export default function VideoClient() {
       }).catch(() => undefined);
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, video: config }));
       setError("");
-      setStatus("Config saved");
-      window.setTimeout(() => setStatus("Ready"), 1000);
+      setStatus("配置已保存");
+      window.setTimeout(() => setStatus("就绪"), 1000);
     } catch {
-      setError("Failed to save config");
+      setError("保存配置失败");
     }
   };
 
   const addCustomModel = async () => {
     if (!customName.trim() || !customModelId.trim()) {
-      setCustomSaveMessage("Please fill model name and model id");
+      setCustomSaveMessage("请填写模型名称和模型 ID");
       return;
     }
     if (!["webhook", "seedance", "browser", "pollinations"].includes(customAdapter)) {
-      setCustomSaveMessage("Unsupported adapter");
+      setCustomSaveMessage("不支持的适配器类型");
       return;
     }
     const id = `custom-video-${Date.now().toString(36)}`;
@@ -460,7 +478,7 @@ export default function VideoClient() {
     setCustomModels(next);
     saveCustomModels(next);
     draftRef.current = localStorage.getItem("manjing-custom-models");
-    setCustomSaveMessage("Model added");
+    setCustomSaveMessage("模型已添加");
     setCustomName("");
     setCustomModelId("");
     setCustomEndpoint("");
@@ -468,9 +486,9 @@ export default function VideoClient() {
     try {
       await saveCustomModelsToDesktop(next);
       localStorage.setItem("manjing-custom-models", JSON.stringify(next));
-      setCustomSaveMessage("Model added and synced");
+      setCustomSaveMessage("模型已添加，并同步到桌面配置");
     } catch {
-      setCustomSaveMessage("Saved locally, desktop sync failed, please retry");
+      setCustomSaveMessage("本地保存成功，桌面同步失败，请稍后重试");
     }
   };
 
@@ -478,7 +496,7 @@ export default function VideoClient() {
     const next = customModels.filter((item) => item.id !== id);
     setCustomModels(next);
     saveCustomModels(next);
-    setCustomSaveMessage("Model removed");
+      setCustomSaveMessage("模型已移除");
     try {
       await saveCustomModelsToDesktop(next, id);
       localStorage.setItem("manjing-custom-models", JSON.stringify(next));
@@ -487,9 +505,9 @@ export default function VideoClient() {
         setConfig(nextConfig);
         setSelectedPreset(nextConfig.preset);
       }
-      setCustomSaveMessage("Model removed and synced");
+      setCustomSaveMessage("模型已移除，并同步到桌面配置");
     } catch {
-      setCustomSaveMessage("Removed locally, desktop sync failed");
+      setCustomSaveMessage("本地已移除，桌面同步失败");
     }
   };
 
@@ -513,7 +531,7 @@ export default function VideoClient() {
     prompt: string;
     references: ReferenceItem[];
   }): Promise<SeedanceTask> => {
-    if (!config.apiKey?.trim()) throw new Error("Please enter Seedance API key");
+    if (!config.apiKey?.trim()) throw new Error("请先填写 Seedance API Key");
     const items = [];
     for (const item of payload.references) {
       if (!item.enabled) continue;
@@ -556,10 +574,10 @@ export default function VideoClient() {
     });
     if (!response.ok) {
       const raw = await response.json().catch(() => ({}));
-      throw new Error((raw as { error?: string }).error || `Create failed (${response.status})`);
+      throw new Error((raw as { error?: string }).error || `发起任务失败（${response.status}）`);
     }
     const payloadData = (await response.json()) as { id?: string };
-    if (!payloadData.id) throw new Error("No task id returned");
+    if (!payloadData.id) throw new Error("未返回任务 ID");
     return {
       id: payloadData.id,
       model: config.model,
@@ -571,7 +589,7 @@ export default function VideoClient() {
 
   const pollSeedance = async (task: SeedanceTask, runId: number): Promise<string> => {
     for (let i = 0; i < 160; i += 1) {
-      if (runRef.current !== runId) throw new Error("Generation canceled");
+      if (runRef.current !== runId) throw new Error("已取消生成");
       const response = await fetch("/api/seedance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -579,7 +597,7 @@ export default function VideoClient() {
       });
       if (!response.ok) {
         const raw = await response.json().catch(() => ({}));
-        const msg = (raw as { error?: string }).error || `Status failed (${response.status})`;
+        const msg = (raw as { error?: string }).error || `查询状态失败（${response.status}）`;
         throw new Error(msg);
       }
       const statusData = await response.json() as {
@@ -588,17 +606,17 @@ export default function VideoClient() {
         videoUrl?: string;
         error?: string;
       };
-      if (statusData.status) setStatus(`Seedance: ${statusData.status}`);
+    if (statusData.status) setStatus(`任务状态：${statusData.status}`);
       if (statusData.error) throw new Error(statusData.error);
       if (statusData.done && statusData.videoUrl) return statusData.videoUrl;
       setProgress(clamp(Math.min(92, i * 0.6 + 5), 0, 92));
       await delay(2500);
     }
-    throw new Error("Video generation timeout");
+    throw new Error("视频生成超时（请稍后重试）");
   };
 
   const generateWebhook = async (promptText: string, references: ReferenceItem[]) => {
-    if (!config.endpoint) throw new Error("Please configure webhook endpoint");
+    if (!config.endpoint) throw new Error("请先配置 Webhook 接口地址");
     const payloadRefs = [];
     for (const item of references) {
       if (!item.enabled) continue;
@@ -637,16 +655,16 @@ export default function VideoClient() {
     });
     if (!response.ok) {
       const raw = await response.json().catch(() => ({}));
-      throw new Error((raw as { error?: string }).error || `Webhook call failed (${response.status})`);
+      throw new Error((raw as { error?: string }).error || `Webhook 请求失败（${response.status}）`);
     }
     const data = (await response.json()) as { videoUrl?: string; url?: string; dataUrl?: string };
     const url = data.videoUrl || data.url || data.dataUrl;
-    if (!url) throw new Error("Webhook response has no video url");
+    if (!url) throw new Error("Webhook 返回未包含可用视频地址");
     return url;
   };
 
   const generatePollinations = async (promptText: string, references: ReferenceItem[]) => {
-    if (!config.apiKey?.trim()) throw new Error("Please enter Pollinations key");
+    if (!config.apiKey?.trim()) throw new Error("请先填写 Pollinations Key");
     const imgRef = references.find((item) => item.enabled && item.kind === "image");
     let image = "";
     if (imgRef) {
@@ -670,10 +688,10 @@ export default function VideoClient() {
     });
     if (!response.ok) {
       const raw = await response.text().catch(() => "");
-      throw new Error(raw || `Pollinations failed (${response.status})`);
+      throw new Error(raw || `Pollinations 调用失败（${response.status}）`);
     }
     const blob = await response.blob();
-    if (!blob.size) throw new Error("No response content");
+    if (!blob.size) throw new Error("未返回可播放内容");
     return URL.createObjectURL(blob);
   };
 
@@ -681,9 +699,9 @@ export default function VideoClient() {
     if (!projectId) return;
     try {
       await activateEditorProject(projectId);
-      window.location.href = "/editor";
+      router.push("/editor");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Import failed");
+      setError(err instanceof Error ? err.message : "导入剪辑台失败");
     }
   };
 
@@ -692,7 +710,7 @@ export default function VideoClient() {
     try {
       const data = await loadEditorProjectById(project.id);
       const url = data?.finalVideo?.url || data?.clips.find((item) => item.url)?.url;
-      if (!url) throw new Error("No playable file");
+      if (!url) throw new Error("未找到可播放文件");
       setResult({
         projectId: project.id,
         createdAt: project.createdAt,
@@ -702,16 +720,16 @@ export default function VideoClient() {
         referenceCount: project.clips.length,
         voiceEnabled: true,
       });
-      setStatus("History loaded");
+      setStatus("历史记录已加载");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Load history failed");
+      setError(err instanceof Error ? err.message : "加载历史失败");
     } finally {
       setHistoryLoading(false);
     }
   };
 
   const saveVideoResult = async (sourceUrl: string, references: ReferenceItem[]) => {
-    const name = prompt.trim().slice(0, 24) || "AI video output";
+    const name = prompt.trim().slice(0, 24) || "AI 视频成片";
     const projectId = uid();
     const clip: EditorProjectClip = {
       id: uid(),
@@ -754,14 +772,14 @@ export default function VideoClient() {
       voiceEnabled,
     });
     await refreshHistory();
-    setStatus("Saved to project");
+    setStatus("已保存到项目");
     setProgress(100);
   };
 
   const generateVideo = async () => {
     if (busy) return;
     if (!prompt.trim() || prompt.trim().length < 6) {
-      setError("Prompt too short");
+      setError("提示词过短，请补充更多细节");
       return;
     }
     const runId = runRef.current + 1;
@@ -769,7 +787,7 @@ export default function VideoClient() {
     setBusy(true);
     setError("");
     setProgress(0);
-    setStatus("Preparing");
+    setStatus("准备中");
     try {
       const enabled = referenceItems.filter((item) => item.enabled);
       const finalPrompt = buildPrompt(prompt, style, voiceEnabled, voiceLanguage, voiceStyle, voiceScript);
@@ -777,29 +795,29 @@ export default function VideoClient() {
         const task = await createSeedanceTask({ prompt: finalPrompt, references: enabled });
         setPendingSeedance(task);
         localStorage.setItem(CONFIG_PREVIEW_TASK_KEY, JSON.stringify(task));
-        setStatus("Seedance queue submitted");
+        setStatus("已提交 Seedance 任务");
         setProgress(15);
         const outputUrl = await pollSeedance(task, runId);
         setPendingSeedance(null);
         localStorage.removeItem(CONFIG_PREVIEW_TASK_KEY);
-        setStatus("Downloading result");
+        setStatus("结果下载中");
         await saveVideoResult(outputUrl, enabled);
         return;
       }
       if (config.adapter === "pollinations") {
-        setStatus("Polling Pollinations");
+        setStatus("等待 Pollinations 任务返回");
         const generated = await generatePollinations(finalPrompt, enabled);
-        setStatus("Saving result");
+        setStatus("保存生成结果");
         await saveVideoResult(generated, enabled);
         return;
       }
       const generated = await generateWebhook(finalPrompt, enabled);
-      setStatus("Saving result");
+      setStatus("保存生成结果");
       await saveVideoResult(generated, enabled);
     } catch (reason) {
       if (runRef.current === runId) {
-        setError(asError(reason));
-        setStatus("Generation failed");
+      setError(asError(reason));
+      setStatus("生成失败");
       }
     } finally {
       if (runRef.current === runId) setBusy(false);
@@ -832,10 +850,6 @@ export default function VideoClient() {
     setConfig(found.config);
   };
 
-  const selectedConfigIsCustom = useMemo(() => {
-    return customModels.some((item) => item.id === selectedPreset);
-  }, [customModels, selectedPreset]);
-
   const enabledReferences = referenceItems.filter((item) => item.enabled);
   const mentionItems = useMemo(
     () =>
@@ -861,7 +875,7 @@ export default function VideoClient() {
       <SiteNav current="video" />
       <header className="video-lab-hero">
         <div>
-          <span>AI VIDEO STUDIO</span>
+          <span>AI 视频工作室</span>
           <h1>
             AI 一键视频 <em>独立模块</em>
           </h1>
@@ -880,55 +894,65 @@ export default function VideoClient() {
       </header>
 
       <section className="video-lab-layout">
-        <aside className="video-model-panel">
+        <aside className="video-model-panel video-engine-panel">
           <div className="video-panel-title">
-            <span>01 / ENGINE</span>
+            <span>01 / 引擎面板</span>
             <h2>引擎选择</h2>
+            <div className="video-panel-note">可在基础引擎与自定义模型间快速切换</div>
           </div>
-          <label>
-            视频模型
-            <select value={selectedPreset} onChange={(event) => changePreset(event.target.value)}>
-              {modelList.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <dl>
+          <div className="video-engine-grid">
+            {modelList.map((model) => (
+              <button
+                key={model.id}
+                type="button"
+                className={`video-engine-card ${selectedPreset === model.id ? "active" : ""}`}
+                onClick={() => changePreset(model.id)}
+              >
+                <i />
+                <div>
+                  <b>{model.name}</b>
+                  <small>{ADAPTER_LABELS[(model.config.adapter || "webhook") as VideoAdapter] || model.config.adapter}</small>
+                  <span>{model.note}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="video-capability">
+            <i />
             <div>
-              <dt>Adapter</dt>
-              <dd>{config.adapter}</dd>
+              <b>当前引擎能力</b>
+              <span>{config.adapter ? ADAPTER_LABELS[config.adapter] : "未设置"}</span>
+            </div>
+          </div>
+          <dl className="video-engine-meta">
+            <div>
+              <dt>适配器</dt>
+              <dd>{ADAPTER_LABELS[config.adapter] || config.adapter}</dd>
             </div>
             <div>
-              <dt>Model</dt>
+              <dt>模型 ID</dt>
               <dd>{config.model}</dd>
             </div>
             <div>
-              <dt>API Key</dt>
+              <dt>接口密钥</dt>
               <dd>{config.apiKey ? "已填写" : "未填写"}</dd>
             </div>
             <div>
-              <dt>Endpoint</dt>
+              <dt>接口地址</dt>
               <dd>{config.endpoint || "—"}</dd>
             </div>
           </dl>
-          <button type="button" onClick={() => void saveVideoConfig()}>
+          <button type="button" onClick={() => void saveVideoConfig()} className="video-save-config">
             保存并应用设置
           </button>
           <Link className="video-model-link" href="/models">
             进入模型配置页面
           </Link>
-          <p style={{ color: "#7a7382", fontSize: 12, marginTop: 12 }}>
-            {hasCustomModels
-              ? "已有自定义视频模型，新增模型不会覆盖"
-              : "还没有视频自定义模型，先到右侧添加"}
-          </p>
         </aside>
 
         <section className="video-compose-panel">
           <div className="video-panel-title">
-            <span>02 / PROMPT</span>
+            <span>02 / 生成参数</span>
             <h2>生成参数</h2>
           </div>
           <textarea
@@ -971,7 +995,7 @@ export default function VideoClient() {
                 className={style === item ? "active" : ""}
                 onClick={() => setStyle(item)}
               >
-                {item}
+                {STYLE_PRESET_LABELS[item]}
               </button>
             ))}
           </div>
@@ -1007,8 +1031,8 @@ export default function VideoClient() {
 
           <section className={`video-audio-setting ${voiceEnabled ? "enabled" : "disabled"}`}>
             <header>
-              <div>
-                <span>VOICEOVER</span>
+                <div>
+                <span>配音设置</span>
                 <b>配音开关</b>
                 <small>{voiceEnabled ? "已开启配音" : "未开启配音"}</small>
               </div>
@@ -1028,7 +1052,7 @@ export default function VideoClient() {
                   <select value={voiceLanguage} onChange={(event) => setVoiceLanguage(event.target.value)}>
                     <option>中文</option>
                     <option>中文粤语</option>
-                    <option>English</option>
+                    <option>英语</option>
                     <option>日语</option>
                     <option>韩语</option>
                   </select>
@@ -1068,7 +1092,7 @@ export default function VideoClient() {
 
           <div className="omni-reference-head">
             <div>
-              <span>03 / REFERENCE</span>
+              <span>03 / 素材参考</span>
               <h2>素材参考</h2>
             </div>
             <b>{enabledReferences.length} / {refKindCount.image + refKindCount.video + refKindCount.audio}</b>
@@ -1112,7 +1136,7 @@ export default function VideoClient() {
                     ) : item.kind === "video" ? (
                       <video src={item.previewUrl} muted />
                     ) : (
-                      <span>audio</span>
+                      <span>音频</span>
                     )}
                     <em>{index + 1}</em>
                   </div>
@@ -1164,7 +1188,7 @@ export default function VideoClient() {
 
         <aside className="video-result-panel">
           <div className="video-panel-title">
-            <span>04 / RESULT</span>
+            <span>04 / 结果面板</span>
             <h2>生成与交付</h2>
           </div>
           <div className="video-result-stage">
@@ -1240,7 +1264,7 @@ export default function VideoClient() {
                     <i>{new Date(item.createdAt).toLocaleString("zh-CN")}</i>
                     <span>
                       <b>{item.name}</b>
-                      <small>model: {item.editorNote || "video"}</small>
+                      <small>模型：{item.editorNote || "未命名模型"}</small>
                     </span>
                   </button>
                   <button type="button" onClick={() => void importToEditor(item.id)}>
@@ -1254,68 +1278,79 @@ export default function VideoClient() {
           </section>
         </aside>
 
-        <aside className="video-model-panel">
+        <aside className="video-model-panel video-custom-model-panel">
           <div className="video-panel-title">
-            <span>05 / CUSTOM VIDEO MODEL</span>
+            <span>05 / 自定义模型</span>
             <h2>自定义视频模型</h2>
+            <div className="video-panel-note">支持独立保存并管理 AI 视频模型，重启后自动恢复</div>
           </div>
-          <label>模型名</label>
-          <input
-            value={customName}
-            onChange={(event) => setCustomName(event.target.value)}
-            placeholder="如：我的Seedance模型"
-          />
-          <label>模型ID</label>
-          <input
-            value={customModelId}
-            onChange={(event) => setCustomModelId(event.target.value)}
-            placeholder="如：doubao-seedance-1-5-pro-251215"
-          />
-          <label>模型类型</label>
-          <select
-            value={customAdapter}
-            onChange={(event) => setCustomAdapter(event.target.value as VideoAdapter)}
-          >
-            <option value="seedance">seedance</option>
-            <option value="pollinations">pollinations</option>
-            <option value="webhook">webhook</option>
-            <option value="browser">browser</option>
-          </select>
-          <label>Endpoint</label>
-          <input value={customEndpoint} onChange={(event) => setCustomEndpoint(event.target.value)} />
-          <label>API Key / Token</label>
-          <input
-            type="password"
-            value={customKey}
-            onChange={(event) => setCustomKey(event.target.value)}
-          />
-          <button type="button" className="video-save-config" onClick={() => void addCustomModel()}>
-            保存并添加自定义模型
-          </button>
+          <div className="video-form-grid">
+            <label>模型名</label>
+            <div className="video-field-tip">方便识别的显示名称，如：我的 Seedance 配置</div>
+            <input
+              value={customName}
+              onChange={(event) => setCustomName(event.target.value)}
+              placeholder="如：我的Seedance模型"
+            />
+            <label>模型 ID</label>
+            <div className="video-field-tip">模型服务侧返回的模型标识</div>
+            <input
+              value={customModelId}
+              onChange={(event) => setCustomModelId(event.target.value)}
+              placeholder="如：doubao-seedance-1-5-pro-251215"
+            />
+            <label>模型类型</label>
+            <div className="video-field-tip">决定调用参数格式与能力边界</div>
+            <select
+              value={customAdapter}
+              onChange={(event) => setCustomAdapter(event.target.value as VideoAdapter)}
+            >
+              <option value="seedance">火山 Seedance</option>
+              <option value="pollinations">Pollinations</option>
+              <option value="webhook">Webhook</option>
+              <option value="browser">本地渲染</option>
+            </select>
+            <label>接口地址</label>
+            <div className="video-field-tip">如留空将按适配器默认地址请求</div>
+            <input value={customEndpoint} onChange={(event) => setCustomEndpoint(event.target.value)} />
+            <label>API 密钥 / Token</label>
+            <div className="video-field-tip">仅保留在本机，不会上传</div>
+            <input
+              type="password"
+              value={customKey}
+              onChange={(event) => setCustomKey(event.target.value)}
+            />
+            <button type="button" className="video-save-config" onClick={() => void addCustomModel()}>
+              保存并添加自定义模型
+            </button>
+          </div>
           {customSaveMessage && <p className="video-config-message">{customSaveMessage}</p>}
           <div className="video-model-help">
             <b>说明</b>
             <p>保存后会加入本地自定义模型列表，页面会自动刷新选项，当前模型不影响工作台的 AI 角色配置。</p>
           </div>
-          <div>
+          <div className="video-custom-model-list">
             {customModels.length
               ? customModels
                   .filter((item) => item.role === "video")
                   .map((item) => (
-                    <article key={item.id} className="omni-reference-list">
-                      <div>
+                    <article key={item.id} className="video-custom-item">
+                      <div className="video-custom-item-head">
                         <b>{item.name}</b>
-                        <small>{item.adapter}</small>
+                        <small>{ADAPTER_LABELS[(item.adapter as VideoAdapter) || "webhook"] || item.adapter}</small>
                       </div>
-                      <small>{item.model}</small>
-                      <small>{selectedPreset === item.id ? "当前模型" : "未选中"}</small>
-                      <button type="button" onClick={() => removeCustomModel(item.id)}>
+                      <small className="video-custom-model-id">{item.model}</small>
+                      <small className={`video-custom-model-state ${selectedPreset === item.id ? "current" : ""}`}>{selectedPreset === item.id ? "当前模型" : "未选中"}</small>
+                      <button type="button" className="video-custom-model-remove" onClick={() => removeCustomModel(item.id)}>
                         删除模型
+                      </button>
+                      <button type="button" className="video-custom-model-use" onClick={() => changePreset(item.id)}>
+                        切换到此模型
                       </button>
                     </article>
                   ))
-              : <p style={{ color: "#8b7f92", fontSize: 12 }}>暂未添加</p>}
-          </div>
+              : <p className="video-model-empty">暂未添加</p>}
+            </div>
           <Link href="/studio" className="video-model-link">
             回到AI工作台
           </Link>
@@ -1324,3 +1359,4 @@ export default function VideoClient() {
     </main>
   );
 }
+

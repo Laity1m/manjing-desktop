@@ -229,13 +229,13 @@ export default function CanvasClient() {
   return <main className="canvas-page">
     <SiteNav current="canvas" />
     <header className="canvas-commandbar">
-      <div><button className="canvas-library-toggle" onClick={() => setShowLibrary((value) => !value)}>☰</button><span>PRODUCTION CANVAS</span><input aria-label="画布名称" value={active.title} onChange={(event) => editActive((document) => ({ ...document, title: event.target.value }))} /></div>
+      <div><button className="canvas-library-toggle" onClick={() => setShowLibrary((value) => !value)}>☰</button><span>制作画布</span><input aria-label="画布名称" value={active.title} onChange={(event) => editActive((document) => ({ ...document, title: event.target.value }))} /></div>
       <nav>{(Object.keys(NODE_LABELS) as ProductionNodeType[]).map((type) => <button key={type} onClick={() => addNode(type)}><i>{NODE_LABELS[type].icon}</i>添加{NODE_LABELS[type].name}</button>)}</nav>
       <aside><button onClick={() => setZoom((value) => Math.max(.5, value - .1))}>－</button><b>{Math.round(zoom * 100)}%</b><button onClick={() => setZoom((value) => Math.min(1.6, value + .1))}>＋</button><button onClick={() => { saveProductionCanvases(canvases); setMessage("已手动保存到本机"); }}>保存</button></aside>
     </header>
     <section className={`canvas-layout ${showLibrary ? "with-library" : ""}`}>
       {showLibrary && <aside className="canvas-library">
-        <header><div><span>MY CANVASES</span><h2>制片画布</h2></div><button onClick={newCanvas}>＋ 新建画布</button></header>
+        <header><div><span>我的画布</span><h2>制作画布</h2></div><button onClick={newCanvas}>＋ 新建画布</button></header>
         <div className="canvas-list">{canvases.map((item) => <button key={item.id} className={item.id === activeId ? "active" : ""} onClick={() => openCanvas(item.id)}><i>{item.nodes.length}</i><span><b>{item.title}</b><small>{new Date(item.updatedAt).toLocaleString("zh-CN")}</small></span></button>)}</div>
         <div className="canvas-library-actions"><button onClick={() => void importCurrentProject()}>从当前项目导入</button><button onClick={() => fileRef.current?.click()}>导入画布文件</button><input ref={fileRef} type="file" accept=".json,.manjing-canvas.json" onChange={(event) => importCanvas(event.target.files?.[0])} /><button onClick={() => downloadJson(active)}>导出画布 JSON</button><ConfirmButton className="danger" onConfirm={deleteCanvas} ariaLabel={`删除画布${active.title}`} confirmLabel="确认删除画布">删除当前画布</ConfirmButton></div>
         <p>参考 Toonflow / React Flow 的节点式制作逻辑。本机画布不需要 LibTV Key，也不会上传你的内容。</p>
@@ -261,7 +261,7 @@ export default function CanvasClient() {
         </div>
       </div>
       <aside className="canvas-inspector">
-        <header><span>INSPECTOR</span><h2>节点设置</h2></header>
+        <header><span>属性</span><h2>节点设置</h2></header>
         {selected ? <div className="canvas-node-form"><label>节点类型<select value={selected.type} onChange={(event) => editActive((document) => ({ ...document, nodes: document.nodes.map((node) => node.id === selected.id ? { ...node, type: event.target.value as ProductionNodeType } : node) }))}>{(Object.keys(NODE_LABELS) as ProductionNodeType[]).map((type) => <option key={type} value={type}>{NODE_LABELS[type].name}</option>)}</select></label><label>标题<input value={selected.title} onChange={(event) => editActive((document) => ({ ...document, nodes: document.nodes.map((node) => node.id === selected.id ? { ...node, title: event.target.value } : node) }))} /></label><label>内容<textarea value={selected.content} onChange={(event) => editActive((document) => ({ ...document, nodes: document.nodes.map((node) => node.id === selected.id ? { ...node, content: event.target.value } : node) }))} /></label><label>状态<select value={selected.status} onChange={(event) => editActive((document) => ({ ...document, nodes: document.nodes.map((node) => node.id === selected.id ? { ...node, status: event.target.value as ProductionCanvasNode["status"] } : node) }))}><option value="draft">草稿</option><option value="working">制作中</option><option value="ready">已就绪</option></select></label><div><button onClick={() => duplicateNode(selected)}>复制节点</button><button className="danger" onClick={() => removeNode(selected.id)}>删除节点</button></div></div> : <p className="canvas-no-selection">点击画布中的节点，即可编辑内容和状态。</p>}
         <section className="canvas-next-actions"><b>继续制作</b><a href="/studio">交给 AI 漫剧工作台</a><a href="/video">生成自主 AI 视频</a><a href="/editor">进入专业剪辑台</a></section>
         <small className="canvas-save-state">{message}</small>
