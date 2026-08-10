@@ -384,8 +384,10 @@ export default function VideoClient() {
   const addRemoteReference = () => {
     if (!remoteUrl) return;
     try {
-      const parsed = new URL(remoteUrl);
-      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("仅支持 http/https 链接");
+      const raw = remoteUrl.trim();
+      const isArkAsset = /^(?:asset:\/\/)?[a-z0-9][a-z0-9._:-]{5,179}$/i.test(raw) && !/^https?:/i.test(raw);
+      const parsed = isArkAsset ? null : new URL(raw);
+      if (!isArkAsset && parsed && !["http:", "https:"].includes(parsed.protocol)) throw new Error("仅支持 http/https 链接或方舟 Asset ID");
       const kindLimit = remoteKind === "image" ? 9 : 3;
       if (referenceItems.filter((item) => item.kind === remoteKind).length >= kindLimit) {
         setError("该类型素材已达上限");
@@ -396,8 +398,8 @@ export default function VideoClient() {
         name: parsed.pathname.split("/").pop() || `${remoteKind}-reference`,
         kind: remoteKind,
         role: ROLE_OPTIONS[remoteKind][0].value,
-        sourceUrl: parsed.href,
-        previewUrl: parsed.href,
+        sourceUrl: isArkAsset ? `asset://${raw.replace(/^asset:\/\//i, "")}` : parsed!.href,
+        previewUrl: isArkAsset ? "" : parsed!.href,
         weight: 70,
         enabled: true,
       };
@@ -405,7 +407,7 @@ export default function VideoClient() {
       setRemoteUrl("");
       setError("");
     } catch {
-      setError("请输入有效的 http(s) 链接");
+      setError("请输入有效的 http(s) 链接或方舟可信人像 Asset ID");
     }
   };
 
@@ -557,7 +559,7 @@ export default function VideoClient() {
       negativePrompt,
       ratio: aspect,
       duration,
-      resolution,
+      resolution: /seedance-2-0-fast/i.test(config.model) && resolution === "1080p" ? "720p" : resolution,
       apiKey: config.apiKey,
       references: items,
       voiceover: {

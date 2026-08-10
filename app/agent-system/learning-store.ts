@@ -62,6 +62,7 @@ export interface LearnedItemInput {
 }
 
 export const AGENT_PROFILES: AgentProfile[] = [
+  { id: "producer", name: "总制片 Agent", icon: "总", duty: "理解总目标、拆分任务、派送技能与记忆、分配资产并验收各岗位交付" },
   { id: "director", name: "导演 Agent", icon: "导", duty: "统筹风格、表演和镜头语言" },
   { id: "writer", name: "编剧 Agent", icon: "编", duty: "学习剧情、对白和人物弧光" },
   { id: "storyboard", name: "分镜 Agent", icon: "镜", duty: "拆解场次、景别和节奏" },
@@ -164,9 +165,10 @@ export function mergeLearnedItems(current: LearnedItem[], incoming: LearnedItem[
 
 export function agentContext(agentId: string, limit = 20, projectId = "") {
   const now = Date.now();
+  const compatibleAgentIds = agentId === "image" ? new Set(["image", "storyboard"]) : agentId === "storyboard" ? new Set(["storyboard", "image"]) : new Set([agentId]);
   return readLearnedItems()
     .filter((item) => item.status === "approved" && item.enabled && !item.archivedAt)
-    .filter((item) => item.agentId === agentId || item.scope === "user" || (item.scope === "project" && item.projectId === projectId))
+    .filter((item) => compatibleAgentIds.has(item.agentId) || item.scope === "user" || (item.scope === "project" && item.projectId === projectId))
     .sort((a, b) => contextScore(b, now) - contextScore(a, now))
     .slice(0, limit);
 }

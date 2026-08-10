@@ -14,6 +14,7 @@ const SEEDANCE_ARK_API = "https://ark.cn-beijing.volces.com/api/v3/contents/gene
 const SEEDANCE_TASK_PATTERN = /^cgt-[a-z0-9-]{8,100}$/i;
 const SEEDANCE_MODEL_PATTERN = /^(?:doubao-seedance-[a-z0-9-]+|ep-[a-z0-9-]+)$/i;
 const SEEDANCE_CREATE_CACHE = new Map();
+const SEEDANCE_CREATE_INFLIGHT = new Map();
 const API_DEFAULT_ENDPOINTS = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
@@ -322,6 +323,7 @@ async function invokeTextModel(input, fetchImpl = fetch) {
   const role = String(input?.role || "");
   const prompt = String(input?.prompt || "").trim();
   const system = String(input?.system || "").trim();
+  const images = Array.isArray(input?.images) ? input.images.slice(0, 8).map((item) => ({ url: String(item?.url || ""), label: String(item?.label || "reference").slice(0, 100) })).filter((item) => /^(?:https:\/\/|data:image\/)/i.test(item.url)) : [];
   if (!model || !prompt) throw Object.assign(new Error("模型 ID 和任务内容不能为空"), { statusCode: 400 });
   const base = cleanApiBase(mode, input?.endpoint);
   const apiKey = String(input?.apiKey || "").trim();
@@ -329,7 +331,8 @@ async function invokeTextModel(input, fetchImpl = fetch) {
   let body;
   if (mode === "openai" || mode === "pollinations") {
     target = appendApiPath(base, "chat/completions");
-    body = { model, messages: [{ role: "system", content: system }, { role: "user", content: prompt }] };
+    const userContent = images.length ? [{ type: "text", text: prompt }, ...images.map((item) => ({ type: "image_url", image_url: { url: item.url, detail: "low" }, name: item.label }))] : prompt;
+    body = { model, messages: [{ role: "system", content: system }, { role: "user", content: userContent }] };
   } else if (mode === "anthropic") {
     target = appendApiPath(base, "messages");
     body = { model, max_tokens: 4096, system, messages: [{ role: "user", content: prompt }] };
@@ -339,7 +342,7 @@ async function invokeTextModel(input, fetchImpl = fetch) {
   } else {
     target = validRemoteUrl(String(input?.endpoint || "").trim());
     if (!target) throw Object.assign(new Error("通用 Webhook 需要填写有效接口地址"), { statusCode: 400 });
-    body = { role: input?.role, model, task: input?.task, system, prompt, ...(input?.payload || {}) };
+    body = { role: input?.role, model, task: input?.task, system, prompt, images, ...(input?.payload || {}) };
   }
   const timeoutMs = TEXT_ROLE_TIMEOUT_MS[role] || 90000;
   const roleLabel = { writer: "编剧 AI", director: "导演 AI", editor: "剪辑 AI" }[role] || "文本 AI";
@@ -552,10 +555,10 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
       await pause(attempt === 0 ? 2500 : 5000);
       let statusData;
       try {
-        statusData = await fetchProviderJson(currentPollUrl, { method: "GET", headers: providerHeaders("webhook", apiKey) }, fetchImpl, { timeoutMs: 45000, maxAttempts: 2, retryLabel: "Agnes video status" });
+        statusData = await fetchProviderJson(currentPollUrl, { method: "GET", headers: providerHeaders("webhook", apiKey) }, fetchImpl, { timeoutMs: action === "create" ? 180000 : 45000, maxAttempts: 2, retryLabel: "Agnes video status" });
       } catch (error) {
         if (attempt > 1) throw error;
-        statusData = await fetchProviderJson(legacyPollUrl, { method: "GET", headers: providerHeaders("webhook", apiKey) }, fetchImpl, { timeoutMs: 45000, maxAttempts: 1, retryLabel: "Agnes legacy video status" });
+        statusData = await fetchProviderJson(legacyPollUrl, { method: "GET", headers: providerHeaders("webhook", apiKey) }, fetchImpl, { timeoutMs: action === "create" ? 180000 : 45000, maxAttempts: 1, retryLabel: "Agnes legacy video status" });
       }
       const status = String(statusData?.status || statusData?.data?.status || statusData?.state || "").toLowerCase();
       const errorText = statusData?.error?.message || statusData?.error || statusData?.message;
@@ -650,7 +653,24 @@ function seedanceErrorMessage(data, fallback = "Seedance 方舟接口暂时不�
 
 function seedanceReferenceUrl(value) {
   const raw = String(value || "").trim();
-  return /^(?:https:\/\/|data:(?:image|video|audio)\/|asset:\/\/)/i.test(raw) ? raw : "";
+  if (/^asset:\/\/[a-z0-9][a-z0-9._:-]{5,179}$/i.test(raw)) return raw;
+  return /^(?:https:\/\/|data:(?:image|video|audio)\/)/i.test(raw) ? raw : "";
+}
+
+function seedancePermissionError(data, status) {
+  const detail = seedanceErrorMessage(data, "");
+  const portrait = /(portrait|face|identity|consent|authorization|authorisation|trusted asset|人像|肖像|人脸|实名|授权)/i.test(detail);
+  const safety = /(safety|moderation|risk|policy|违规|审核|安全|敏感)/i.test(detail);
+  if (portrait) return `Seedance 可信人像未授权或 Asset ID 不可用：${detail || `接口返回 ${status}`}。请在火山方舟完成人像本人授权，并在漫镜资产库中填写对应 Asset ID、标记“已授权”`;
+  if (safety) return `Seedance 内容安全审核未通过：${detail || `接口返回 ${status}`}。这不是网络中断，请检查人物、素材版权和提示词`;
+  if ([401, 403].includes(status)) return `Seedance 权限校验失败：${detail || `接口返回 ${status}`}。请检查 API Key、模型权限以及可信人像授权`;
+  return "";
+}
+
+function seedanceParameterError(data, status) {
+  const detail = seedanceErrorMessage(data, "");
+  if (status === 400 && /resolution/i.test(detail)) return `Seedance 分辨率参数不适用于当前模型：${detail}。漫镜已对 Seedance 2.0 Fast 自动限制为 480p/720p，请重新提交任务`;
+  return "";
 }
 
 function validSeedanceMediaUrl(value) {
@@ -668,13 +688,19 @@ async function seedanceProviderJson(url, init, action, fetchImpl = fetch) {
   let response;
   try {
     ({ response } = await fetchProviderResponse(url, init, fetchImpl, {
-      timeoutMs: 45000,
-      maxAttempts: action === "status" ? 3 : 1,
+      timeoutMs: action === "create" ? 180000 : 45000,
+      maxAttempts: action === "status" ? 4 : 1,
       retryLabel: action === "status" ? "Seedance 任务查询" : "Seedance 创建请求",
       timeoutMessage: action === "status" ? "Seedance 任务查询等待超过 45 秒" : "Seedance 创建请求等待超过 45 秒"
     }));
   } catch (error) {
     if (action === "create") {
+      const detail = String(error?.message || error?.cause?.message || "").toLowerCase();
+      const code = String(error?.code || error?.cause?.code || "").toUpperCase();
+      const timedOut = error?.name === "AbortError" || detail.includes("timeout") || detail.includes("timed out") || detail.includes("aborted");
+      const reset = ["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(code) || detail.includes("connection reset") || detail.includes("socket") || detail.includes("fetch failed");
+      if (timedOut) throw Object.assign(new Error("Seedance 创建请求等待超过180秒；为避免重复创建和扣费，漫镜没有自动重提。请使用请求编号在火山方舟控制台确认是否已产生任务"), { statusCode: 504, retryable: false, failureKind: "timeout" });
+      if (reset) throw Object.assign(new Error("Seedance 创建连接被服务端或网络代理重置；为避免重复创建和扣费，漫镜没有自动重提。请使用请求编号在火山方舟控制台确认是否已产生任务"), { statusCode: 502, retryable: false, failureKind: "connection_reset" });
       throw Object.assign(new Error("Seedance 创建请求网络连接被中断；为避免重复创建和扣费，漫镜没有自动重复提交。请先在火山方舟控制台确认是否已产生任务，再重新运行视频 AI"), { statusCode: 502, retryable: false });
     }
     throw Object.assign(new Error(`Seedance 任务查询连接失败：${String(error?.message || "网络连接被中断").slice(0, 220)}`), { statusCode: 503, retryable: true });
@@ -683,10 +709,13 @@ async function seedanceProviderJson(url, init, action, fetchImpl = fetch) {
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text }; }
   if (!response.ok) {
-    throw Object.assign(new Error(`Seedance 方舟接口返回 ${response.status}：${seedanceErrorMessage(data)}`), {
+    const permissionMessage = seedancePermissionError(data, response.status);
+    const parameterMessage = seedanceParameterError(data, response.status);
+    throw Object.assign(new Error(permissionMessage || parameterMessage || `Seedance 方舟接口返回 ${response.status}：${seedanceErrorMessage(data)}`), {
       statusCode: TRANSIENT_PROVIDER_STATUSES.has(response.status) ? 503 : 502,
       providerStatus: response.status,
-      retryable: TRANSIENT_PROVIDER_STATUSES.has(response.status)
+      retryable: TRANSIENT_PROVIDER_STATUSES.has(response.status),
+      failureKind: permissionMessage ? "authorization" : parameterMessage ? "invalid_parameter" : "provider"
     });
   }
   return data;
@@ -706,12 +735,16 @@ async function invokeSeedance(input, fetchImpl = fetch) {
     const ratio = input?.ratio === "16:9" ? "16:9" : "9:16";
     const isOmniModel = /seedance-2/i.test(model);
     const duration = isOmniModel ? Math.max(4, Math.min(15, Math.round(Number(input?.duration) || 8))) : Number(input?.duration) >= 8 ? 10 : 5;
-    const resolution = ["480p", "720p", "1080p"].includes(String(input?.resolution)) ? String(input.resolution) : "720p";
+    const requestedResolution = ["480p", "720p", "1080p"].includes(String(input?.resolution)) ? String(input.resolution) : "720p";
+    const resolution = /seedance-2-0-fast/i.test(model) && requestedResolution === "1080p" ? "720p" : requestedResolution;
     const rawVoiceover = input?.voiceover && typeof input.voiceover === "object" ? input.voiceover : {};
     const voiceEnabled = rawVoiceover.enabled === true;
+    const backgroundMusic = rawVoiceover.backgroundMusic === true;
+    const audioEnabled = rawVoiceover.audioEnabled !== false;
+    const musicInstruction = backgroundMusic ? "生成符合剧情节奏的无歌词背景音乐，音乐不得遮盖人声。" : "不要生成背景音乐。";
     const voiceInstruction = voiceEnabled
-      ? `\n生成原生音轨；配音语言：${String(rawVoiceover.language || "普通话").slice(0, 30)}；人声风格：${String(rawVoiceover.style || "自然对白").slice(0, 60)}；${rawVoiceover.script ? `准确台词：${String(rawVoiceover.script).slice(0, 500)}` : "根据画面生成一句简短自然的对白或旁白"}；人物口型与声音同步。`
-      : "\n输出静音视频，不生成对白、旁白、音乐或环境音。";
+      ? `\n生成原生音轨；配音语言：${String(rawVoiceover.language || "普通话").slice(0, 30)}；人声风格：${String(rawVoiceover.style || "自然对白").slice(0, 100)}；${rawVoiceover.script ? `准确台词：${String(rawVoiceover.script).slice(0, 500)}` : "严格按照提示词中的角色台词配音"}；人物口型与声音同步；同一角色跨镜头保持相同音色、年龄感、语速和口音。${musicInstruction}保留合理的环境音和动作音效。`
+      : `\n不要生成人物对白或旁白。${musicInstruction}保留合理的环境音和动作音效，视频不得完全静音。`;
     const content = [{ type: "text", text: `${prompt}${voiceInstruction}${negativePrompt ? `\n避免：${negativePrompt}` : ""}` }];
     const rawReferences = Array.isArray(input?.references) ? input.references : [];
     const counts = { image: 0, video: 0, audio: 0 };
@@ -737,35 +770,54 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         acceptedReferences.push({ kind: "image", role: "first_frame", name: "首帧" });
       }
     }
-    const requestId = String(input?.requestId || "").trim();
+    const suppliedRequestId = String(input?.requestId || "").trim();
+    const requestId = /^[a-z0-9-]{8,80}$/i.test(suppliedRequestId) ? suppliedRequestId : require("node:crypto").randomUUID();
     const cached = /^[a-z0-9-]{8,80}$/i.test(requestId) ? SEEDANCE_CREATE_CACHE.get(requestId) : null;
     if (cached && cached.expiresAt > Date.now()) return cached.payload;
-    const payload = await seedanceProviderJson(SEEDANCE_ARK_API, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: true, generate_audio: voiceEnabled })
-    }, "create", fetchImpl);
-    if (!payload?.id) throw Object.assign(new Error(`Seedance 没有返回任务编号：${seedanceErrorMessage(payload)}`), { statusCode: 502, retryable: false });
-    const result = { id: String(payload.id), status: "queued", acceptedReferences, ignoredReferences: Math.max(0, rawReferences.length - acceptedReferences.length) };
-    if (/^[a-z0-9-]{8,80}$/i.test(requestId)) {
+    const inflight = SEEDANCE_CREATE_INFLIGHT.get(requestId);
+    if (inflight) return inflight;
+    const createPromise = (async () => {
+      let payload;
+      try {
+        payload = await seedanceProviderJson(SEEDANCE_ARK_API, {
+          method: "POST",
+          headers: { ...headers, "X-Manjing-Request-Id": requestId },
+          body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: true, generate_audio: audioEnabled })
+        }, "create", fetchImpl);
+      } catch (error) {
+        error.message = `${error.message}。漫镜请求编号：${requestId}`;
+        error.requestId = requestId;
+        throw error;
+      }
+      if (!payload?.id) throw Object.assign(new Error(`Seedance 没有返回任务编号：${seedanceErrorMessage(payload)}`), { statusCode: 502, retryable: false });
+      const result = { id: String(payload.id), requestId, status: "queued", acceptedReferences, ignoredReferences: Math.max(0, rawReferences.length - acceptedReferences.length) };
       SEEDANCE_CREATE_CACHE.set(requestId, { expiresAt: Date.now() + 30 * 60 * 1000, payload: result });
       if (SEEDANCE_CREATE_CACHE.size > 80) for (const [key, value] of SEEDANCE_CREATE_CACHE) if (value.expiresAt <= Date.now()) SEEDANCE_CREATE_CACHE.delete(key);
+      return result;
+    })();
+    SEEDANCE_CREATE_INFLIGHT.set(requestId, createPromise);
+    try {
+      return await createPromise;
+    } finally {
+      if (SEEDANCE_CREATE_INFLIGHT.get(requestId) === createPromise) SEEDANCE_CREATE_INFLIGHT.delete(requestId);
     }
-    return result;
   }
 
   if (input?.action === "status") {
     const id = String(input?.id || "").trim();
     if (!SEEDANCE_TASK_PATTERN.test(id)) throw Object.assign(new Error("Seedance 任务编号无效"), { statusCode: 400, retryable: false });
     const payload = await seedanceProviderJson(`${SEEDANCE_ARK_API}/${encodeURIComponent(id)}`, { headers }, "status", fetchImpl);
-    if (payload?.status === "failed" || payload?.status === "cancelled") {
+    const taskPayload = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    const taskStatus = String(taskPayload?.status || payload?.status || "queued").toLowerCase();
+    const videoUrl = String(taskPayload?.content?.video_url || taskPayload?.video_url || payload?.content?.video_url || payload?.video_url || "");
+    if (["failed", "failure", "cancelled", "canceled"].includes(taskStatus)) {
       throw Object.assign(new Error(seedanceErrorMessage(payload, `Seedance 任务${payload.status}`)), { statusCode: 502, done: true, retryable: false });
     }
     return {
-      done: payload?.status === "succeeded",
-      status: String(payload?.status || "queued"),
-      videoUrl: String(payload?.content?.video_url || ""),
-      lastFrameUrl: String(payload?.content?.last_frame_url || "")
+      done: Boolean(videoUrl) || ["succeeded", "success", "completed", "complete", "finished"].includes(taskStatus),
+      status: taskStatus,
+      videoUrl,
+      lastFrameUrl: String(taskPayload?.content?.last_frame_url || taskPayload?.last_frame_url || payload?.content?.last_frame_url || "")
     };
   }
 

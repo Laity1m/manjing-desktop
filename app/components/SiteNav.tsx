@@ -31,7 +31,7 @@ export default function SiteNav({ current }: { current: string }) {
           </Link>
         ))}
       </div>
-      <Link className="global-start" href={current === "chat" ? "/chat" : "/studio"}>
+      <Link className="global-start" href={current === "chat" ? "/chat#agent-chat-input" : "/studio"}>
         {current === "chat" ? "继续聊天" : "进入工作区"}
       </Link>
     </nav>

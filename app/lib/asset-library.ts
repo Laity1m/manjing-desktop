@@ -1,4 +1,4 @@
-export type LibraryAssetCategory = "character" | "scene" | "video" | "audio" | "other";
+export type LibraryAssetCategory = "character" | "scene" | "prop" | "video" | "audio" | "other";
 export type LibraryMediaType = "image" | "video" | "audio";
 
 export type LibraryAsset = {
@@ -11,6 +11,16 @@ export type LibraryAsset = {
   duration: number;
   tags: string[];
   createdAt: string;
+  reusable: boolean;
+  locked: boolean;
+  canonical: boolean;
+  identityKey?: string;
+  lookName?: string;
+  parentAssetId?: string;
+  arkAssetId?: string;
+  portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
+  usageCount: number;
+  lastUsedAt?: string;
   url?: string;
 };
 
@@ -46,6 +56,21 @@ function assetMediaType(file: Blob) {
   return null;
 }
 
+function normalizedAssetMetadata(asset: LibraryAsset): LibraryAsset {
+  const generated = asset.tags?.some((item) => item === "自动生成" || item.startsWith("generated:"));
+  if (!generated) return asset;
+  const extension = asset.name.match(/\.[a-z0-9]{2,8}$/i)?.[0] || "";
+  const stem = asset.name.slice(0, extension ? -extension.length : undefined);
+  const semantic = stem.match(/(?:^|-)([^-]+)-(角色设定|人物设定|角色资产|场景|分镜|视频|道具设定|配音|口型视频)$/);
+  const inferredIdentity = asset.identityKey || (asset.category === "character" ? semantic?.[1] : undefined);
+  return {
+    ...asset,
+    name: semantic ? `${semantic[1]}-${semantic[2]}${extension}` : asset.name,
+    identityKey: inferredIdentity,
+    lookName: asset.lookName || (asset.category === "character" ? "基础造型" : undefined),
+  };
+}
+
 function transactionDone(transaction: IDBTransaction, message: string) {
   return new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve();
@@ -54,21 +79,38 @@ function transactionDone(transaction: IDBTransaction, message: string) {
   });
 }
 
-export async function saveLibraryFile(file: File, options: { category?: LibraryAssetCategory; duration?: number; tags?: string[] } = {}) {
+export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; parentAssetId?: string } = {}) {
   if (file.size > MAX_ASSET_BYTES) throw new Error("单个资产不能超过 512MB");
   const mediaType = assetMediaType(file);
   if (!mediaType) throw new Error(`“${file.name}”不是支持的图片、视频或音频`);
   const database = await openLibraryDatabase();
+  const tags = (options.tags || []).map((item) => item.trim()).filter(Boolean).slice(0, 12);
+  const generated = tags.some((item) => item.startsWith("generated:") || item === "自动生成");
+  const extension = file.name.match(/\.[a-z0-9]{2,8}$/i)?.[0] || (mediaType === "image" ? ".png" : mediaType === "video" ? ".mp4" : ".wav");
+  const categoryName = options.category === "character" ? "角色" : options.category === "scene" ? "场景" : options.category === "prop" ? "道具" : mediaType === "video" ? "镜头" : mediaType === "audio" ? "配音" : "资产";
+  const fileStem = file.name.replace(/\.[a-z0-9]{2,8}$/i, "");
+  const inferredIdentity = options.identityKey?.trim() || (["character", "audio"].includes(String(options.category)) ? fileStem.match(/(?:^|-)([^-]+)-(?:角色设定|人物设定|角色资产|配音|声音资产)$/)?.[1] : undefined);
+  const inferredLook = options.lookName?.trim() || tags.find((item) => /^(?:造型|look|声音|voice)[:：]/i.test(item))?.replace(/^(?:造型|look|声音|voice)[:：]/i, "").trim() || (options.category === "character" ? "基础造型" : options.category === "audio" ? "默认声音档案" : undefined);
+  const semanticTail = fileStem.match(/(?:^|-)([^-]+)-(角色设定|人物设定|场景|分镜|视频|道具设定|配音|口型视频)$/)?.slice(1).join("-");
+  const scriptName = options.name?.trim() || (options.category === "character" ? inferredIdentity : semanticTail);
+  const generatedName = scriptName ? `${scriptName}${options.category === "character" && inferredLook ? `-${inferredLook}` : ""}-${categoryName}${extension}` : file.name;
   const asset: LibraryAsset = {
     id: uid("asset"),
     mediaId: uid("media"),
-    name: file.name.slice(0, 180),
+    name: (generated ? generatedName : options.name?.trim() || file.name).slice(0, 180),
     mediaType,
     category: options.category || (mediaType === "video" ? "video" : mediaType === "audio" ? "audio" : "other"),
     size: file.size,
     duration: Math.max(0, Number(options.duration) || (mediaType === "image" ? 5 : 0)),
-    tags: (options.tags || []).map((item) => item.trim()).filter(Boolean).slice(0, 12),
+    tags,
     createdAt: new Date().toISOString(),
+    reusable: options.reusable !== false,
+    locked: options.locked === true,
+    canonical: false,
+    identityKey: inferredIdentity?.slice(0, 120) || undefined,
+    lookName: inferredLook?.slice(0, 120) || undefined,
+    parentAssetId: options.parentAssetId?.trim() || undefined,
+    usageCount: 0,
   };
   try {
     const transaction = database.transaction([MEDIA_STORE_NAME, ASSET_STORE_NAME], "readwrite");
@@ -89,7 +131,7 @@ export async function listLibraryAssets() {
       request.onsuccess = () => resolve((request.result || []) as LibraryAsset[]);
       request.onerror = () => reject(request.error || new Error("读取资产库失败"));
     });
-    return assets.filter((item) => item?.id && item?.mediaId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
+    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
   } finally {
     database.close();
   }
@@ -109,7 +151,7 @@ export async function loadLibraryAsset(id: string) {
       request.onsuccess = () => resolve(request.result as Blob | undefined);
       request.onerror = () => reject(request.error || new Error("读取资产文件失败"));
     });
-    return blob ? { ...asset, url: URL.createObjectURL(blob) } : null;
+    return blob ? { ...normalizedAssetMetadata(asset), url: URL.createObjectURL(blob) } : null;
   } finally {
     database.close();
   }
@@ -125,7 +167,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -139,6 +181,16 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...(typeof patch.name === "string" ? { name: patch.name.trim().slice(0, 180) || current.name } : {}),
       ...(patch.category ? { category: patch.category } : {}),
       ...(Array.isArray(patch.tags) ? { tags: patch.tags.map((item) => item.trim()).filter(Boolean).slice(0, 12) } : {}),
+      ...(typeof patch.reusable === "boolean" ? { reusable: patch.reusable } : {}),
+      ...(typeof patch.locked === "boolean" ? { locked: patch.locked } : {}),
+      ...(typeof patch.canonical === "boolean" ? { canonical: patch.canonical } : {}),
+      ...(typeof patch.identityKey === "string" ? { identityKey: patch.identityKey.trim().slice(0, 120) || undefined } : {}),
+      ...(typeof patch.lookName === "string" ? { lookName: patch.lookName.trim().slice(0, 120) || undefined } : {}),
+      ...(typeof patch.parentAssetId === "string" ? { parentAssetId: patch.parentAssetId.trim() || undefined } : {}),
+      ...(typeof patch.arkAssetId === "string" ? { arkAssetId: patch.arkAssetId.trim().replace(/^asset:\/\//i, "").slice(0, 180) || undefined } : {}),
+      ...(patch.portraitAuthorizationStatus ? { portraitAuthorizationStatus: patch.portraitAuthorizationStatus } : {}),
+      ...(typeof patch.usageCount === "number" ? { usageCount: Math.max(0, Math.round(patch.usageCount)) } : {}),
+      ...(typeof patch.lastUsedAt === "string" ? { lastUsedAt: patch.lastUsedAt } : {}),
     };
     const transaction = database.transaction(ASSET_STORE_NAME, "readwrite");
     transaction.objectStore(ASSET_STORE_NAME).put(next, next.id);
@@ -147,6 +199,13 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
   } finally {
     database.close();
   }
+}
+
+export async function markLibraryAssetUsed(id: string) {
+  const assets = await listLibraryAssets();
+  const asset = assets.find((item) => item.id === id);
+  if (!asset) return;
+  await updateLibraryAsset(id, { usageCount: (asset.usageCount || 0) + 1, lastUsedAt: new Date().toISOString() });
 }
 
 export async function deleteLibraryAsset(id: string) {

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import json
 import mimetypes
 import os
 import re
 import secrets
+import shutil
+import subprocess
+import tempfile
 import time
 import wave
 from pathlib import Path
@@ -34,6 +38,8 @@ MUSETALK_URL = os.getenv("MUSETALK_URL", "http://127.0.0.1:8000").rstrip("/")
 MONEYPRINTER_URL = os.getenv("MONEYPRINTER_URL", "http://127.0.0.1:8080").rstrip("/")
 VIBEVOICE_URL = os.getenv("VIBEVOICE_URL", "http://127.0.0.1:3000").rstrip("/")
 VIBEVOICE_ASR_URL = os.getenv("VIBEVOICE_ASR_URL", "").rstrip("/")
+DOUYIN_CLIENT_KEY = os.getenv("DOUYIN_CLIENT_KEY", "").strip()
+DOUYIN_CLIENT_SECRET = os.getenv("DOUYIN_CLIENT_SECRET", "").strip()
 BRIDGE_TOKEN = os.getenv("BRIDGE_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 COSYVOICE_MODE = os.getenv("COSYVOICE_MODE", "sft").strip().lower()
@@ -219,6 +225,203 @@ async def health(authorization: str | None = Header(default=None)) -> dict[str, 
             "nodes": dict(zip(checks.keys(), states)),
             "workflows": {kind: workflow_path(kind).exists() for kind in ("image", "video")},
         }
+
+
+def local_video_learning(video_path: Path, language: str) -> dict[str, Any]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("未找到 FFmpeg，请先安装 FFmpeg 并加入 PATH")
+    transcript = ""
+    ocr_lines: list[str] = []
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="manjing-learn-") as temporary:
+        work = Path(temporary)
+        audio_path = work / "audio.wav"
+        subprocess.run([ffmpeg, "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel(os.getenv("WHISPER_MODEL", "small"), device=os.getenv("WHISPER_DEVICE", "cpu"), compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8"))
+            segments, _ = model.transcribe(str(audio_path), language=None if language == "auto" else language, vad_filter=True)
+            transcript = "\n".join(f"[{segment.start:.1f}s] {segment.text.strip()}" for segment in segments if segment.text.strip())
+        except ImportError:
+            warnings.append("未安装 faster-whisper，已跳过语音识别")
+        frames = work / "frames"
+        frames.mkdir()
+        subprocess.run([ffmpeg, "-y", "-i", str(video_path), "-vf", "fps=1/2,scale=960:-2", "-frames:v", "40", str(frames / "%03d.jpg")], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            from paddleocr import PaddleOCR
+            ocr = PaddleOCR(use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=True, lang="ch")
+            seen: set[str] = set()
+            for frame in sorted(frames.glob("*.jpg")):
+                result = ocr.predict(str(frame)) if hasattr(ocr, "predict") else ocr.ocr(str(frame), cls=True)
+                raw = json.dumps(result, ensure_ascii=False, default=str)
+                for text in re.findall(r"[\u4e00-\u9fffA-Za-z0-9，。！？、：；‘’“”《》\- ]{3,}", raw):
+                    clean = re.sub(r"\s+", " ", text).strip()
+                    if clean and clean not in seen and not clean.startswith(("input_path", "res_path")):
+                        seen.add(clean)
+                        ocr_lines.append(clean)
+        except ImportError:
+            warnings.append("未安装 PaddleOCR，已跳过画面字幕识别")
+    return {"transcript": transcript, "ocr": ocr_lines[:300], "warnings": warnings, "local": True}
+
+
+def find_douyin_video_node(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if isinstance(value.get("video"), dict) and (value.get("aweme_id") or value.get("item_id") or value.get("desc")):
+            return value
+        for nested in value.values():
+            found = find_douyin_video_node(nested)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = find_douyin_video_node(nested)
+            if found:
+                return found
+    return None
+
+
+async def parse_douyin_share(share_text: str) -> dict[str, str]:
+    match = re.search(r"https?://[^\s]+", share_text)
+    if not match:
+        raise HTTPException(status_code=400, detail="分享内容中没有抖音链接")
+    source_url = match.group(0).rstrip("，。；;)")
+    parsed = urlparse(source_url)
+    allowed = {"v.douyin.com", "www.douyin.com", "douyin.com", "www.iesdouyin.com", "iesdouyin.com"}
+    if parsed.hostname not in allowed:
+        raise HTTPException(status_code=400, detail="只允许处理用户主动提交的抖音链接")
+    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"}
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=headers) as client:
+        redirected = await client.get(source_url)
+        redirected.raise_for_status()
+        id_match = re.search(r"/(?:video|note)/(\d+)", str(redirected.url))
+        if not id_match:
+            id_match = re.search(r"(\d{15,22})", str(redirected.url))
+        if not id_match:
+            raise HTTPException(status_code=502, detail="抖音链接中没有找到视频 ID，平台页面规则可能已变化")
+        video_id = id_match.group(1)
+        page = await client.get(f"https://www.iesdouyin.com/share/video/{video_id}")
+        page.raise_for_status()
+        router_match = re.search(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", page.text, re.S)
+        if not router_match:
+            raise HTTPException(status_code=502, detail="抖音页面暂时没有返回可解析的视频数据")
+        try:
+            router_data = json.loads(html.unescape(router_match.group(1)).strip().rstrip(";"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail="抖音视频数据格式发生变化") from exc
+        node = find_douyin_video_node(router_data)
+        if not node:
+            raise HTTPException(status_code=502, detail="没有在抖音页面中找到视频信息")
+        video = node.get("video") or {}
+        play = video.get("play_addr") or video.get("playAddr") or {}
+        urls = play.get("url_list") or play.get("urlList") or []
+        if not urls:
+            raise HTTPException(status_code=502, detail="该抖音作品没有提供可读取的视频地址")
+        return {"video_id": video_id, "title": str(node.get("desc") or f"抖音视频 {video_id}"), "video_url": str(urls[0]).replace("playwm", "play"), "source_url": source_url}
+
+
+async def douyin_form_post(path: str, fields: dict[str, str]) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(f"https://open.douyin.com{path}", data=fields, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        response.raise_for_status()
+        payload = response.json()
+    data = payload.get("data", payload)
+    if int(data.get("error_code") or 0) != 0:
+        raise HTTPException(status_code=400, detail=str(data.get("description") or payload.get("message") or "抖音授权失败"))
+    return data
+
+
+@app.post("/v1/douyin/oauth/exchange")
+async def douyin_oauth_exchange(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    authorize(authorization)
+    body = await request.json()
+    client_key = str(body.get("client_key") or DOUYIN_CLIENT_KEY)
+    client_secret = str(body.get("client_secret") or DOUYIN_CLIENT_SECRET)
+    code = str(body.get("code") or "")
+    if not client_key or not client_secret or not code:
+        raise HTTPException(status_code=400, detail="缺少 Client Key、Client Secret 或授权码")
+    return await douyin_form_post("/oauth/access_token/", {"client_key": client_key, "client_secret": client_secret, "code": code, "grant_type": "authorization_code"})
+
+
+@app.post("/v1/douyin/oauth/refresh")
+async def douyin_oauth_refresh(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    authorize(authorization)
+    body = await request.json()
+    client_key = str(body.get("client_key") or DOUYIN_CLIENT_KEY)
+    refresh_token = str(body.get("refresh_token") or "")
+    if not client_key or not refresh_token:
+        raise HTTPException(status_code=400, detail="缺少 Client Key 或 Refresh Token")
+    return await douyin_form_post("/oauth/refresh_token/", {"client_key": client_key, "refresh_token": refresh_token, "grant_type": "refresh_token"})
+
+
+@app.post("/v1/douyin/account")
+async def douyin_account(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    authorize(authorization)
+    body = await request.json()
+    token = str(body.get("access_token") or "")
+    open_id = str(body.get("open_id") or "")
+    if not token or not open_id:
+        raise HTTPException(status_code=400, detail="抖音账号尚未授权")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        profile_response = await client.get("https://open.douyin.com/oauth/userinfo/", params={"access_token": token, "open_id": open_id})
+        profile_response.raise_for_status()
+        profile = profile_response.json()
+        videos: dict[str, Any] = {"list": [], "has_more": False}
+        endpoints = ["https://open.douyin.com/video/list/", "https://open.douyin.com/api/douyin/v1/video/video_list/"]
+        for endpoint in endpoints:
+            response = await client.get(endpoint, params={"open_id": open_id, "cursor": 0, "count": 20}, headers={"access-token": token})
+            if response.is_success:
+                candidate = response.json()
+                data = candidate.get("data", candidate)
+                if int(data.get("error_code") or 0) == 0:
+                    videos = data
+                    break
+    return {"profile": profile.get("data", profile), "videos": videos}
+
+
+@app.post("/v1/douyin/share/learn")
+async def douyin_share_learn(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    authorize(authorization)
+    body = await request.json()
+    info = await parse_douyin_share(str(body.get("share_text") or ""))
+    target = OUTPUT_DIR / f"douyin-{info['video_id']}.mp4"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0), follow_redirects=True) as client:
+            async with client.stream("GET", info["video_url"], headers={"User-Agent": "Mozilla/5.0"}) as response:
+                response.raise_for_status()
+                with target.open("wb") as output:
+                    async for chunk in response.aiter_bytes(1024 * 1024):
+                        output.write(chunk)
+                        if output.tell() > 1024 * 1024 * 1024:
+                            raise HTTPException(status_code=413, detail="抖音视频超过 1GB")
+        learned = await asyncio.to_thread(local_video_learning, target, str(body.get("language") or "zh"))
+        return {**info, **learned}
+    finally:
+        target.unlink(missing_ok=True)
+
+
+@app.post("/v1/learn/video")
+async def learn_video(video: UploadFile = File(...), language: str = "zh", authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    authorize(authorization)
+    suffix = Path(video.filename or "video.mp4").suffix.lower()
+    if suffix not in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+        raise HTTPException(status_code=400, detail="请选择常见视频文件")
+    target = OUTPUT_DIR / f"learn-{secrets.token_hex(8)}{suffix}"
+    try:
+        with target.open("wb") as output:
+            while chunk := await video.read(1024 * 1024):
+                output.write(chunk)
+                if output.tell() > 1024 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="学习视频不能超过 1GB")
+        return await asyncio.to_thread(local_video_learning, target, language)
+    except HTTPException:
+        raise
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500, detail="FFmpeg 无法读取该视频") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)[:500]) from exc
+    finally:
+        target.unlink(missing_ok=True)
 
 
 @app.post("/v1/image")

@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -9,6 +9,7 @@ import { deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, saveLibraryFi
 const CATEGORY_LABELS: Record<LibraryAssetCategory, string> = {
   character: "角色",
   scene: "场景",
+  prop: "道具",
   video: "视频",
   audio: "音频",
   other: "其他",
@@ -106,9 +107,39 @@ export default function AssetLibraryClient() {
     }
   }
 
+  async function removeSelected() {
+    if (busy || !selected.length) return;
+    const removing = [...selected];
+    setBusy(true);
+    setMessage(`正在删除 ${removing.length} 个资产…`);
+    try {
+      for (const id of removing) await deleteLibraryAsset(id);
+      setSelected([]);
+      await refresh();
+      setMessage(`已批量删除 ${removing.length} 个资产。`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function changeCategory(asset: LibraryAsset, next: LibraryAssetCategory) {
     await updateLibraryAsset(asset.id, { category: next });
     setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, category: next } : item));
+  }
+
+  async function editAsset(asset: LibraryAsset, patch: Parameters<typeof updateLibraryAsset>[1]) {
+    setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, ...patch } : item));
+    await updateLibraryAsset(asset.id, patch);
+    setMessage(`已更新“${asset.name}”，Agent 下次创作会读取新设置。`);
+  }
+
+  async function setCanonical(asset: LibraryAsset) {
+    const identity = (asset.identityKey || asset.tags.find((tag) => !tag.startsWith("generated:")) || asset.name).trim().toLocaleLowerCase("zh-CN");
+    const related = assets.filter((item) => item.id !== asset.id && item.category === asset.category && (item.identityKey || item.tags.find((tag) => !tag.startsWith("generated:")) || item.name).trim().toLocaleLowerCase("zh-CN") === identity && item.canonical);
+    await Promise.all(related.map((item) => updateLibraryAsset(item.id, { canonical: false })));
+    await updateLibraryAsset(asset.id, { canonical: true, locked: true, reusable: true });
+    setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, canonical: true, locked: true, reusable: true } : related.some((old) => old.id === item.id) ? { ...item, canonical: false } : item));
+    setMessage(`已将“${asset.name}”设为 Canonical 标准资产，后续 Agent 将优先引用。`);
   }
 
   function sendToStudio() {
@@ -129,10 +160,10 @@ export default function AssetLibraryClient() {
 
   return <main className="portal-page asset-library-page">
     <SiteNav current="assets" />
-    <header className="asset-library-hero"><div><p>复用素材库</p><h1>资产库</h1><span>为后续项目持续沉淀角色、场景与素材。</span></div><div className="asset-library-primary"><button onClick={() => inputRef.current?.click()} disabled={busy}>导入素材</button><button className="secondary" onClick={sendToStudio} disabled={busy}>发送到工作台</button><input ref={inputRef} hidden multiple type="file" accept="image/*,video/*,audio/*" onChange={(event) => { void importFiles(event.target.files); event.currentTarget.value = ""; }} /></div></header>
+    <header className="asset-library-hero"><div><p>复用素材库</p><h1>资产库</h1><span>AI 依据剧本中的角色、场景、道具与镜头命名，后续按同名资产自动引用。</span></div><div className="asset-library-primary"><button onClick={() => inputRef.current?.click()} disabled={busy}>导入素材</button><button className="secondary" onClick={sendToStudio} disabled={busy}>发送到工作台</button>{selected.length > 0 && <ConfirmButton onConfirm={removeSelected} disabled={busy} ariaLabel={`批量删除 ${selected.length} 个资产`} confirmLabel={`确认删除 ${selected.length} 个`}>批量删除</ConfirmButton>}<input ref={inputRef} hidden multiple type="file" accept="image/*,video/*,audio/*" onChange={(event) => { void importFiles(event.target.files); event.currentTarget.value = ""; }} /></div></header>
     <section className="asset-library-controls"><div className="asset-kind-tabs"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部</button>{(Object.keys(CATEGORY_LABELS) as LibraryAssetCategory[]).map((key) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{CATEGORY_LABELS[key]}</button>)}</div><label>分类<select value={category} onChange={(event) => setCategory(event.target.value as LibraryAssetCategory)}>{(Object.keys(CATEGORY_LABELS) as LibraryAssetCategory[]).map((key) => <option key={key} value={key}>{CATEGORY_LABELS[key]}</option>)}</select></label><label className="asset-library-search"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材" /></label></section>
     <p className="asset-library-message" role="status"><b>{selected.length ? `${selected.length} 个已选` : "0 个已选"}</b> {message}</p>
     {visible.length ? <section className="asset-library-grid">{visible.map((asset) => <article key={asset.id} className={selected.includes(asset.id) ? "selected" : ""}>
-      <button className="asset-library-preview" onClick={() => toggle(asset.id)} aria-pressed={selected.includes(asset.id)}>{previews[asset.id] ? asset.mediaType === "image" ? <img src={previews[asset.id]} alt={asset.name} loading="lazy" /> : asset.mediaType === "video" ? <video src={previews[asset.id]} preload="metadata" muted /> : <span className="audio-preview">音频</span> : <span>{asset.mediaType === "video" ? "视频" : asset.mediaType === "audio" ? "音频" : "图片"}</span>}<i>{selected.includes(asset.id) ? "✓" : "+"}</i></button><div className="asset-library-copy"><b title={asset.name}>{asset.name}</b><small>{sizeLabel(asset.size)}{asset.duration ? ` / ${asset.duration.toFixed(1)}秒` : ""}</small><select value={asset.category} onChange={(event) => void changeCategory(asset, event.target.value as LibraryAssetCategory)}>{(Object.keys(CATEGORY_LABELS) as LibraryAssetCategory[]).map((key) => <option key={key} value={key}>{CATEGORY_LABELS[key]}</option>)}</select><div><button onClick={() => void download(asset)}>下载</button><ConfirmButton onConfirm={() => remove(asset.id)} disabled={busy} ariaLabel={`删除 ${asset.name}`} confirmLabel="确认删除">删除</ConfirmButton></div></div></article>)}</section> : <section className="asset-library-empty"><i>∅</i><h2>{assets.length ? "没有匹配的资产" : "暂无资产"}</h2><p>上传图片、视频或音频，沉淀成可复用素材库。</p><button onClick={() => inputRef.current?.click()}>选择文件</button></section>}
+      <button className="asset-library-preview" onClick={() => toggle(asset.id)} aria-pressed={selected.includes(asset.id)}>{asset.canonical && <strong className="canonical-badge">CANONICAL</strong>}{previews[asset.id] ? asset.mediaType === "image" ? <img src={previews[asset.id]} alt={asset.name} loading="lazy" /> : asset.mediaType === "video" ? <video src={previews[asset.id]} preload="metadata" muted /> : <span className="audio-preview">音频</span> : <span>{asset.mediaType === "video" ? "视频" : asset.mediaType === "audio" ? "音频" : "图片"}</span>}<i>{selected.includes(asset.id) ? "✓" : "+"}</i></button><div className="asset-library-copy"><input className="asset-title-input" value={asset.name} title="资产名称" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, name: event.target.value } : item))} onBlur={(event) => void editAsset(asset, { name: event.target.value })} /><small>{sizeLabel(asset.size)}{asset.duration ? ` / ${asset.duration.toFixed(1)}秒` : ""} · 已引用 {asset.usageCount || 0} 次</small><select value={asset.category} onChange={(event) => void changeCategory(asset, event.target.value as LibraryAssetCategory)}>{(Object.keys(CATEGORY_LABELS) as LibraryAssetCategory[]).map((key) => <option key={key} value={key}>{CATEGORY_LABELS[key]}</option>)}</select><input value={asset.tags.join("，")} placeholder="标签：角色名、场景、集数" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, tags: event.target.value.split(/[，,]/) } : item))} onBlur={(event) => void editAsset(asset, { tags: event.target.value.split(/[，,]/) })} />{asset.category === "character" && <><input value={asset.identityKey || ""} placeholder="角色身份，例如：林夏" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, identityKey: event.target.value } : item))} onBlur={(event) => void editAsset(asset, { identityKey: event.target.value })} /><input value={asset.lookName || ""} placeholder="造型名称，例如：通勤装A" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, lookName: event.target.value } : item))} onBlur={(event) => void editAsset(asset, { lookName: event.target.value })} /><input value={asset.arkAssetId || ""} placeholder="方舟可信人像 Asset ID" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, arkAssetId: event.target.value } : item))} onBlur={(event) => void editAsset(asset, { arkAssetId: event.target.value, portraitAuthorizationStatus: event.target.value.trim() ? "pending" : "unbound" })} /><select value={asset.portraitAuthorizationStatus || "unbound"} onChange={(event) => void editAsset(asset, { portraitAuthorizationStatus: event.target.value as "unbound" | "pending" | "authorized" })}><option value="unbound">未绑定可信人像</option><option value="pending">已填写，等待/未确认授权</option><option value="authorized">已在方舟完成本人授权</option></select>{asset.arkAssetId && <small>Seedance 引用：asset://{asset.arkAssetId.replace(/^asset:\/\//i, "")}</small>}</>}{asset.category === "audio" && <><input value={asset.identityKey || ""} placeholder="所属角色，例如：林夏" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, identityKey: event.target.value } : item))} onBlur={(event) => void editAsset(asset, { identityKey: event.target.value })} /><input value={asset.lookName || ""} placeholder="声音档案，例如：林夏·沉静女声" onChange={(event) => setAssets((items) => items.map((item) => item.id === asset.id ? { ...item, lookName: event.target.value } : item))} onBlur={(event) => void editAsset(asset, { lookName: event.target.value })} /><small>视频 Agent 会按所属角色自动复用这段声音，保持跨镜头音色一致。</small></>}<div className="asset-policy-actions"><button className={asset.canonical ? "active" : ""} onClick={() => void setCanonical(asset)}>{asset.canonical ? "✓ Canonical" : "设为 Canonical"}</button><button className={asset.reusable !== false ? "active" : ""} onClick={() => void editAsset(asset, { reusable: asset.reusable === false })}>{asset.reusable !== false ? "Agent 可复用" : "禁止复用"}</button><button className={asset.locked ? "active" : ""} onClick={() => void editAsset(asset, { locked: !asset.locked })}>{asset.locked ? "已锁定" : "未锁定"}</button></div><div><button onClick={() => void download(asset)}>下载</button><ConfirmButton onConfirm={() => remove(asset.id)} disabled={busy} ariaLabel={`删除 ${asset.name}`} confirmLabel="确认删除">删除</ConfirmButton></div></div></article>)}</section> : <section className="asset-library-empty"><i>∅</i><h2>{assets.length ? "没有匹配的资产" : "暂无资产"}</h2><p>上传图片、视频或音频，沉淀成可复用素材库。</p><button onClick={() => inputRef.current?.click()}>选择文件</button></section>}
   </main>;
 }
