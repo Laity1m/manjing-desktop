@@ -1,5 +1,7 @@
 "use client";
 
+import { agentContext, markContextUsed } from "./agent-system/learning-store";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -9,7 +11,24 @@ import { API_MODE_DEFAULT_ENDPOINTS, API_MODE_LABELS, apiModesForRole, discoverA
 import { loadEditorProjectById, persistEditorProject, type EditorProjectClip } from "./lib/editor-project";
 import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/custom-models";
 import { createCanvasFromStudio } from "./lib/production-canvas";
-import { loadLibraryAssets, saveLibraryFile, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
+import { listLibraryAssets, loadLibraryAssets, saveLibraryFile, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
+
+async function archiveGeneratedAsset(url: string, name: string, category: LibraryAssetCategory, duration: number, tags: string[]) {
+  if (!url) return;
+  const archiveKey = `generated:${tags.join(":")}:${name}`.slice(0, 160);
+  const existing = await listLibraryAssets();
+  if (existing.some((item) => item.tags.includes(archiveKey))) return;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`生成资产归档失败（${response.status}）`);
+  const blob = await response.blob();
+  const extension = blob.type.startsWith("image/") ? (blob.type.includes("jpeg") ? "jpg" : "png") : blob.type.startsWith("audio/") ? (blob.type.includes("mpeg") ? "mp3" : "wav") : "mp4";
+  const file = new File([blob], `${name.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120)}.${extension}`, { type: blob.type || (category === "video" ? "video/mp4" : category === "audio" ? "audio/wav" : "image/png") });
+  await saveLibraryFile(file, { category, duration, tags: [...tags, archiveKey] });
+}
+
+function autoArchive(url: string, name: string, category: LibraryAssetCategory, duration: number, tags: string[]) {
+  void archiveGeneratedAsset(url, name, category, duration, tags).catch((error) => console.warn("[manjing asset archive]", error));
+}
 
 type Mode = "community" | "cloud";
 type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "music" | "ready" | "exporting" | "error";
@@ -397,7 +416,37 @@ function closeTruncatedJson(source: string) {
   return repaired;
 }
 
-function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2): Storyboard {
+function sceneCountForDuration(seconds: number) {
+  return Math.max(1, Math.min(8, Math.ceil(Math.max(1, seconds) / 15)));
+}
+
+function normalizeSceneDurations(items: Array<Record<string, unknown>>, targetSeconds: number) {
+  if (!items.length) return [];
+  if (targetSeconds <= 15) return [Math.max(1, Math.round(targetSeconds))];
+  const target = Math.max(items.length, Math.round(targetSeconds));
+  const raw = items.map((item) => Math.max(1, Math.min(15, Number(item.duration) || target / items.length)));
+  const rawTotal = raw.reduce((sum, value) => sum + value, 0) || 1;
+  const durations = raw.map((value) => Math.max(1, Math.min(15, Math.round(value * target / rawTotal))));
+  let delta = target - durations.reduce((sum, value) => sum + value, 0);
+  while (delta !== 0) {
+    let changed = false;
+    for (let index = 0; index < durations.length && delta !== 0; index += 1) {
+      if (delta > 0 && durations[index] < 15) {
+        durations[index] += 1;
+        delta -= 1;
+        changed = true;
+      } else if (delta < 0 && durations[index] > 1) {
+        durations[index] -= 1;
+        delta += 1;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return durations;
+}
+
+function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, maximumScenes = 8): Storyboard {
   const unfenced = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
   const start = unfenced.indexOf("{");
   const end = unfenced.lastIndexOf("}");
@@ -417,8 +466,8 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2):
   }
   const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
   if (sceneSource.length < minimumScenes) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
-  const picked = sceneSource.slice(0, 8) as Array<Record<string, unknown>>;
-  const seconds = Math.max(1, Math.floor(targetSeconds / picked.length));
+  const picked = sceneSource.slice(0, targetSeconds <= 15 ? 1 : Math.max(minimumScenes, Math.min(8, maximumScenes))) as Array<Record<string, unknown>>;
+  const normalizedDurations = normalizeSceneDurations(picked, targetSeconds);
   const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
   const rawCharacters = characterSource.slice(0, 4) as Array<Record<string, unknown>>;
   const characters: CharacterAsset[] = rawCharacters.map((item, index) => ({
@@ -446,7 +495,7 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2):
       emotion: String(item.emotion || item.e || "克制").slice(0, 24),
       sfx: String(item.sfx || item.x || "环境氛围声").slice(0, 80),
       characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
-      duration: Math.max(1, Math.min(15, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
+      duration: normalizedDurations[index],
       status: "queued",
       motion: (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4],
       motionIntensity: 1,
@@ -492,8 +541,7 @@ function mergeReviewedStoryboard(reviewed: Storyboard, previousCast: CharacterAs
 }
 
 function completeFreeStoryboard(partial: Storyboard | null, story: string, visualStyle: string, targetSeconds: number): Storyboard {
-  const count = targetSeconds < 10 ? 2 : targetSeconds > 75 ? 4 : 3;
-  const seconds = Math.max(1, Math.floor(targetSeconds / count));
+  const count = targetSeconds <= 15 ? 1 : partial?.scenes.length || sceneCountForDuration(targetSeconds);
   const premise = story.replace(/\s+/g, " ").slice(0, 140);
   const characters: CharacterAsset[] = partial?.characters.length ? partial.characters : [
     { id: uid(), name: "主角", role: "故事推动者", appearance: `${visualStyle}风格，具有明确五官、固定发型和标志性服装的年轻主角`, voice: "nova", status: "queued" as const },
@@ -506,11 +554,13 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
     { title: "悬念收束", shot: "特写转远景", camera: "拉远并留下空镜", visual: "主角做出第一步选择，但画面边缘出现新的代价或更大秘密，形成下一集钩子", action: "主角伸手触碰关键物件，画面在结果揭晓前切黑，只留下新的异常信号", dialogue: "原来，这才是开始。", emotion: "震惊后坚定", sfx: "心跳、信号声与切黑余响" },
   ];
   const existing = partial?.scenes || [];
+  const durationSources = Array.from({ length: count }, (_, index) => ({ duration: existing[index]?.duration || targetSeconds / count }));
+  const normalizedDurations = normalizeSceneDurations(durationSources, targetSeconds);
   const names = characters.slice(0, 2).map((character) => character.name);
   const scenes: Scene[] = Array.from({ length: count }, (_, index) => {
     const source = existing[index];
     const beat = beats[index];
-    return source ? { ...source, duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds, motion: source.motion || (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4], motionIntensity: source.motionIntensity || 1, transition: source.transition || (index === 0 ? "cut" : "fade"), filter: source.filter || "none", speed: source.speed || 1, volume: source.volume ?? 1, subtitleEnabled: source.subtitleEnabled !== false, subtitlePosition: source.subtitlePosition || "bottom" } : {
+    return source ? { ...source, duration: normalizedDurations[index], motion: source.motion || (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4], motionIntensity: source.motionIntensity || 1, transition: source.transition || (index === 0 ? "cut" : "fade"), filter: source.filter || "none", speed: source.speed || 1, volume: source.volume ?? 1, subtitleEnabled: source.subtitleEnabled !== false, subtitlePosition: source.subtitlePosition || "bottom" } : {
       id: uid(),
       title: beat.title,
       visual: beat.visual,
@@ -522,7 +572,7 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
       emotion: beat.emotion,
       sfx: beat.sfx,
       characters: names,
-      duration: index === count - 1 ? targetSeconds - seconds * (count - 1) : seconds,
+      duration: normalizedDurations[index],
       status: "queued" as SceneStatus,
       motion: (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4],
       motionIntensity: 1,
@@ -1480,6 +1530,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function customApiText(role: "director" | "writer" | "editor", payload: Record<string, unknown>) {
     const config = agentConfigs[role];
+    const learned = agentContext(role).slice(0, 8);
+    const learnedContext = learned.length ? `\n\n以下是用户已审核启用的岗位技能与记忆，请在适用时运用，并避免机械照抄：\n${learned.map((item) => `- [${item.kind === "skill" ? "技能" : "记忆"}] ${item.title}：${item.content}`).join("\n")}` : "";
     if (!CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) throw new Error(`${agentName(role)}不支持当前文本任务`);
     if (!validAgentEndpoint(config.endpoint)) throw new Error(`${agentName(role)}需要填写 HTTPS API 地址或本机 localhost 地址`);
     const response = await fetch("/api/desktop/invoke", {
@@ -1492,7 +1544,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         model: config.model,
         role,
         task: payload.task,
-        system: payload.system,
+        system: `${String(payload.system || "")}${learnedContext}`,
         prompt: payload.prompt,
         payload,
       }),
@@ -1501,11 +1553,31 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const data = await response.json() as { text?: string };
     const text = data.text;
     if (!text) throw new Error(`${agentName(role)}没有返回文本结果`);
+    markContextUsed(learned.map((item) => item.id));
     return text;
   }
 
   async function webhookMedia(role: "image" | "video" | "voice", payload: Record<string, unknown>) {
-    const response = await callAgentWebhook(role, payload);
+    const memoryRole = role === "image" ? "director" : role;
+    const learned = agentContext(memoryRole).slice(0, 8).map((item) => ({ type: item.kind, title: item.title, content: item.content }));
+    const learnedPayload = learned.length ? { ...payload, agentLearning: learned } : payload;
+    if (role === "video" && (/^agnes-video-/i.test(agentConfigs.video.model) || /agnes-ai\.com/i.test(agentConfigs.video.endpoint))) {
+      const response = await fetch("/api/desktop/video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "webhook", endpoint: agentConfigs.video.endpoint, apiKey: agentConfigs.video.apiKey, model: agentConfigs.video.model, ...learnedPayload }),
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      const data = await response.json() as { videoUrl?: string; dataUrl?: string };
+      const remoteUrl = data.videoUrl || data.dataUrl || "";
+      if (!remoteUrl) throw new Error("Agnes did not return a playable video URL");
+      const mediaResponse = await fetch(remoteUrl);
+      if (!mediaResponse.ok) throw new Error("Agnes generated the video, but the download failed");
+      const blob = await mediaResponse.blob();
+      if (!blob.type.startsWith("video/")) throw new Error("Agnes returned a non-video file");
+      return { url: URL.createObjectURL(blob), blob, remoteUrl: data.videoUrl || "" };
+    }
+    const response = await callAgentWebhook(role, learnedPayload);
     let blob: Blob;
     let remoteUrl = "";
     if ((response.headers.get("content-type") || "").startsWith(role === "image" ? "image/" : role === "video" ? "video/" : "audio/")) {
@@ -1578,25 +1650,28 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   async function generateStoryboard(run: number) {
-    const count = Math.max(3, Math.min(8, Math.ceil(productionDuration / 15)));
+    const minimumCount = sceneCountForDuration(productionDuration);
+    const maximumCount = productionDuration <= 15 ? 1 : Math.min(8, minimumCount + 3);
     const config = agentConfigs.writer;
     const sourceText = scriptImported ? `这是用户已经完成并锁定的剧本。不得改写剧情、人物关系或结局，只把原剧本结构化拆成分镜：\n${story.trim()}` : story.trim();
     if (config.adapter === "horde") {
-      const task = await startHorde("story", { story: sourceText, style, count: Math.min(4, count), role: "writer", model: config.model });
+      const task = await startHorde("story", { story: `${sourceText}\n\n${productionDuration <= 15 ? `目标只有 ${productionDuration} 秒，必须设计为一个连续完整镜头，不得拆镜。` : `请分析剧情节拍、场景变化、视角变化和动作复杂度，自主决定 ${minimumCount}–${maximumCount} 个镜头，并为每镜独立决定不同或相同的合理时长；不得机械平均。`} 每镜最多15秒，总时长必须等于目标时长。`, style, count: maximumCount, role: "writer", model: config.model });
       const result = await pollHorde("text", task.id, run);
       return String(result.text || "");
     }
-    const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。" : "把故事改编为可拍摄短剧。"}输出恰好 ${count} 个连续镜头，只返回 JSON，所有内容使用简体中文。先建立最多 4 个固定角色，再写分镜和生成提示词。结构：{"title":"标题","music":"无歌词配乐描述","characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观跨镜头必须一致；每镜都要推动剧情，结尾形成钩子。`;
+    const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。" : "把故事改编为可拍摄短剧。"}${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，必须设计为一个连续完整镜头，禁止拆成多个镜头。` : `先分析剧情 Beat、场景/时空变化、视角变化、动作复杂度和情绪节奏，自主决定 ${minimumCount}–${maximumCount} 个镜头。每个镜头的时长由叙事需要独立决定，可以相同也可以不同，禁止机械平均；重要动作和情绪可更长，转场与反应可更短。`}每镜不得超过15秒，总时长必须精确等于目标时长。只返回 JSON，所有内容使用简体中文。结构：{"title":"标题","music":"无歌词配乐描述","shotPlan":{"count":镜头数,"reason":"拆镜或不拆镜的简短理由"},"characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观跨镜头必须一致；每镜都要推动剧情。`;
     const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n${scriptImported ? "用户定稿剧本" : "故事"}：${story.trim()}`;
-    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("writer", { task: "storyboard", system, prompt: user, count, duration: productionDuration });
+    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("writer", { task: "storyboard", system, prompt: user, minimumCount, maximumCount, duration: productionDuration });
     return pollinationsText("writer", system, user);
   }
 
   async function directorReview(draft: string, run: number) {
     const config = agentConfigs.director;
+    const minimumCount = sceneCountForDuration(productionDuration);
+    const maximumCount = productionDuration <= 15 ? 1 : Math.min(8, minimumCount + 3);
     setStatusText(`${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
     if (config.adapter === "horde") {
-      const task = await startHorde("director", { story: story.trim(), style, draft, count: Math.max(3, Math.min(4, Math.ceil(productionDuration / 30))), model: config.model });
+      const task = await startHorde("director", { story: story.trim(), style, draft, count: maximumCount, minCount: minimumCount, model: config.model });
       const result = await pollHorde("text", task.id, run, {
         maxAttempts: 6,
         timeoutMessage: "导演复核排队超时",
@@ -1607,7 +1682,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       return String(result.text || draft);
     }
-    const system = "你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜，修复格式、人物一致性、时长、节奏和结尾钩子。保留同一 JSON 结构，只返回修订后的完整 JSON，不要解释。";
+    const system = `你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜。${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，最终必须只有一个连续完整镜头，发现拆镜必须合并。` : `根据剧情 Beat、场景变化、视角必要性、动作复杂度和情绪节奏，独立决定 ${minimumCount}–${maximumCount} 镜，并逐镜决定时长；可以相同也可以不同，但禁止机械平均。`}单镜不得超过15秒，总时长必须精确等于目标时长。更新 shotPlan.count 与 shotPlan.reason，修复人物一致性和节奏后，只返回完整 JSON，不要解释。`;
     const user = `原故事：${story.trim()}\n视觉风格：${style}\n编剧初稿：${draft}`;
     if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("director", { task: "review_storyboard", system, prompt: user, draft });
     return pollinationsText("director", system, user);
@@ -2147,7 +2222,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generateAll() {
     if (story.trim().length < 8 || !["idle", "ready", "error"].includes(phase)) return;
-    const hasLockedStoryboard = scenes.length > 0;
+    const existingDuration = scenes.reduce((sum, scene) => sum + scene.duration, 0);
+    const hasLockedStoryboard = scenes.length > 0
+      && Math.abs(existingDuration - productionDuration) < 0.5
+      && (productionDuration > 15 || scenes.length === 1);
     const roleNeeded = (role: AgentRole) => {
       if (role === "writer" || role === "director") return !hasLockedStoryboard;
       if (role === "image") return !hasLockedStoryboard || characters.some((item) => !item.imageUrl) || scenes.some((item) => !item.imageUrl && !item.videoUrl);
@@ -2199,7 +2277,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         recordActivity("director", `${agentName("director")}开始复核节奏、角色一致性和结尾钩子`);
         try {
           const reviewed = await directorReview(raw, run);
-          parseStoryboard(reviewed, productionDuration);
+          parseStoryboard(reviewed, productionDuration, sceneCountForDuration(productionDuration), 8);
           raw = reviewed;
           recordActivity("director", "导演复核通过，已锁定制作稿", "done");
         } catch (reason) {
@@ -2211,11 +2289,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }
         setProgress(15);
         try {
-          storyboard = parseStoryboard(raw, productionDuration);
+          storyboard = parseStoryboard(raw, productionDuration, sceneCountForDuration(productionDuration), 8);
         } catch (reason) {
           if (agentConfigs.writer.adapter !== "horde") throw reason;
           let partial: Storyboard | null = null;
-          try { partial = parseStoryboard(raw, productionDuration, 1); } catch { partial = null; }
+          try { partial = parseStoryboard(raw, productionDuration, sceneCountForDuration(productionDuration), 8); } catch { partial = null; }
           setStatusText("免费编剧输出不完整，漫镜正在自动补全分镜");
           storyboard = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
           recordActivity("writer", "免费输出被截断，漫镜已补齐缺失镜头", "warning");
@@ -2250,10 +2328,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : assetUploadKey ? await uploadPollinationsMedia(asset.blob, `character-${index + 1}.png`, assetUploadKey) : "";
           cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
+          autoArchive(asset.url, `${projectTitle}-${character.name}-角色设定`, "character", 5, ["自动生成", "人物", character.id]);
         } else {
           const referenceScene: Scene = { id: uid(), title: character.name, visual: characterPrompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
           const imageUrl = await makeImage(referenceScene, 50 + index, run, "", "16:9", characterPrompt);
           cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
+          autoArchive(imageUrl, `${projectTitle}-${character.name}-角色设定`, "character", 5, ["自动生成", "人物", character.id]);
         }
         generatedCharacters += 1;
         setCharacters(cast);
@@ -2282,6 +2362,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const frameUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : frameUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`, frameUploadKey) : "";
           work = work.map((item) => item.id === scene.id ? { ...item, imageUrl: frame.url, remoteImageUrl, status: "ready" as SceneStatus } : item);
+          autoArchive(frame.url, `${projectTitle}-${scene.title}-分镜`, "scene", scene.duration, ["自动生成", "分镜", scene.id]);
         } else {
           const imageUrl = await makeImage(scene, index, run, characterGuide);
           work = work.map((item) => (item.id === scene.id ? { ...item, imageUrl, status: "ready" as SceneStatus } : item));
@@ -2311,7 +2392,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setScenes(work);
           const motionPrompt = `${motionVisualPrompt(style)}, preserve the exact character identity, face, hair and costume from the start frame. ${scene.action}. Camera: ${scene.camera}. ${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement. One continuous cinematic shot, coherent physics, no subtitles, no cuts.`;
           const clip = await pollinationsMedia("video", motionPrompt, index, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
-          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(10, scene.duration)), status: "ready" as SceneStatus } : item);
+          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus } : item);
+          autoArchive(clip.url, `${projectTitle}-${scene.title}-视频`, "video", Math.max(4, Math.min(15, scene.duration)), ["自动生成", "视频", scene.id]);
           generatedClips += 1;
           setScenes(work);
           setProgress(44 + Math.round(((index + 1) / work.length) * 26));
@@ -2338,6 +2420,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const speech = await pollinationsMedia("audio", scene.dialogue, index, { voiceName: castVoice });
           const audioSeconds = await mediaDuration(speech.url);
           work = work.map((item) => item.id === scene.id ? { ...item, audioUrl: speech.url, duration: Math.max(item.duration, Math.ceil(audioSeconds + 0.6)), status: "ready" as SceneStatus } : item);
+          autoArchive(speech.url, `${projectTitle}-${scene.title}-配音`, "audio", audioSeconds, ["自动生成", "配音", scene.id]);
           generatedVoices += 1;
           setScenes(work);
           setProgress(70 + Math.round(((index + 1) / work.length) * 13));
@@ -2367,6 +2450,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               if (lipVideo) {
                 if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
                 work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: lipVideo, status: "ready" as SceneStatus, model: "MuseTalk 1.5" } : item);
+                autoArchive(lipVideo, `${projectTitle}-${scene.title}-口型视频`, "video", scene.duration, ["自动生成", "口型", scene.id]);
                 setScenes(work);
               }
             }
@@ -2452,11 +2536,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const raw = await generateStoryboard(run);
         let next: Storyboard;
         try {
-          next = parseStoryboard(raw, productionDuration);
+          next = parseStoryboard(raw, productionDuration, sceneCountForDuration(productionDuration), 8);
         } catch (reason) {
           if (agentConfigs.writer.adapter !== "horde") throw reason;
           let partial: Storyboard | null = null;
-          try { partial = parseStoryboard(raw, productionDuration, 1); } catch { partial = null; }
+          try { partial = parseStoryboard(raw, productionDuration, sceneCountForDuration(productionDuration), 8); } catch { partial = null; }
           next = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
         }
         invalidateExport();
@@ -2479,7 +2563,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setProgress(Math.max(10, progress));
         setStatusText("导演 AI 正在重新复核当前剧本与分镜");
         const reviewedRaw = await directorReview(storyboardDraft(projectTitle, musicPrompt, characters, scenes), run);
-        const reviewed = mergeReviewedStoryboard(parseStoryboard(reviewedRaw, productionDuration), characters, scenes);
+        const reviewed = mergeReviewedStoryboard(parseStoryboard(reviewedRaw, productionDuration, sceneCountForDuration(productionDuration), 8), characters, scenes);
         invalidateExport();
         setProjectTitle(reviewed.title);
         setMusicPrompt(reviewed.music);
@@ -2508,6 +2592,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
             const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-retry-${targetIndex + 1}.png`, uploadKey) : "";
             cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
+            autoArchive(asset.url, `${projectTitle}-${character.name}-角色设定`, "character", 5, ["自动生成", "人物", character.id]);
           } else {
             const referenceScene: Scene = { id: uid(), title: character.name, visual: prompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
             const imageUrl = await makeImage(referenceScene, 50 + targetIndex, run, "", "16:9", prompt);
@@ -2534,6 +2619,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             if (scene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.imageUrl);
             if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
             work = work.map((item) => item.id === scene.id ? { ...item, imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" as SceneStatus } : item);
+            autoArchive(frame.url, `${projectTitle}-${scene.title}-分镜`, "scene", scene.duration, ["自动生成", "分镜", scene.id]);
           } else {
             const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
             const imageUrl = await makeImage(scene, sceneIndex, run, characterGuide);
@@ -2575,7 +2661,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const prompt = `${motionVisualPrompt(style)}, preserve exact character identity, face, hair and costume from the start frame. ${scene.action}. Camera: ${scene.camera}. ${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement. One continuous cinematic shot, coherent physics, no subtitles, no cuts.`;
           const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
           if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
-          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(10, scene.duration)), status: "ready" as SceneStatus } : item);
+          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus } : item);
+          autoArchive(clip.url, `${projectTitle}-${scene.title}-视频`, "video", Math.max(4, Math.min(15, scene.duration)), ["自动生成", "视频", scene.id]);
           setScenes(work);
           setProgress(44 + Math.round(((targetIndex + 1) / targets.length) * 26));
         }
@@ -2613,6 +2700,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const audioSeconds = await mediaDuration(speech.url);
           if (scene.audioUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.audioUrl);
           work = work.map((item) => item.id === scene.id ? { ...item, audioUrl: speech.url, duration: Math.max(item.duration, Math.ceil(audioSeconds + 0.6)), status: "ready" as SceneStatus } : item);
+          autoArchive(speech.url, `${projectTitle}-${scene.title}-配音`, "audio", audioSeconds, ["自动生成", "配音", scene.id]);
           setScenes(work);
           setProgress(70 + Math.round(((targetIndex + 1) / targets.length) * 13));
         }
@@ -2680,6 +2768,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const revisionUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : revisionUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}-revision.png`, revisionUploadKey) : "";
         updateScene(scene.id, { imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" });
+        autoArchive(frame.url, `${projectTitle}-${scene.title}-分镜`, "scene", scene.duration, ["自动生成", "分镜", scene.id]);
       } else {
         const characterGuide = characters.filter((character) => scene.characters.includes(character.name)).map((character) => `${character.name}: ${character.appearance}`).join("; ");
         const imageUrl = await makeImage(scene, index, run, characterGuide);
@@ -2728,7 +2817,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     try {
       const clip = await pollinationsMedia("video", `${motionVisualPrompt(style)}, preserve exact character identity and costume. ${scene.action}. Camera: ${scene.camera}. Natural expressions and coherent motion, one continuous shot, no text.`, 0, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
       if (scene.videoUrl) URL.revokeObjectURL(scene.videoUrl);
-      updateScene(scene.id, { videoUrl: clip.url, status: "ready", duration: Math.max(4, Math.min(10, scene.duration)) });
+      updateScene(scene.id, { videoUrl: clip.url, status: "ready", duration: Math.max(4, Math.min(15, scene.duration)) });
+      autoArchive(clip.url, `${projectTitle}-${scene.title}-视频`, "video", Math.max(4, Math.min(15, scene.duration)), ["自动生成", "视频", scene.id]);
       recordActivity("video", `“${scene.title}”的原生动态镜头已交付`, "done");
     } catch (reason) {
       updateScene(scene.id, { status: "error" });

@@ -8,5 +8,9 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+  protobufjs: set this to true or false
   sharp: true
   workerd: true
+
+minimumReleaseAgeExclude:
+  - mammoth@1.12.1

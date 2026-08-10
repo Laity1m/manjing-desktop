@@ -1,6 +1,6 @@
 {
   "name": "manjing-desktop",
-  "version": "1.4.2",
+  "version": "1.4.5",
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "description": "漫镜 AI 漫剧工作室 Windows 原生直载安装版",
@@ -24,7 +24,7 @@
   "build": {
     "appId": "com.manjing.desktop",
     "productName": "漫镜",
-    "artifactName": "漫镜-独立安装版-${version}-${arch}.${ext}",
+    "artifactName": "漫镜-1.4.5-Agnes强制去重与一镜直出版-${arch}.${ext}",
     "asar": true,
     "compression": "maximum",
     "directories": {

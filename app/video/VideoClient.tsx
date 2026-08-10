@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import SiteNav from "../components/SiteNav";
+import { saveLibraryFile } from "../lib/asset-library";
 import {
   activateEditorProject,
   listEditorProjects,
@@ -630,6 +631,22 @@ export default function VideoClient() {
         sourceUrl,
       });
     }
+    if (/^agnes-video-/i.test(config.model) || /agnes-ai\.com/i.test(config.endpoint)) {
+      setStatus("Agnes 已创建异步任务，正在等待视频生成");
+      const response = await fetch("/api/desktop/video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "webhook", endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, prompt: promptText, negativePrompt, duration, aspect, resolution, references: payloadRefs.map((item) => ({ ...item, url: item.sourceUrl })) }),
+      });
+      if (!response.ok) {
+        const raw = await response.json().catch(() => ({}));
+        throw new Error((raw as { error?: string }).error || `Agnes 请求失败（${response.status}）`);
+      }
+      const data = await response.json() as { videoUrl?: string; dataUrl?: string };
+      const url = data.videoUrl || data.dataUrl;
+      if (!url) throw new Error("Agnes 任务完成但没有返回视频地址");
+      return url;
+    }
     const response = await fetch(config.endpoint, {
       method: "POST",
       headers: {
@@ -762,6 +779,16 @@ export default function VideoClient() {
         hasVoice: voiceEnabled,
       }),
     });
+    try {
+      const archivedResponse = await fetch(sourceUrl);
+      if (archivedResponse.ok) {
+        const archivedBlob = await archivedResponse.blob();
+        const archivedFile = new File([archivedBlob], `${name || "AI视频"}-${Date.now()}.mp4`, { type: archivedBlob.type || "video/mp4" });
+        await saveLibraryFile(archivedFile, { category: "video", duration, tags: ["自动生成", "AI视频", config.model] });
+      }
+    } catch (archiveError) {
+      console.warn("[manjing video archive]", archiveError);
+    }
     setResult({
       projectId,
       createdAt: saved.createdAt || new Date().toISOString(),
@@ -772,7 +799,7 @@ export default function VideoClient() {
       voiceEnabled,
     });
     await refreshHistory();
-    setStatus("已保存到项目");
+    setStatus("已保存到项目和资产库");
     setProgress(100);
   };
 
@@ -1359,4 +1386,3 @@ export default function VideoClient() {
     </main>
   );
 }
-

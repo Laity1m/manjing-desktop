@@ -2,7 +2,10 @@
 
 const NAV_ITEMS = [
   { href: "/", label: "首页", id: "home" },
+  { href: "/chat", label: "聊天区", id: "chat" },
   { href: "/studio", label: "AI 工作台", id: "studio" },
+  { href: "/skills", label: "技能与记忆", id: "skills" },
+  { href: "/learning", label: "学习中心", id: "learning" },
   { href: "/video", label: "AI 视频", id: "video" },
   { href: "/canvas", label: "画布", id: "canvas" },
   { href: "/editor", label: "编辑器", id: "editor" },
@@ -28,8 +31,8 @@ export default function SiteNav({ current }: { current: string }) {
           </Link>
         ))}
       </div>
-      <Link className="global-start" href={current === "video" ? "/video" : "/studio"}>
-        开始使用
+      <Link className="global-start" href={current === "chat" ? "/chat" : "/studio"}>
+        {current === "chat" ? "继续聊天" : "进入工作区"}
       </Link>
     </nav>
   );

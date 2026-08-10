@@ -396,7 +396,79 @@ async function invokeImageModel(input, fetchImpl = fetch) {
   return { dataUrl: `data:${contentType};base64,${bytes.toString("base64")}` };
 }
 
+function parseMcpPayload(text, contentType) {
+  if (contentType.includes("text/event-stream")) {
+    const messages = text.split(/\r?\n/).filter((line) => line.startsWith("data:"));
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      try { return JSON.parse(messages[index].slice(5).trim()); } catch {}
+    }
+  }
+  try { return text ? JSON.parse(text) : {}; } catch { throw Object.assign(new Error("MCP 返回了无法解析的数据"), { statusCode: 502 }); }
+}
+
+async function mcpRequest(endpoint, apiKey, payload, sessionId = "", fetchImpl = fetch) {
+  const headers = {
+    "Accept": "application/json, text/event-stream",
+    "Content-Type": "application/json",
+    ...(apiKey ? { Authorization: /^Bearer\s/i.test(apiKey) ? apiKey : `Bearer ${apiKey}` } : {}),
+    ...(sessionId ? { "Mcp-Session-Id": sessionId } : {})
+  };
+  const { response } = await fetchProviderResponse(endpoint, { method: "POST", headers, body: JSON.stringify(payload) }, fetchImpl, { timeoutMs: 90000, maxAttempts: 2, retryLabel: "MCP" });
+  const text = await response.text();
+  if (!response.ok) throw Object.assign(new Error(`MCP 返回 ${response.status}：${text.slice(0, 300)}`), { statusCode: 502 });
+  return { data: parseMcpPayload(text, response.headers.get("content-type") || ""), sessionId: response.headers.get("mcp-session-id") || sessionId };
+}
+
+function mcpResults(result) {
+  const content = result?.content || result?.structuredContent || result;
+  if (Array.isArray(content)) return content.map((item) => {
+    if (item?.type === "text" && typeof item.text === "string") {
+      try { return JSON.parse(item.text); } catch { return { text: item.text }; }
+    }
+    return item;
+  }).flatMap((item) => Array.isArray(item) ? item : [item]);
+  return Array.isArray(content?.results) ? content.results : [content];
+}
+
+async function invokeMcp(input, fetchImpl = fetch) {
+  const endpoint = validRemoteUrl(String(input?.endpoint || "").trim());
+  if (!endpoint) throw Object.assign(new Error("MCP 需要填写 HTTPS 地址或本机 localhost 地址"), { statusCode: 400 });
+  const apiKey = String(input?.apiKey || "").trim();
+  let sessionId = "";
+  const initialized = await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "manjing-desktop", version: "1.4.5" } } }, sessionId, fetchImpl);
+  sessionId = initialized.sessionId;
+  try { await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId, fetchImpl); } catch {}
+  const listed = await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId, fetchImpl);
+  const tools = Array.isArray(listed.data?.result?.tools) ? listed.data.result.tools : [];
+  if (input?.action === "tools") return { tools: tools.map((tool) => ({ name: tool.name, description: tool.description || "", inputSchema: tool.inputSchema || {} })) };
+  const requested = String(input?.tool || "");
+  const selected = tools.find((item) => item.name === requested) || tools.find((item) => /search|query|find|discover/i.test(`${item.name} ${item.description || ""}`)) || tools[0];
+  if (!selected) throw Object.assign(new Error("该 MCP 没有提供可调用工具"), { statusCode: 502 });
+  const properties = selected.inputSchema?.properties || {};
+  const queryKey = ["query", "q", "keyword", "keywords", "search", "prompt", "text"].find((key) => Object.prototype.hasOwnProperty.call(properties, key)) || "query";
+  const args = { [queryKey]: String(input?.query || "").slice(0, 1000) };
+  const called = await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: selected.name, arguments: args } }, sessionId, fetchImpl);
+  if (called.data?.error) throw Object.assign(new Error(String(called.data.error.message || "MCP 工具调用失败")), { statusCode: 502 });
+  return { tool: selected.name, results: mcpResults(called.data?.result) };
+}
+
 const generatedVideoCache = new Map();
+const recentAgnesVideoHashes = new Map();
+
+async function rememberAgnesVideoHash(digest) {
+  const historyFile = path.join(process.env.TEMP || process.env.TMP || process.cwd(), "manjing-agnes-video-hashes.json");
+  const now = Date.now();
+  let persisted = {};
+  try { persisted = JSON.parse(await fs.promises.readFile(historyFile, "utf8")); } catch { persisted = {}; }
+  for (const [hash, createdAt] of Object.entries(persisted)) {
+    if (now - Number(createdAt) < 24 * 60 * 60 * 1000) recentAgnesVideoHashes.set(hash, Number(createdAt));
+  }
+  const duplicate = recentAgnesVideoHashes.has(digest);
+  recentAgnesVideoHashes.set(digest, now);
+  const compact = Object.fromEntries([...recentAgnesVideoHashes.entries()].filter(([, createdAt]) => now - createdAt < 24 * 60 * 60 * 1000).slice(-40));
+  await fs.promises.writeFile(historyFile, JSON.stringify(compact), "utf8").catch(() => {});
+  return duplicate;
+}
 
 async function cacheGeneratedVideo(bytes, contentType) {
   const now = Date.now();
@@ -450,17 +522,26 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
     createUrl.search = "";
     const landscape = input?.aspect === "16:9";
     const duration = Math.max(4, Math.min(15, Number(input?.duration) || 5));
+    const agnesSeed = Number.isInteger(input?._agnesSeed) ? input._agnesSeed : Math.floor(Math.random() * 2147483646) + 1;
+    const publicImage = references.find((item) => item.kind === "image" && /^https:\/\//i.test(item.url))?.url || "";
+    const cameraVariants = ["slow lateral tracking with a gentle push-in", "low-angle arc movement with layered parallax", "handheld follow movement with a deliberate final hold", "wide establishing move transitioning into a close emotional frame"];
+    const motionVariants = ["begin still, accelerate through the main action, then settle", "use asymmetric subject movement and visible environmental response", "stage the action from foreground to background with natural secondary motion", "build motion in two distinct beats without repeating gestures"];
+    const variedPrompt = `${prompt}\nCamera execution: ${cameraVariants[agnesSeed % cameraVariants.length]}. Motion execution: ${motionVariants[Math.floor(agnesSeed / 7) % motionVariants.length]}. Create a genuinely new take with a different motion path and timing; do not reuse a prior rendered clip. Variation ${agnesSeed}.`;
+    const agnesPayload = {
+      model: model || "agnes-video-v2.0",
+      prompt: variedPrompt,
+      width: landscape ? 1152 : 768,
+      height: landscape ? 768 : 1152,
+      num_frames: Math.max(97, Math.min(361, Math.round(duration * 3) * 8 + 1)),
+      frame_rate: 24,
+      seed: agnesSeed,
+      negative_prompt: String(input?.negativePrompt || "duplicate motion, frozen frame, repeated action, text, watermark").slice(0, 1200),
+      ...(publicImage ? { image: publicImage, mode: "ti2vid" } : {})
+    };
     const created = await fetchProviderJson(createUrl, {
       method: "POST",
       headers: providerHeaders("webhook", apiKey, true),
-      body: JSON.stringify({
-        model: model || "agnes-video-v2.0",
-        prompt,
-        width: landscape ? 1152 : 768,
-        height: landscape ? 768 : 1152,
-        num_frames: Math.max(97, Math.min(361, Math.round(duration * 24) + 1)),
-        frame_rate: 24
-      })
+      body: JSON.stringify(agnesPayload)
     }, fetchImpl, { timeoutMs: 60000, maxAttempts: 1, retryLabel: "Agnes create video" });
     const videoId = String(created?.video_id || created?.data?.video_id || created?.id || created?.data?.id || "").trim();
     if (!videoId) throw Object.assign(new Error("Agnes response did not include video_id. Use model agnes-video-v2.0"), { statusCode: 502 });
@@ -479,7 +560,7 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
       const status = String(statusData?.status || statusData?.data?.status || statusData?.state || "").toLowerCase();
       const errorText = statusData?.error?.message || statusData?.error || statusData?.message;
       if (["failed", "error", "cancelled", "canceled"].includes(status)) throw Object.assign(new Error(`Agnes video failed: ${String(errorText || status).slice(0, 260)}`), { statusCode: 502 });
-      const candidates = [statusData?.video_url, statusData?.videoUrl, statusData?.url, statusData?.output?.video_url, statusData?.output?.url, statusData?.data?.video_url, statusData?.data?.videoUrl, statusData?.data?.url, statusData?.remixed_from_video_id];
+      const candidates = [statusData?.metadata?.url, statusData?.video_url, statusData?.videoUrl, statusData?.url, statusData?.output?.video_url, statusData?.output?.url, statusData?.data?.metadata?.url, statusData?.data?.video_url, statusData?.data?.videoUrl, statusData?.data?.url];
       const videoUrl = candidates.find((value) => typeof value === "string" && /^(?:https?:\/\/|data:video\/)/i.test(value.trim()));
       if (videoUrl) {
         const resolvedVideoUrl = String(videoUrl).trim();
@@ -508,6 +589,12 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
         const mediaBytes = Buffer.from(await mediaResponse.arrayBuffer());
         if (!mediaBytes.byteLength) throw Object.assign(new Error("Agnes 返回了空的视频文件"), { statusCode: 502 });
         if (mediaBytes.byteLength > 256 * 1024 * 1024) throw Object.assign(new Error("Agnes 成片超过 256MB，暂时无法载入工作台"), { statusCode: 413 });
+        const digest = require("node:crypto").createHash("sha256").update(mediaBytes).digest("hex");
+        const duplicate = await rememberAgnesVideoHash(digest);
+        if (duplicate) {
+          if (!input?._agnesDuplicateRetry) return invokeVideoModel({ ...input, _agnesDuplicateRetry: true, _agnesSeed: Math.floor(Math.random() * 2147483646) + 1 }, fetchImpl);
+          throw Object.assign(new Error("Agnes 连续两次返回完全相同的视频文件，漫镜已拒绝把重复成片写入资产库；请稍后重试该镜头"), { statusCode: 502 });
+        }
         const safeMediaType = mediaType.startsWith("video/") ? mediaType : "video/mp4";
         const localVideoUrl = await cacheGeneratedVideo(mediaBytes, safeMediaType);
         return { videoUrl: localVideoUrl, remoteUrl: resolvedVideoUrl };
@@ -796,6 +883,7 @@ async function desktopApiResponse(request, url, dataRoot) {
     if (request.method !== "POST") return jsonResponse({ error: "只支持 GET 或 POST 请求" }, 405);
     const input = await readJsonRequest(request);
     if (url.pathname === "/api/desktop/models") return jsonResponse(await discoverRemoteModels(input));
+    if (url.pathname === "/api/desktop/mcp") return jsonResponse(await invokeMcp(input));
     if (url.pathname === "/api/desktop/invoke") return jsonResponse(await invokeTextModel(input));
     if (url.pathname === "/api/desktop/image") return jsonResponse(await invokeImageModel(input));
     if (url.pathname === "/api/desktop/video") return jsonResponse(await invokeVideoModel(input));
@@ -889,4 +977,4 @@ async function createDesktopRuntime(options = {}) {
   };
 }
 
-module.exports = { createDesktopRuntime, discoverRemoteModels, invokeTextModel, invokeImageModel, invokeVideoModel, invokeSeedance, downloadSeedanceMedia, volcengineSdkStatus, modelsFromPayload, readDesktopSettings, writeDesktopSettings };
+module.exports = { createDesktopRuntime, discoverRemoteModels, invokeTextModel, invokeImageModel, invokeVideoModel, invokeMcp, invokeSeedance, downloadSeedanceMedia, volcengineSdkStatus, modelsFromPayload, readDesktopSettings, writeDesktopSettings };
