@@ -35,9 +35,13 @@ export default function StudioProjectBinding() {
 
   function bindProject() {
     if (!project || !episode) { setMessage("请先选择项目和剧集"); return; }
-    activateSeriesEpisode(project, episode);
-    setMessage(`正在同步“${project.name}”第 ${episode.number} 集…`);
-    window.setTimeout(() => window.location.reload(), 80);
+    try {
+      const context = activateSeriesEpisode(project, episode);
+      window.dispatchEvent(new CustomEvent("manjing-series-context-changed", { detail: context }));
+      setMessage(`已绑定“${project.name}”第 ${episode.number} 集，工作台内容和资产归属已同步`);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? `绑定失败：${reason.message}` : "绑定失败，请重试");
+    }
   }
 
   return <section className="studio-project-binding" aria-label="当前项目与剧集">

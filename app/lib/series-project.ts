@@ -157,9 +157,9 @@ export function activateSeriesEpisode(project: SeriesProject, episode: SeriesEpi
   const context = { projectId: project.id, projectName: project.name, episodeId: episode.id, episodeNumber: episode.number, episodeTitle: episode.title, context: buildEpisodeContext(project, episode), activatedAt: new Date().toISOString() };
   const compactContext = { projectId: context.projectId, projectName: context.projectName, episodeId: context.episodeId, episodeNumber: context.episodeNumber, episodeTitle: context.episodeTitle, activatedAt: context.activatedAt };
   sessionStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(context));
-  localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(compactContext));
+  try { localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(compactContext)); } catch { /* Session context remains authoritative for this production run. */ }
   try { localStorage.setItem("manjing-text-draft", context.context); } catch { sessionStorage.setItem("manjing-text-draft", context.context); }
-  localStorage.setItem("manjing-new-studio", "1");
+  try { localStorage.setItem("manjing-new-studio", "1"); } catch { /* Optional navigation hint. */ }
   localStorage.removeItem("manjing-studio-open-project");
   const workspace = (() => { try { return JSON.parse(localStorage.getItem("manjing-workspace") || "{}"); } catch { return {}; } })();
   try { localStorage.setItem("manjing-workspace", JSON.stringify({ ...workspace, projectTitle: `${project.name} · 第 ${episode.number} 集`, scriptImported: true })); } catch { /* Studio consumes the full session handoff. */ }

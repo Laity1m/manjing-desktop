@@ -1011,6 +1011,27 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }, [agentTeamLoaded]);
 
   useEffect(() => {
+    const synchronizeSeriesContext = (event: Event) => {
+      const context = (event as CustomEvent<{ projectId: string; projectName: string; episodeId: string; episodeNumber: number; context: string }>).detail;
+      if (!context?.projectId || !context?.episodeId || !context.context) return;
+      setProjectTitle(`${context.projectName || "系列项目"} · 第 ${context.episodeNumber || 1} 集`);
+      setStory(context.context);
+      setScriptImported(true);
+      setCharacters([]);
+      setScenes([]);
+      setSelected(0);
+      setPhase("idle");
+      setProgress(0);
+      setError("");
+      setStatusText(`已切换到“${context.projectName || "系列项目"}”第 ${context.episodeNumber || 1} 集，项目记忆与资产归属已同步`);
+      try { window.localStorage.setItem("manjing-text-draft", context.context); } catch { window.sessionStorage.setItem("manjing-text-draft", context.context); }
+      recordActivity("director", `已在工作台切换至第 ${context.episodeNumber || 1} 集`, "done");
+    };
+    window.addEventListener("manjing-series-context-changed", synchronizeSeriesContext);
+    return () => window.removeEventListener("manjing-series-context-changed", synchronizeSeriesContext);
+  }, []);
+
+  useEffect(() => {
     if (!agentTeamLoaded) return;
     const raw = window.localStorage.getItem("manjing-studio-library-import");
     if (!raw) return;

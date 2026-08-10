@@ -323,7 +323,18 @@ function createWindow() {
             const context = JSON.parse(sessionStorage.getItem("manjing-active-series-context-v1") || "null");
             return { ok: Boolean(context?.projectId && context?.episodeId && (document.querySelector("#story")?.value || "").trim()), title: document.querySelector(".workbench-project-title")?.value || "" };
           })()`);
-          if (!synchronized?.ok) throw new Error(`Series episode did not synchronize to studio: ${JSON.stringify(synchronized)}`);          if (smokeTimer) clearTimeout(smokeTimer);
+          if (!synchronized?.ok) throw new Error(`Series episode did not synchronize to studio: ${JSON.stringify(synchronized)}`);
+          const rebound = await mainWindow.webContents.executeJavaScript(`(async () => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            for (let attempt = 0; attempt < 50 && !document.querySelector(".studio-project-binding button"); attempt += 1) await wait(100);
+            const button = document.querySelector(".studio-project-binding button");
+            if (!button || button.disabled) return { ok: false, step: "binding-button" };
+            button.click();
+            await wait(600);
+            return { ok: location.pathname === "/studio" && !button.disabled && Boolean(document.querySelector("#story")?.value.trim()), message: document.querySelector(".binding-summary small")?.textContent || "" };
+          })()`);
+          if (!rebound?.ok) throw new Error(`Direct studio binding failed: ${JSON.stringify(rebound)}`);
+          if (smokeTimer) clearTimeout(smokeTimer);
           console.log("MANJING_PROJECT_WORKFLOW_OK");
           setTimeout(() => app.exit(0), 250);
         } catch (error) {
