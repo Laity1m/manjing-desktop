@@ -396,6 +396,24 @@ async function invokeImageModel(input, fetchImpl = fetch) {
   return { dataUrl: `data:${contentType};base64,${bytes.toString("base64")}` };
 }
 
+const generatedVideoCache = new Map();
+
+async function cacheGeneratedVideo(bytes, contentType) {
+  const now = Date.now();
+  const cacheRoot = path.join(process.env.TEMP || process.env.TMP || process.cwd(), "manjing-video-cache");
+  await fs.promises.mkdir(cacheRoot, { recursive: true });
+  for (const [id, item] of generatedVideoCache) {
+    if (now - item.createdAt < 2 * 60 * 60 * 1000 && generatedVideoCache.size < 12) continue;
+    generatedVideoCache.delete(id);
+    fs.promises.unlink(item.filePath).catch(() => {});
+  }
+  const id = `${now.toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  const filePath = path.join(cacheRoot, `${id}.mp4`);
+  await fs.promises.writeFile(filePath, bytes);
+  generatedVideoCache.set(id, { filePath, contentType, createdAt: now });
+  return `/api/desktop/video?cacheId=${encodeURIComponent(id)}`;
+}
+
 async function invokeVideoModel(input, fetchImpl = fetch) {
   if (String(input?.mode || "") !== "webhook") throw Object.assign(new Error("当前桌面代理只支持通用 Webhook 视频接口"), { statusCode: 400 });
   const target = validRemoteUrl(String(input?.endpoint || "").trim());
@@ -431,7 +449,7 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
     }
     createUrl.search = "";
     const landscape = input?.aspect === "16:9";
-    const duration = Math.max(4, Math.min(10, Number(input?.duration) || 5));
+    const duration = Math.max(4, Math.min(15, Number(input?.duration) || 5));
     const created = await fetchProviderJson(createUrl, {
       method: "POST",
       headers: providerHeaders("webhook", apiKey, true),
@@ -440,7 +458,7 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
         prompt,
         width: landscape ? 1152 : 768,
         height: landscape ? 768 : 1152,
-        num_frames: Math.max(97, Math.min(241, Math.round(duration * 24) + 1)),
+        num_frames: Math.max(97, Math.min(361, Math.round(duration * 24) + 1)),
         frame_rate: 24
       })
     }, fetchImpl, { timeoutMs: 60000, maxAttempts: 1, retryLabel: "Agnes create video" });
@@ -491,7 +509,8 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
         if (!mediaBytes.byteLength) throw Object.assign(new Error("Agnes 返回了空的视频文件"), { statusCode: 502 });
         if (mediaBytes.byteLength > 256 * 1024 * 1024) throw Object.assign(new Error("Agnes 成片超过 256MB，暂时无法载入工作台"), { statusCode: 413 });
         const safeMediaType = mediaType.startsWith("video/") ? mediaType : "video/mp4";
-        return { dataUrl: `data:${safeMediaType};base64,${mediaBytes.toString("base64")}`, videoUrl: resolvedVideoUrl };
+        const localVideoUrl = await cacheGeneratedVideo(mediaBytes, safeMediaType);
+        return { videoUrl: localVideoUrl, remoteUrl: resolvedVideoUrl };
       }
       if (["completed", "complete", "succeeded", "success", "done"].includes(status)) throw Object.assign(new Error("Agnes completed without a playable video URL"), { statusCode: 502 });
     }
@@ -757,6 +776,20 @@ async function desktopApiResponse(request, url, dataRoot) {
           "Content-Length": String(media.bytes.byteLength),
           "Content-Type": media.contentType,
           "X-Manjing-Desktop": "direct"
+        }
+      });
+    }
+    if (url.pathname === "/api/desktop/video" && request.method === "GET") {
+      const cacheId = String(url.searchParams.get("cacheId") || "");
+      const cached = /^[a-z0-9-]+$/i.test(cacheId) ? generatedVideoCache.get(cacheId) : null;
+      if (!cached || !fs.existsSync(cached.filePath)) return jsonResponse({ error: "本机视频缓存已过期，请重新生成该分镜" }, 404);
+      const bytes = await fs.promises.readFile(cached.filePath);
+      return new Response(bytes, {
+        headers: {
+          "Cache-Control": "private, max-age=7200",
+          "Content-Length": String(bytes.byteLength),
+          "Content-Type": cached.contentType || "video/mp4",
+          "X-Manjing-Desktop": "video-cache"
         }
       });
     }

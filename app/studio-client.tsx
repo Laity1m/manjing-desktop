@@ -446,7 +446,7 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 2):
       emotion: String(item.emotion || item.e || "克制").slice(0, 24),
       sfx: String(item.sfx || item.x || "环境氛围声").slice(0, 80),
       characters: Array.isArray(item.characters) ? item.characters.map(String).slice(0, 4) : Array.isArray(item.c) ? item.c.map(String).slice(0, 4) : [String(item.speaker || item.p || characters[0].name)],
-      duration: Math.max(1, Math.min(30, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
+      duration: Math.max(1, Math.min(15, index === picked.length - 1 ? targetSeconds - seconds * (picked.length - 1) : seconds)),
       status: "queued",
       motion: (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4],
       motionIntensity: 1,
@@ -1862,7 +1862,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (config.adapter === "browser") return work;
     setStatusText(`${agentName("editor")}正在分析镜头节奏和剪辑顺序`);
     const compactScenes = work.map((scene) => ({ id: scene.id, title: scene.title, action: scene.action, dialogue: scene.dialogue, duration: scene.duration }));
-    const system = "你是短视频剪辑师。根据剧情调整镜头顺序和单镜头时长，只返回 JSON：{\"order\":[\"镜头id\"],\"durations\":{\"镜头id\":6}}。不要删除镜头；每镜 2–30 秒；总时长尽量接近目标。";
+    const system = "你是短视频剪辑师。根据剧情调整镜头顺序和单镜头时长，只返回 JSON：{\"order\":[\"镜头id\"],\"durations\":{\"镜头id\":6}}。不要删除镜头；每镜 2–15 秒；长内容必须拆成多个分镜；总时长尽量接近目标。";
     const prompt = `目标时长：${productionDuration} 秒\n镜头：${JSON.stringify(compactScenes)}`;
     let raw = "";
     if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) raw = await customApiText("editor", { task: "edit_plan", system, prompt, scenes: compactScenes, duration: productionDuration });
@@ -1872,7 +1872,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const byId = new Map(work.map((scene) => [scene.id, scene]));
       const order = Array.isArray(parsed.order) ? parsed.order.filter((id) => byId.has(id)) : [];
       const ordered = order.length === work.length ? order.map((id) => byId.get(id) as Scene) : work;
-      return ordered.map((scene) => ({ ...scene, duration: Math.max(2, Math.min(30, Number(parsed.durations?.[scene.id]) || scene.duration)) }));
+      return ordered.map((scene) => ({ ...scene, duration: Math.max(2, Math.min(15, Number(parsed.durations?.[scene.id]) || scene.duration)) }));
     } catch {
       return work;
     }
@@ -3518,7 +3518,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label>
               <label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label>
               <div className="editor-grid"><label>2.5D 动态<select value={selectedScene.motion || "push"} onChange={(event) => updateScene(selectedScene.id, { motion: event.target.value as MotionPreset })}>{MOTION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>转场<select value={selectedScene.transition || "fade"} onChange={(event) => updateScene(selectedScene.id, { transition: event.target.value as TransitionPreset })}>{TRANSITION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>画面滤镜<select value={selectedScene.filter || "none"} onChange={(event) => updateScene(selectedScene.id, { filter: event.target.value as VisualFilter })}><option value="none">原色</option><option value="warm">暖调电影感</option><option value="cool">冷调悬疑</option><option value="mono">黑白漫画</option></select></label><label>字幕位置<select value={selectedScene.subtitlePosition || "bottom"} onChange={(event) => updateScene(selectedScene.id, { subtitlePosition: event.target.value as SubtitlePosition })}><option value="top">顶部</option><option value="center">中央</option><option value="bottom">底部</option></select></label></div>
-              <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={30} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(30, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
+              <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={15} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(15, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
               <div className="subtitle-switch"><div><b>显示本镜字幕</b><span>关闭后对白仍保留在剧本中</span></div><button className={`toggle ${selectedScene.subtitleEnabled !== false ? "on" : ""}`} onClick={() => updateScene(selectedScene.id, { subtitleEnabled: selectedScene.subtitleEnabled === false })}><i /></button></div>
               <label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label>
               <div className="editor-actions"><button onClick={() => void regenerateImage(selectedScene, selected)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "image" ? "生图 AI 正在重做…" : "让生图 AI 重做"}</button><button className="video-action" onClick={() => void generateVideo(selectedScene)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "video" ? "视频 AI 正在重做…" : nativeVideoEnabled ? "让视频 AI 重做" : "配置视频 AI"}</button></div>
