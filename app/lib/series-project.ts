@@ -121,7 +121,7 @@ export function analyzeSeriesScript(name: string, sourceFileName: string, source
   const sourceText = cleanText(source);
   const episodes = splitEpisodes(sourceText);
   const now = new Date().toISOString();
-  return { version: 1, id: uid("series"), name: name.trim() || sourceFileName.replace(/\.[^.]+$/, "") || "未命名系列项目", sourceFileName, sourceText, createdAt: now, updatedAt: now, episodes, characters: extractCharacters(sourceText), memories: extractMemories(sourceText, episodes) };
+  return { version: 1, id: uid("series"), name: name.trim() || sourceFileName.replace(/\.[^.]+$/, "") || "未命名系列项目", sourceFileName, sourceText: "", createdAt: now, updatedAt: now, episodes, characters: extractCharacters(sourceText), memories: extractMemories(sourceText, episodes) };
 }
 
 export function loadSeriesProjects(): SeriesProject[] {
@@ -133,7 +133,8 @@ export function loadSeriesProjects(): SeriesProject[] {
 }
 
 export function saveSeriesProjects(projects: SeriesProject[]) {
-  localStorage.setItem(SERIES_PROJECTS_KEY, JSON.stringify(projects.slice(0, 30)));
+  const compact = projects.slice(0, 12).map((project) => ({ ...project, sourceText: "" }));
+  localStorage.setItem(SERIES_PROJECTS_KEY, JSON.stringify(compact));
 }
 
 export function buildEpisodeContext(project: SeriesProject, episode: SeriesEpisode) {
@@ -154,10 +155,13 @@ export function buildEpisodeContext(project: SeriesProject, episode: SeriesEpiso
 
 export function activateSeriesEpisode(project: SeriesProject, episode: SeriesEpisode) {
   const context = { projectId: project.id, projectName: project.name, episodeId: episode.id, episodeNumber: episode.number, episodeTitle: episode.title, context: buildEpisodeContext(project, episode), activatedAt: new Date().toISOString() };
-  localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(context));
-  localStorage.setItem("manjing-text-draft", context.context);
+  const compactContext = { projectId: context.projectId, projectName: context.projectName, episodeId: context.episodeId, episodeNumber: context.episodeNumber, episodeTitle: context.episodeTitle, activatedAt: context.activatedAt };
+  sessionStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(context));
+  localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(compactContext));
+  try { localStorage.setItem("manjing-text-draft", context.context); } catch { sessionStorage.setItem("manjing-text-draft", context.context); }
   localStorage.setItem("manjing-new-studio", "1");
+  localStorage.removeItem("manjing-studio-open-project");
   const workspace = (() => { try { return JSON.parse(localStorage.getItem("manjing-workspace") || "{}"); } catch { return {}; } })();
-  localStorage.setItem("manjing-workspace", JSON.stringify({ ...workspace, projectTitle: `${project.name} · 第 ${episode.number} 集`, story: context.context, scriptImported: true }));
+  try { localStorage.setItem("manjing-workspace", JSON.stringify({ ...workspace, projectTitle: `${project.name} · 第 ${episode.number} 集`, scriptImported: true })); } catch { /* Studio consumes the full session handoff. */ }
   return context;
 }

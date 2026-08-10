@@ -297,51 +297,33 @@ function createWindow() {
           })()`);
           if (!draft?.ok || !draft.id) throw new Error(`工作台草稿写入失败：${JSON.stringify(draft)}`);
 
-          await clickAndWait(`document.querySelector('.global-nav a[href="/projects"]').click(); true`, "/projects", ".projects-page");
-          const list = await mainWindow.webContents.executeJavaScript(`(async () => {
+          await clickAndWait(`document.querySelector('.global-nav a[href="/projects"]').click(); true`, "/projects", ".series-project-page");
+          const seriesReady = await mainWindow.webContents.executeJavaScript(`(async () => {
             const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            for (let attempt = 0; attempt < 50 && !document.querySelector(".project-grid"); attempt += 1) await wait(100);
-            const cards = [...document.querySelectorAll(".project-grid > article")];
-            const target = cards.find((card) => card.textContent.includes("页面切换后仍然保留"));
-            return { ok: Boolean(target && target.textContent.includes("制作中") && [...target.querySelectorAll("button")].some((button) => button.textContent.includes("新建同类作品")) && [...target.querySelectorAll("button")].some((button) => button.textContent.includes("继续制作"))), cards: cards.length };
+            for (let attempt = 0; attempt < 50 && !document.querySelector(".series-create input"); attempt += 1) await wait(100);
+            const input = document.querySelector(".series-create input");
+            const createButton = document.querySelector(".series-create button");
+            if (!input || !createButton) return { ok: false, step: "series-create-controls" };
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+            setter.call(input, "Smoke Series");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            createButton.click();
+            for (let attempt = 0; attempt < 50 && !document.querySelector(".series-list button"); attempt += 1) await wait(100);
+            const card = document.querySelector(".series-list button");
+            card?.click();
+            for (let attempt = 0; attempt < 50 && !document.querySelector(".episode-grid button"); attempt += 1) await wait(100);
+            return { ok: Boolean(card && document.querySelector(".episode-grid button")), cards: document.querySelectorAll(".series-list button").length };
           })()`);
-          if (!list?.ok) throw new Error(`制作中项目列表检查失败：${JSON.stringify(list)}`);
+          if (!seriesReady?.ok) throw new Error(`Series project interaction failed: ${JSON.stringify(seriesReady)}`);
 
-          await clickAndWait(`(() => { const card = [...document.querySelectorAll('.project-grid > article')].find((item) => item.textContent.includes('页面切换后仍然保留')); const link = card?.querySelector('a[href*="/projects/detail"]'); if (!link) throw new Error('项目详情链接不存在'); link.click(); return true; })()`, "/projects/detail", ".project-detail-page");
-          const detail = await mainWindow.webContents.executeJavaScript(`(async () => {
+          await clickAndWait(`document.querySelector('.episode-grid button').click(); true`, "/studio", "#story");
+          const synchronized = await mainWindow.webContents.executeJavaScript(`(async () => {
             const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            for (let attempt = 0; attempt < 50 && !document.querySelector(".project-draft-detail, .project-detail-missing"); attempt += 1) await wait(100);
-            const panel = document.querySelector(".project-draft-detail");
-            return { ok: Boolean(panel && panel.textContent.includes("页面切换后仍然保留") && panel.querySelector("button")), text: panel?.textContent || document.body.textContent.slice(0, 200) };
+            for (let attempt = 0; attempt < 50 && !(document.querySelector("#story")?.value || "").trim(); attempt += 1) await wait(100);
+            const context = JSON.parse(sessionStorage.getItem("manjing-active-series-context-v1") || "null");
+            return { ok: Boolean(context?.projectId && context?.episodeId && (document.querySelector("#story")?.value || "").trim()), title: document.querySelector(".workbench-project-title")?.value || "" };
           })()`);
-          if (!detail?.ok) throw new Error(`制作中项目详情检查失败：${JSON.stringify(detail)}`);
-
-          await clickAndWait(`document.querySelector('.project-draft-detail button').click(); true`, "/studio", "#story");
-          const restored = await mainWindow.webContents.executeJavaScript(`(async () => {
-            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            for (let attempt = 0; attempt < 50 && !document.querySelector("#story")?.value.includes("页面切换后仍然保留"); attempt += 1) await wait(100);
-            return document.querySelector("#story")?.value || "";
-          })()`);
-          if (!restored.includes("页面切换后仍然保留")) throw new Error("跨页面返回工作台后草稿没有恢复");
-
-          await clickAndWait(`document.querySelector('.global-nav a[href="/projects"]').click(); true`, "/projects", ".project-grid");
-          const clickSimilar = `(async () => {
-            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            for (let attempt = 0; attempt < 50 && !document.querySelector(".project-grid"); attempt += 1) await wait(100);
-            const button = [...document.querySelectorAll(".project-grid button")].find((item) => item.textContent.includes("新建同类作品"));
-            if (!button) throw new Error("没有找到新建同类作品按钮");
-            button.click();
-            return true;
-          })()`;
-          await clickAndWait(clickSimilar, "/studio", "#story");
-          const fresh = await mainWindow.webContents.executeJavaScript(`(async () => {
-            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-            for (let attempt = 0; attempt < 50 && !document.querySelector("#story"); attempt += 1) await wait(100);
-            await wait(400);
-            return { story: document.querySelector("#story")?.value || "", search: location.search, marker: localStorage.getItem("manjing-new-studio") };
-          })()`);
-          if (fresh.story || fresh.marker || !fresh.search.includes("new=1")) throw new Error(`新建同类作品没有建立独立空白工程：${JSON.stringify(fresh)}`);
-          if (smokeTimer) clearTimeout(smokeTimer);
+          if (!synchronized?.ok) throw new Error(`Series episode did not synchronize to studio: ${JSON.stringify(synchronized)}`);          if (smokeTimer) clearTimeout(smokeTimer);
           console.log("MANJING_PROJECT_WORKFLOW_OK");
           setTimeout(() => app.exit(0), 250);
         } catch (error) {

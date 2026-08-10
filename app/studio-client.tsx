@@ -984,6 +984,32 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   useEffect(() => {
     if (!agentTeamLoaded) return;
+    const raw = window.sessionStorage.getItem("manjing-active-series-context-v1") || window.localStorage.getItem("manjing-active-series-context-v1");
+    if (!raw) return;
+    try {
+      const context = JSON.parse(raw) as { projectId?: string; projectName?: string; episodeId?: string; episodeNumber?: number; context?: string; activatedAt?: string };
+      if (!context.projectId || !context.episodeId || !context.context) return;
+      const applyKey = `${context.projectId}:${context.episodeId}:${context.activatedAt || ""}`;
+      if (window.sessionStorage.getItem("manjing-series-context-applied") === applyKey) return;
+      window.sessionStorage.setItem("manjing-series-context-applied", applyKey);
+      setProjectTitle(`${context.projectName || "系列项目"} · 第 ${context.episodeNumber || 1} 集`);
+      setStory(context.context);
+      setScriptImported(true);
+      setCharacters([]);
+      setScenes([]);
+      setSelected(0);
+      setPhase("idle");
+      setProgress(0);
+      setStatusText(`已同步“${context.projectName || "系列项目"}”第 ${context.episodeNumber || 1} 集、项目记忆和上一集状态`);
+      window.localStorage.setItem("manjing-text-draft", context.context);
+      recordActivity("director", `已接收系列项目第 ${context.episodeNumber || 1} 集上下文，后续资产归属当前项目`, "done");
+    } catch (reason) {
+      setError(reason instanceof Error ? `项目同步失败：${reason.message}` : "项目同步失败");
+    }
+  }, [agentTeamLoaded]);
+
+  useEffect(() => {
+    if (!agentTeamLoaded) return;
     const raw = window.localStorage.getItem("manjing-studio-library-import");
     if (!raw) return;
     window.localStorage.removeItem("manjing-studio-library-import");
@@ -3739,7 +3765,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       </section>
 
       <section id="works" className="works section-shell">
-        <div className="section-heading"><span>02</span><div><p>剪辑工作台</p><h2>{scenes.length ? projectTitle : "生成后在这里剪辑"}</h2></div><aside>{scenes.length ? `${scenes.length} 个镜头 · ${formatTime(totalDuration)}` : "尚无作品"}</aside></div>
+        <div className="section-heading"><span>02</span><div><p>剪辑工作台</p><input className="workbench-project-title" aria-label="修改作品标题" value={scenes.length ? projectTitle : "生成后在这里剪辑"} disabled={!scenes.length} onChange={(event) => setProjectTitle(event.target.value)} onBlur={(event) => { const title = event.target.value.trim() || "未命名作品"; setProjectTitle(title); const raw = window.localStorage.getItem("manjing-active-series-context-v1"); if (raw) { try { const context = JSON.parse(raw); window.localStorage.setItem("manjing-active-series-context-v1", JSON.stringify({ ...context, productionTitle: title })); } catch { /* workspace autosave still preserves the title */ } } }} /></div><aside>{scenes.length ? `${scenes.length} 个镜头 · ${formatTime(totalDuration)}` : "尚无作品"}</aside></div>
         {scenes.some((scene) => scene.consistencyReport) && <div className="consistency-dashboard"><header><div><span>CONSISTENCY ENGINE</span><h3>镜头一致性报告</h3></div><b>{Math.round(scenes.filter((scene) => scene.consistencyReport).reduce((sum, scene) => sum + (scene.consistencyReport?.overall || 0), 0) / Math.max(1, scenes.filter((scene) => scene.consistencyReport).length))}<small>/100 平均</small></b></header><div>{scenes.filter((scene) => scene.consistencyReport).map((scene, index) => <article key={scene.id} className={scene.consistencyDecision || "review"}><i>{String(index + 1).padStart(2, "0")}</i><span><strong>{scene.title}</strong><small>{scene.consistencyReport?.mode === "vision" ? "视觉审核" : "结构检查"} · {scene.consistencyReport?.findings[0] || "未发现明显问题"}</small></span><em>{scene.consistencyReport?.overall}</em><b>{scene.consistencyDecision?.toUpperCase()}</b></article>)}</div></div>}
         {!!characters.length && <div className="production-assets">
           <div className="asset-heading"><div><b>角色资产库</b><span>固定人物的五官、发型、服装与专属音色，作为后续镜头参考</span></div><em>{characters.filter((item) => item.status === "ready").length}/{characters.length} 已锁定</em></div>

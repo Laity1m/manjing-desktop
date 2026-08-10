@@ -62,12 +62,22 @@ export default function ProjectsClient() {
     commit(series.map((item) => item.id === selected.id ? next : item), selected.id);
   }
 
+  function openProject(id: string) {
+    const project = series.find((item) => item.id === id);
+    setSelectedId(id);
+    setMessage(project ? `已打开“${project.name}”，可选择剧集、编辑角色圣经和项目记忆` : "已切换项目");
+    window.setTimeout(() => document.querySelector(".series-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+  }
+
   function startEpisode(episodeId: string) {
     if (!selected) return;
     const episode = selected.episodes.find((item) => item.id === episodeId);
     if (!episode) return;
     activateSeriesEpisode(selected, episode);
-    updateSelected({ episodes: selected.episodes.map((item) => item.id === episode.id ? { ...item, status: "producing" } : item) });
+    const nextProject = { ...selected, updatedAt: new Date().toISOString(), episodes: selected.episodes.map((item) => item.id === episode.id ? { ...item, status: "producing" as const } : item) };
+    const nextSeries = series.map((item) => item.id === selected.id ? nextProject : item);
+    setSeries(nextSeries);
+    try { saveSeriesProjects(nextSeries); } catch { /* never block navigation after the episode handoff has been saved */ }
     router.push("/studio");
   }
 
@@ -80,18 +90,18 @@ export default function ProjectsClient() {
     <SiteNav current="projects" />
     <header className="series-hero">
       <div><span>SERIES PRODUCTION</span><h1>系列项目中心</h1><p>一部剧一个项目。总剧本、角色圣经、项目记忆、分集状态与专属资产在这里长期承接。</p></div>
-      <div className="series-create"><input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="输入项目名称" /><button onClick={createBlank} disabled={busy}>新建空白项目</button><button className="primary" onClick={() => inputRef.current?.click()} disabled={busy}>导入总剧本</button><input ref={inputRef} hidden type="file" accept=".docx,.pdf,.txt,.md,.markdown,.json,.yaml,.yml,.skill" onChange={(event) => { void importScript(event.target.files?.[0]); event.currentTarget.value = ""; }} /></div>
+      <div className="series-create"><input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="输入项目名称" /><button type="button" onClick={createBlank} disabled={busy}>新建空白项目</button><button type="button" className="primary" onClick={() => inputRef.current?.click()} disabled={busy}>导入总剧本</button><input ref={inputRef} hidden type="file" accept=".docx,.pdf,.txt,.md,.markdown,.json,.yaml,.yml,.skill" onChange={(event) => { void importScript(event.target.files?.[0]); event.currentTarget.value = ""; }} /></div>
     </header>
     <div className="series-status"><b>{series.length} 个系列项目</b><span>{message}</span><em>{legacyCount} 个已生成剪辑工程</em></div>
     {series.length ? <section className="series-shell">
-      <aside className="series-list"><b>我的系列</b>{series.map((item) => <button key={item.id} className={item.id === selectedId ? "active" : ""} onClick={() => setSelectedId(item.id)}><span>{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><small>{item.episodes.length} 集 · {item.characters.length} 个角色</small></div></button>)}</aside>
+      <aside className="series-list"><b>我的系列</b>{series.map((item) => <button type="button" key={item.id} className={item.id === selectedId ? "active" : ""} onClick={() => openProject(item.id)} aria-current={item.id === selectedId ? "page" : undefined} title={`打开项目 ${item.name}`}><span>{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><small>{item.episodes.length} 集 · {item.characters.length} 个角色</small></div><em>{item.id === selectedId ? "当前" : "打开"}</em></button>)}</aside>
       {selected && <div className="series-workspace">
         <header><div><span>项目档案</span><input value={selected.name} onChange={(event) => updateSelected({ name: event.target.value })} /><p>来源：{selected.sourceFileName} · 更新于 {new Date(selected.updatedAt).toLocaleString("zh-CN")}</p></div><ConfirmButton onConfirm={() => removeProject(selected.id)} ariaLabel={`删除项目 ${selected.name}`} confirmLabel="确认删除项目">删除项目</ConfirmButton></header>
         <section className="series-overview"><article><b>{selected.episodes.length}</b><span>剧集</span></article><article><b>{selected.characters.length}</b><span>角色</span></article><article><b>{selected.memories.length}</b><span>项目记忆</span></article><article><b>{selected.episodes.filter((item) => item.status === "done").length}</b><span>已完成</span></article></section>
-        <section className="series-section"><header><div><span>EPISODES</span><h2>选择剧集开始制作</h2></div><small>工作台只读取本集、项目长期记忆、相关角色和上一集结束状态</small></header><div className="episode-grid">{selected.episodes.map((episode) => <article key={episode.id}><i>{String(episode.number).padStart(2, "0")}</i><div><b>{episode.title}</b><p>{episode.summary}</p><small>{episode.status === "producing" ? "制作中" : episode.status === "done" ? "已完成" : "待制作"}</small></div><button onClick={() => startEpisode(episode.id)}>制作本集</button></article>)}</div></section>
+        <section className="series-section"><header><div><span>EPISODES</span><h2>选择剧集开始制作</h2></div><small>工作台只读取本集、项目长期记忆、相关角色和上一集结束状态</small></header><div className="episode-grid">{selected.episodes.map((episode) => <article key={episode.id}><i>{String(episode.number).padStart(2, "0")}</i><div><b>{episode.title}</b><p>{episode.summary}</p><small>{episode.status === "producing" ? "制作中" : episode.status === "done" ? "已完成" : "待制作"}</small></div><button type="button" onClick={() => startEpisode(episode.id)}>制作本集</button></article>)}</div></section>
         <section className="series-columns">
           <div className="series-section character-bible"><header><div><span>CHARACTER BIBLE</span><h2>角色圣经</h2></div></header>{selected.characters.length ? selected.characters.map((character) => <article key={character.id}><input value={character.name} onChange={(event) => updateSelected({ characters: selected.characters.map((item) => item.id === character.id ? { ...item, name: event.target.value } : item) })} /><textarea value={character.description} onChange={(event) => updateSelected({ characters: selected.characters.map((item) => item.id === character.id ? { ...item, description: event.target.value } : item) })} /><input value={character.relationship} onChange={(event) => updateSelected({ characters: selected.characters.map((item) => item.id === character.id ? { ...item, relationship: event.target.value } : item) })} /></article>) : <p>尚未识别人物，可在剧本中使用“角色名：台词”或人物介绍格式。</p>}</div>
-          <div className="series-section memory-bible"><header><div><span>PROJECT MEMORY</span><h2>项目记忆</h2></div></header>{selected.memories.map((memory) => <article key={memory.id}><div><input value={memory.title} onChange={(event) => updateSelected({ memories: selected.memories.map((item) => item.id === memory.id ? { ...item, title: event.target.value } : item) })} /><button className={memory.locked ? "locked" : ""} onClick={() => updateSelected({ memories: selected.memories.map((item) => item.id === memory.id ? { ...item, locked: !item.locked } : item) })}>{memory.locked ? "已锁定" : "可演化"}</button></div><textarea value={memory.content} onChange={(event) => updateSelected({ memories: selected.memories.map((item) => item.id === memory.id ? { ...item, content: event.target.value } : item) })} /></article>)}</div>
+          <div className="series-section memory-bible"><header><div><span>PROJECT MEMORY</span><h2>项目记忆</h2></div></header>{selected.memories.map((memory) => <article key={memory.id}><div><input value={memory.title} onChange={(event) => updateSelected({ memories: selected.memories.map((item) => item.id === memory.id ? { ...item, title: event.target.value } : item) })} /><button type="button" className={memory.locked ? "locked" : ""} onClick={() => updateSelected({ memories: selected.memories.map((item) => item.id === memory.id ? { ...item, locked: !item.locked } : item) })}>{memory.locked ? "已锁定" : "可演化"}</button></div><textarea value={memory.content} onChange={(event) => updateSelected({ memories: selected.memories.map((item) => item.id === memory.id ? { ...item, content: event.target.value } : item) })} /></article>)}</div>
         </section>
       </div>}
     </section> : <section className="series-empty"><span>01—40</span><h2>导入一整部剧本</h2><p>漫镜会自动拆分剧集，提取角色、背景故事、人物关系和连续性规则，再让你选择任意一集进入 AI 工作台。</p><button onClick={() => inputRef.current?.click()}>选择总剧本文件</button></section>}
