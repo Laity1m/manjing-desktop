@@ -1,5 +1,7 @@
 "use client";
 
+import StudioProjectBinding from "./components/StudioProjectBinding";
+
 import { agentContext, markContextUsed } from "./agent-system/learning-store";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -1001,7 +1003,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setPhase("idle");
       setProgress(0);
       setStatusText(`已同步“${context.projectName || "系列项目"}”第 ${context.episodeNumber || 1} 集、项目记忆和上一集状态`);
-      window.localStorage.setItem("manjing-text-draft", context.context);
+      try { window.localStorage.setItem("manjing-text-draft", context.context); } catch { window.sessionStorage.setItem("manjing-text-draft", context.context); }
       recordActivity("director", `已接收系列项目第 ${context.episodeNumber || 1} 集上下文，后续资产归属当前项目`, "done");
     } catch (reason) {
       setError(reason instanceof Error ? `项目同步失败：${reason.message}` : "项目同步失败");
@@ -3581,6 +3583,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   return (
     <main id="top" className={`${surface}-surface`}>
       <SiteNav current="studio" />
+      <StudioProjectBinding />
 
       <section className="hero">
         <div className="hero-copy">
