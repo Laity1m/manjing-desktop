@@ -19,6 +19,9 @@ export type LibraryAsset = {
   parentAssetId?: string;
   arkAssetId?: string;
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
+  projectId?: string;
+  episodeId?: string;
+  scope?: "project" | "global";
   usageCount: number;
   lastUsedAt?: string;
   url?: string;
@@ -79,7 +82,7 @@ function transactionDone(transaction: IDBTransaction, message: string) {
   });
 }
 
-export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; parentAssetId?: string } = {}) {
+export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global" } = {}) {
   if (file.size > MAX_ASSET_BYTES) throw new Error("单个资产不能超过 512MB");
   const mediaType = assetMediaType(file);
   if (!mediaType) throw new Error(`“${file.name}”不是支持的图片、视频或音频`);
@@ -94,6 +97,9 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
   const semanticTail = fileStem.match(/(?:^|-)([^-]+)-(角色设定|人物设定|场景|分镜|视频|道具设定|配音|口型视频)$/)?.slice(1).join("-");
   const scriptName = options.name?.trim() || (options.category === "character" ? inferredIdentity : semanticTail);
   const generatedName = scriptName ? `${scriptName}${options.category === "character" && inferredLook ? `-${inferredLook}` : ""}-${categoryName}${extension}` : file.name;
+  let activeContext: { projectId?: string; episodeId?: string } = {};
+  try { activeContext = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}"); } catch { activeContext = {}; }
+  const projectId = options.projectId?.trim() || activeContext.projectId?.trim() || undefined;
   const asset: LibraryAsset = {
     id: uid("asset"),
     mediaId: uid("media"),
@@ -110,6 +116,9 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
     identityKey: inferredIdentity?.slice(0, 120) || undefined,
     lookName: inferredLook?.slice(0, 120) || undefined,
     parentAssetId: options.parentAssetId?.trim() || undefined,
+    projectId,
+    episodeId: options.episodeId?.trim() || activeContext.episodeId?.trim() || undefined,
+    scope: options.scope || (projectId ? "project" : "global"),
     usageCount: 0,
   };
   try {
@@ -131,7 +140,9 @@ export async function listLibraryAssets() {
       request.onsuccess = () => resolve((request.result || []) as LibraryAsset[]);
       request.onerror = () => reject(request.error || new Error("读取资产库失败"));
     });
-    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
+    let activeProjectId = "";
+    try { activeProjectId = String(JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}").projectId || ""); } catch { activeProjectId = ""; }
+    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).filter((item) => !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global").sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
   } finally {
     database.close();
   }
@@ -167,7 +178,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "usageCount" | "lastUsedAt">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -189,6 +200,9 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...(typeof patch.parentAssetId === "string" ? { parentAssetId: patch.parentAssetId.trim() || undefined } : {}),
       ...(typeof patch.arkAssetId === "string" ? { arkAssetId: patch.arkAssetId.trim().replace(/^asset:\/\//i, "").slice(0, 180) || undefined } : {}),
       ...(patch.portraitAuthorizationStatus ? { portraitAuthorizationStatus: patch.portraitAuthorizationStatus } : {}),
+      ...(typeof patch.projectId === "string" ? { projectId: patch.projectId.trim() || undefined } : {}),
+      ...(typeof patch.episodeId === "string" ? { episodeId: patch.episodeId.trim() || undefined } : {}),
+      ...(patch.scope ? { scope: patch.scope } : {}),
       ...(typeof patch.usageCount === "number" ? { usageCount: Math.max(0, Math.round(patch.usageCount)) } : {}),
       ...(typeof patch.lastUsedAt === "string" ? { lastUsedAt: patch.lastUsedAt } : {}),
     };

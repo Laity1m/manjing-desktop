@@ -5,7 +5,7 @@ export interface ImportedSkillDocument {
   tags: string[];
 }
 
-const MAX_DOCUMENT_CHARS = 200_000;
+const MAX_DOCUMENT_CHARS = 2_000_000;
 const TEXT_EXTENSIONS = new Set(["skill", "md", "markdown", "txt", "json", "yaml", "yml"]);
 
 export async function parseSkillFile(file: File): Promise<ImportedSkillDocument> {
