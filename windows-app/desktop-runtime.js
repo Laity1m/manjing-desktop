@@ -293,6 +293,26 @@ function responseText(data) {
   return "";
 }
 
+function pickFirstVideoUrl(value, seen = new Set()) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value !== "object" || seen.has(value)) return "";
+  seen.add(value);
+
+  const preferred = ["dataUrl", "videoUrl", "url", "output", "result", "payload", "data", "path", "file", "src"];
+  for (const key of preferred) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const candidate = pickFirstVideoUrl(value[key], seen);
+    if (candidate) return candidate;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    if (preferred.includes(key)) continue;
+    const candidate = pickFirstVideoUrl(nested, seen);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
 async function invokeTextModel(input, fetchImpl = fetch) {
   const mode = String(input?.mode || "");
   if (!["openai", "anthropic", "gemini", "pollinations", "webhook"].includes(mode)) {
@@ -397,6 +417,85 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
     style: String(rawVoiceover.style || "自然对白").slice(0, 60),
     script: String(rawVoiceover.script || "").slice(0, 500)
   };
+  const isAgnes = /(?:^|\.)agnes-ai\.com$/i.test(target.hostname) || /^agnes-video-/i.test(model);
+  if (isAgnes) {
+    const apiKey = String(input?.apiKey || "").trim();
+    if (!apiKey) throw Object.assign(new Error("Agnes video requires an API key"), { statusCode: 400 });
+    const createUrl = new URL(target.href);
+    if (/(?:^|\.)agnes-ai\.com$/i.test(createUrl.hostname)) {
+      // Agnes users may paste the API base, /agnesapi status URL, or the full
+      // creation URL. They all belong to the same fixed creation endpoint.
+      createUrl.pathname = "/v1/videos";
+    } else if (!/\/v1\/videos\/?$/i.test(createUrl.pathname)) {
+      createUrl.pathname = `${createUrl.pathname.replace(/\/+$/, "").replace(/\/v1$/i, "")}/v1/videos`.replace(/\/+/g, "/");
+    }
+    createUrl.search = "";
+    const landscape = input?.aspect === "16:9";
+    const duration = Math.max(4, Math.min(10, Number(input?.duration) || 5));
+    const created = await fetchProviderJson(createUrl, {
+      method: "POST",
+      headers: providerHeaders("webhook", apiKey, true),
+      body: JSON.stringify({
+        model: model || "agnes-video-v2.0",
+        prompt,
+        width: landscape ? 1152 : 768,
+        height: landscape ? 768 : 1152,
+        num_frames: Math.max(97, Math.min(241, Math.round(duration * 24) + 1)),
+        frame_rate: 24
+      })
+    }, fetchImpl, { timeoutMs: 60000, maxAttempts: 1, retryLabel: "Agnes create video" });
+    const videoId = String(created?.video_id || created?.data?.video_id || created?.id || created?.data?.id || "").trim();
+    if (!videoId) throw Object.assign(new Error("Agnes response did not include video_id. Use model agnes-video-v2.0"), { statusCode: 502 });
+    const currentPollUrl = new URL("/agnesapi", createUrl.origin);
+    currentPollUrl.searchParams.set("video_id", videoId);
+    const legacyPollUrl = new URL(`/v1/videos/${encodeURIComponent(videoId)}`, createUrl.origin);
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await pause(attempt === 0 ? 2500 : 5000);
+      let statusData;
+      try {
+        statusData = await fetchProviderJson(currentPollUrl, { method: "GET", headers: providerHeaders("webhook", apiKey) }, fetchImpl, { timeoutMs: 45000, maxAttempts: 2, retryLabel: "Agnes video status" });
+      } catch (error) {
+        if (attempt > 1) throw error;
+        statusData = await fetchProviderJson(legacyPollUrl, { method: "GET", headers: providerHeaders("webhook", apiKey) }, fetchImpl, { timeoutMs: 45000, maxAttempts: 1, retryLabel: "Agnes legacy video status" });
+      }
+      const status = String(statusData?.status || statusData?.data?.status || statusData?.state || "").toLowerCase();
+      const errorText = statusData?.error?.message || statusData?.error || statusData?.message;
+      if (["failed", "error", "cancelled", "canceled"].includes(status)) throw Object.assign(new Error(`Agnes video failed: ${String(errorText || status).slice(0, 260)}`), { statusCode: 502 });
+      const candidates = [statusData?.video_url, statusData?.videoUrl, statusData?.url, statusData?.output?.video_url, statusData?.output?.url, statusData?.data?.video_url, statusData?.data?.videoUrl, statusData?.data?.url, statusData?.remixed_from_video_id];
+      const videoUrl = candidates.find((value) => typeof value === "string" && /^(?:https?:\/\/|data:video\/)/i.test(value.trim()));
+      if (videoUrl) {
+        const resolvedVideoUrl = String(videoUrl).trim();
+        if (resolvedVideoUrl.startsWith("data:video/")) return { dataUrl: resolvedVideoUrl };
+
+        // Download inside the desktop runtime. Fetching an Agnes signed URL in
+        // the renderer is blocked by CORS and surfaces only as "Failed to fetch".
+        const { response: mediaResponse, attempts } = await fetchProviderResponse(resolvedVideoUrl, {
+          method: "GET",
+          headers: providerHeaders("webhook", apiKey)
+        }, fetchImpl, {
+          timeoutMs: 180000,
+          maxAttempts: 3,
+          retryLabel: "Agnes video download",
+          timeoutMessage: "Agnes 视频已生成，但下载在 180 秒内没有完成；请重新运行，漫镜会继续尝试读取成片"
+        });
+        if (!mediaResponse.ok) {
+          const repeated = attempts > 1 ? `，已尝试 ${attempts} 次` : "";
+          throw Object.assign(new Error(`Agnes 视频已生成，但下载失败（${mediaResponse.status}${repeated}）`), { statusCode: 502 });
+        }
+        const mediaType = (mediaResponse.headers.get("content-type") || "video/mp4").split(";")[0].trim().toLowerCase();
+        if (!mediaType.startsWith("video/") && mediaType !== "application/octet-stream") {
+          throw Object.assign(new Error(`Agnes 返回的成片类型不正确（${mediaType || "unknown"}）`), { statusCode: 502 });
+        }
+        const mediaBytes = Buffer.from(await mediaResponse.arrayBuffer());
+        if (!mediaBytes.byteLength) throw Object.assign(new Error("Agnes 返回了空的视频文件"), { statusCode: 502 });
+        if (mediaBytes.byteLength > 256 * 1024 * 1024) throw Object.assign(new Error("Agnes 成片超过 256MB，暂时无法载入工作台"), { statusCode: 413 });
+        const safeMediaType = mediaType.startsWith("video/") ? mediaType : "video/mp4";
+        return { dataUrl: `data:${safeMediaType};base64,${mediaBytes.toString("base64")}`, videoUrl: resolvedVideoUrl };
+      }
+      if (["completed", "complete", "succeeded", "success", "done"].includes(status)) throw Object.assign(new Error("Agnes completed without a playable video URL"), { statusCode: 502 });
+    }
+    throw Object.assign(new Error(`Agnes video is still processing. Task: ${videoId}`), { statusCode: 504 });
+  }
   const { response } = await fetchProviderResponse(target, {
     method: "POST",
     headers: providerHeaders("webhook", String(input?.apiKey || "").trim(), true),
@@ -431,9 +530,9 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
     const detail = data?.error?.message || data?.error || data?.message || text || `HTTP ${response.status}`;
     throw Object.assign(new Error(`视频接口返回 ${response.status}：${String(detail).slice(0, 300)}`), { statusCode: 502 });
   }
-  const dataUrl = String(data?.dataUrl || data?.result?.dataUrl || "");
-  if (dataUrl.startsWith("data:video/")) return { dataUrl };
-  const remoteUrl = validRemoteUrl(data?.videoUrl || data?.url || data?.output?.url || data?.result?.url);
+  const resultUrl = String(pickFirstVideoUrl(data));
+  if (resultUrl.startsWith("data:video/") || resultUrl.startsWith("data:application/octet-stream")) return { dataUrl: resultUrl };
+  const remoteUrl = validRemoteUrl(resultUrl);
   if (remoteUrl) return { videoUrl: remoteUrl.href };
   throw Object.assign(new Error("Webhook 调用成功，但没有返回视频文件、dataUrl 或可信的 videoUrl"), { statusCode: 502 });
 }
