@@ -470,8 +470,9 @@ async function invokeVideoModel(input, fetchImpl = fetch) {
         // Download inside the desktop runtime. Fetching an Agnes signed URL in
         // the renderer is blocked by CORS and surfaces only as "Failed to fetch".
         const { response: mediaResponse, attempts } = await fetchProviderResponse(resolvedVideoUrl, {
-          method: "GET",
-          headers: providerHeaders("webhook", apiKey)
+          // Agnes returns a pre-signed CDN URL. Adding the API bearer token to
+          // that request invalidates authentication on the media host (401).
+          method: "GET"
         }, fetchImpl, {
           timeoutMs: 180000,
           maxAttempts: 3,
