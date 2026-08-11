@@ -48,3 +48,8 @@ next-env.d.ts
 *.blockmap
 .manjing-*/
 *.log
+
+# Local review and generated caches
+.vendor-review/
+**/__pycache__/
+*.pyc
