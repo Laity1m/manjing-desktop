@@ -1,3 +1,5 @@
+import { IMPORTED_DEFAULT_SKILLS } from "./imported-default-skills";
+
 export interface PresetSkill {
   id: string;
   agentId: "director" | "writer" | "storyboard" | "prompt" | "image" | "video" | "voice" | "editor";
@@ -9,6 +11,33 @@ export interface PresetSkill {
 }
 
 export const PRESET_SKILLS: PresetSkill[] = [
+  {
+    id: "director-ai-drama-production-bible",
+    agentId: "director",
+    title: "AI 漫剧项目制作圣经与开工检查",
+    content: "开工前建立项目制作圣经：角色身份与当前造型、可复用表情和声音档案、场景空间布局、关键道具、时代天气、全局画风、主色、光线方向、动态强度、镜头速度、字幕和声音标准。先区分长期 Canonical 资产、当前集造型资产、镜头临时状态和声音资产；旁白、广告声、系统播报不得建立人物视觉资产。规则默认执行但不机械限制创作：镜头时长、景别跳切和位置变化可因剧情成立，变化必须有明确叙事原因和状态记录。",
+    tags: ["漫剧SOP", "制作圣经", "资产规划", "开工检查"],
+    source: "用户提供 · AI漫剧完整精细化生产SOP（经漫镜工程化修订）",
+    sourceUrl: "https://github.com/Laity1m/manjing-desktop",
+  },
+  {
+    id: "prompt-shot-match-and-screen-direction",
+    agentId: "prompt",
+    title: "镜头动作咬合、轴线与空间连续性",
+    content: "编译视频提示词时读取上一镜最后状态和镜尾帧。本镜开头约 0.5 秒承接上一镜姿态、视线、朝向、左右位置、景深层级、手持道具、门窗状态和光线；结尾预留清晰可继承的动作姿态。对话场优先硬切和反应镜头，连续动作使用 match cut 或极短柔化，换场才使用短淡入。统一同场镜头的呼吸幅度、发丝衣物动态、推拉速度和曝光色调。跨轴、反向运镜、位置改变或大动作必须由剧情和镜头设计明确授权。",
+    tags: ["漫剧SOP", "动作咬合", "180度轴线", "空间连续", "转场"],
+    source: "用户提供 · AI漫剧完整精细化生产SOP（经漫镜工程化修订）",
+    sourceUrl: "https://github.com/Laity1m/manjing-desktop",
+  },
+  {
+    id: "editor-ai-drama-finishing-standard",
+    agentId: "editor",
+    title: "漫剧统一色彩、声音与交付标准",
+    content: "合成前统一所有片段的分辨率、帧率和画幅；相邻镜头执行曝光、白平衡、对比度、饱和度和锐度匹配，避免明暗与色温跳变。角色对白使用固定声音档案并统一语速和响度，BGM 跨镜头连续播放，只在场次或情绪节点换段；字幕字体、字号、安全区和位置全片一致。转场以硬切为默认，动作衔接只加 0.1–0.2 秒必要柔化，场景切换才使用短淡入淡出。导出前检查黑帧、静帧、音画错位、爆音、字幕越界和时长。",
+    tags: ["漫剧SOP", "色彩匹配", "响度", "字幕", "成片交付"],
+    source: "用户提供 · AI漫剧完整精细化生产SOP（经漫镜工程化修订）",
+    sourceUrl: "https://github.com/Laity1m/manjing-desktop",
+  },
   {
     id: "prompt-canonical-asset-binding",
     agentId: "prompt",
@@ -257,4 +286,5 @@ export const PRESET_SKILLS: PresetSkill[] = [
     source: "漫镜预设 · Pexo/SmartSub 方法启发（MIT）",
     sourceUrl: "https://github.com/pexoai/pexo-skills",
   },
+  ...IMPORTED_DEFAULT_SKILLS,
 ];

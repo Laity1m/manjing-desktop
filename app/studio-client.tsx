@@ -329,6 +329,17 @@ function motionVisualPrompt(name: string) {
   const preset = visualStyle(name);
   return `${preset.base}, ${preset.motion}`;
 }
+
+function shotContinuityRule(scene: Scene, previousScene?: Scene) {
+  if (!previousScene) return "Opening shot: establish geography, screen direction and the first stable state clearly.";
+  const sameEnvironment = Boolean(scene.environmentKey && previousScene.environmentKey === scene.environmentKey);
+  const sameSpeakerExchange = Boolean(scene.speaker && previousScene.speaker && scene.speaker !== previousScene.speaker && sameEnvironment);
+  const actionCarry = Boolean(previousScene.endState && (scene.startState || scene.action));
+  if (!sameEnvironment) return "Scene change: preserve recurring identities and costumes, then use a short restrained fade-in; do not pretend the old location continues.";
+  if (sameSpeakerExchange) return "Dialogue coverage: use a clean hard cut or reaction shot, preserve the 180-degree axis, eyelines, screen direction and relative left/right positions.";
+  if (actionCarry) return "Match on action: reserve the final 0.5 seconds in a readable transition pose and begin this shot by continuing that pose for about 0.5 seconds; use at most a 0.1-0.2 second soft blend only when needed.";
+  return "Same-scene continuation: prefer a clean hard cut, preserve geography, exposure, palette, motion amplitude and camera-direction logic.";
+}
 const VOICES = [
   { value: "nova", label: "温柔女声" },
   { value: "coral", label: "叙事女声" },
@@ -2002,6 +2013,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function compileShotMotionPrompt(scene: Scene, sceneIndex: number, previousScene?: Scene) {
     const cast = characters.filter((character) => isVisualCharacterAsset(character) && scene.characters.includes(character.name));
     const props = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
+    const continuityRule = shotContinuityRule(scene, previousScene);
     const assetBindings = {
       characters: cast.map((character) => ({ name: character.name, assetId: character.arkAssetId || character.id, appearance: character.appearance })),
       scene: { id: scene.environmentKey || scene.title, bible: scene.environmentBible || scene.visual },
@@ -2009,7 +2021,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       startFrame: scene.remoteImageUrl || scene.imageUrl || "",
       previousEndFrame: previousScene?.remoteImageUrl || previousScene?.imageUrl || "",
     };
-    const deterministic = `${motionVisualPrompt(style)}, preserve the exact character identities, facial geometry, facial landmarks, hair, body proportions and current costumes from the bound canonical assets. Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue exactly from the previous shot end frame and end state: ${previousScene.endState || previousScene.action}. Preserve every character's normalized screen position (left/center/right), depth layer (foreground/midground/background), facing direction, pose, hand occupancy and prop position unless the action explicitly changes it.` : "This is the opening shot."} Current action: ${scene.action}. Camera movement: ${scene.camera}. Important props that must remain visually identical and correctly placed: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state that the next shot can inherit"}. ${scene.speaker ? `${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement.` : "Natural performance and physically coherent motion."} Preserve architecture, prop positions, person count, weather, time, palette and light direction. Keep the canonical face stable in frontal, profile and moving views. One continuous cinematic shot, no unintended cuts, no subtitles, no duplicated people, no identity swap, no face morphing, no facial asymmetry, no deformed eyes or mouth, no extra fingers or limbs, no prop replacement, no sudden position jump.`;
+    const deterministic = `${motionVisualPrompt(style)}, preserve the exact character identities, facial geometry, facial landmarks, hair, body proportions and current costumes from the bound canonical assets. Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue exactly from the previous shot end frame and end state: ${previousScene.endState || previousScene.action}. Preserve every character's normalized screen position (left/center/right), depth layer (foreground/midground/background), facing direction, pose, hand occupancy and prop position unless the action explicitly changes it.` : "This is the opening shot."} Continuity and transition rule: ${continuityRule} Current action: ${scene.action}. Camera movement: ${scene.camera}. Keep global motion treatment consistent: restrained breathing, stable hair and cloth amplitude, coherent camera speed, matching exposure, contrast, saturation and light direction. Important props that must remain visually identical and correctly placed: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state that the next shot can inherit"}. ${scene.speaker ? `${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement.` : "Natural performance and physically coherent motion."} Preserve architecture, prop positions, person count, weather, time, palette and light direction. Keep the canonical face stable in frontal, profile and moving views. One continuous cinematic shot, no unintended cuts, no subtitles, no duplicated people, no identity swap, no face morphing, no facial asymmetry, no deformed eyes or mouth, no extra fingers or limbs, no prop replacement, no sudden position jump.`;
     const config = agentConfigs.prompt;
     if (config.adapter === "browser") {
       recordActivity("prompt", `镜头 ${sceneIndex + 1} 已由本地镜头总控完成资产绑定与提示词编译`, "done");
@@ -2017,7 +2029,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const learned = agentContext("prompt").slice(0, 8);
     const system = `你是漫镜的镜头总控 Agent，位于导演与视频 Agent 之间。你不改写剧情，只负责绑定 Canonical 资产、继承 Start/End State、整合表演与运镜，并针对目标视频模型编译最终提示词。只返回 JSON：{"prompt":"最终视频提示词","negativePrompt":"必须避免的问题","assetBindings":["实际使用的资产ID"],"continuityCheck":"状态继承检查"}。提示词必须是一个连续镜头，禁止虚构未提供的资产。${learned.length ? `\n已启用技能：\n${learned.map((item) => `- ${item.title}：${item.content.slice(0, 900)}`).join("\n")}` : ""}`;
-    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: scene.camera, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
+    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, productionStandard: { transitionRule: continuityRule, motionTreatment: "restrained and globally consistent", colorContinuity: "match exposure, white balance, contrast and saturation to adjacent shots", stateHandoffSeconds: 0.5 }, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: scene.camera, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
     try {
       setStatusText(`${agentName("prompt")}正在为镜头 ${sceneIndex + 1} 绑定资产并编译最终提示词`);
       const raw = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
@@ -2761,7 +2773,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setStatusText(`正在建立角色资产 ${index + 1}/${cast.length}：${character.name}`);
         cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
         setCharacters(cast);
-        const characterPrompt = characterSheetPrompt(style, character);
+        const faceSkill = agentContext("image").find((item) => item.title.includes("原创AI角色捏脸"));
+        const characterPrompt = `${characterSheetPrompt(style, character)}${faceSkill ? `\n\nEnabled Image Agent Skill:\n${faceSkill.content}` : ""}`;
+        if (faceSkill) markContextUsed([faceSkill.id]);
         if (agentConfigs.image.adapter !== "horde") {
           const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9" });
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
@@ -3176,7 +3190,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setStatusText(`生图 AI 正在补跑角色资产 ${targetIndex + 1}/${missingCharacters.length}：${character.name}`);
           cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
           setCharacters(cast);
-          const prompt = characterSheetPrompt(style, character);
+          const faceSkill = agentContext("image").find((item) => item.title.includes("原创AI角色捏脸"));
+          const prompt = `${characterSheetPrompt(style, character)}${faceSkill ? `\n\nEnabled Image Agent Skill:\n${faceSkill.content}` : ""}`;
+          if (faceSkill) markContextUsed([faceSkill.id]);
           if (agentConfigs.image.adapter !== "horde") {
             const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9" });
             const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
@@ -4163,6 +4179,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <article><i>06</i><b>连续性审核</b><small>身份、造型、空间、道具、动作与光线质量门</small></article>
           <article><i>07</i><b>声音后期</b><small>角色音色、对白、口型、音效、配乐与字幕</small></article>
           <article><i>08</i><b>剪辑交付</b><small>节奏调整、失败镜头替换、混音与成片导出</small></article>
+        </div>
+      </section>
+
+      <section className="production-standard-deck section-shell" aria-label="当前作品生产标准">
+        <header><div><span>LIVE PRODUCTION STANDARD</span><h2>本片生产标准</h2></div><div className="production-live-state"><i /><b>{phase === "idle" ? "等待开机" : statusText}</b><em>{progress}%</em></div></header>
+        <div className="production-standard-grid">
+          <article><span>视觉锁</span><b>{style}</b><small>{aspect} 画幅 · 同项目统一画风、色调与光线逻辑</small></article>
+          <article><span>节奏策略</span><b>{targetDuration === 0 ? "AI 自动判断" : `${targetDuration} 秒目标`}</b><small>由剧情节拍分配镜长，每个视频镜头不超过 15 秒</small></article>
+          <article><span>连续性锁</span><b>镜尾状态传递</b><small>身份、造型、轴线、位置、动作、道具和曝光逐镜继承</small></article>
+          <article><span>声音交付</span><b>{voiceEnabled ? "角色配音开启" : "保留原生声音"}</b><small>{bgmEnabled ? "连续 BGM" : "无 BGM"} · {subtitleEnabled ? "统一字幕" : "无字幕"}</small></article>
         </div>
       </section>
 

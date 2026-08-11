@@ -761,8 +761,13 @@ app.whenReady().then(async () => {
     const runtime = await createDesktopRuntime({ dataRoot: app.getPath("userData") });
     protocol.handle(APP_SCHEME, runtime.handle);
 
-    const healthResponse = await runtime.handle(new Request("manjing://app/studio"));
-    if (!healthResponse.ok || !(await healthResponse.text()).includes("漫镜")) {
+    const healthResponse = await runtime.handle(new Request("manjing://app/studio", {
+      headers: { Accept: "text/html,application/xhtml+xml" }
+    }));
+    const healthType = String(healthResponse.headers.get("content-type") || "").toLowerCase();
+    const healthBody = await healthResponse.text();
+    const hasHtmlShell = /<!doctype\s+html|<html[\s>]/i.test(healthBody) && healthBody.length > 256;
+    if (!healthResponse.ok || !healthType.includes("text/html") || !hasHtmlShell) {
       throw new Error("内置应用启动自检失败");
     }
   } catch (error) {

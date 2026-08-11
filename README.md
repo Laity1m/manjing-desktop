@@ -117,3 +117,11 @@ npm run dist --prefix windows-app
 漫镜把“镜头计划”“生成参考”和“长期资产”分开管理。镜头表始终保留叙事节拍、景别、机位、人物调度和 Start/End State；视觉分镜不是原生视频模型的强制前置步骤。长期资产只收录通过审核的角色身份与造型、地点布局、关键道具、角色声音和全局风格规则。普通动作帧、旁白、广告声、一次性群众和失败候选不会自动升级为 Canonical 资产。
 
 完整流程为：项目圣经 → 剧集拆解 → 资产规划 → 镜头设计 → 镜头生产 → 连续性审核 → 声音后期 → 剪辑交付。实现参考还包括 [MovieAgent](https://github.com/showlab/MovieAgent)、[PenShot](https://github.com/neopen/story-shot-agent)、[Jellyfish](https://github.com/Forget-C/Jellyfish)、[UnityShots](https://github.com/JIA-Lab-research/UnityShots) 与 [MultiShotMaster](https://github.com/KlingAIResearch/MultiShotMaster)。
+
+默认技能库包含用户提供的“原创AI角色捏脸提示词生成 Skill”，由生图 Agent 在首次角色建模和角色资产补跑时读取，用脸型结构、三庭五眼、五官主次、气质、妆造与光线建立原创角色身份。
+
+### 精细化漫剧 SOP
+
+工作台现已把人物统一、画风统一和镜头无缝衔接落实为可执行生产标准：导演 Agent 开工前建立制作圣经；镜头总控逐镜继承人物身份、造型、轴线、左右位置、手持道具、光线和动作状态；连续动作会预留镜尾与镜头开头的承接姿态；剪辑 Agent 统一分辨率、帧率、曝光、色温、响度、字幕和连续 BGM。规则不会机械限制所有镜头必须等长，镜头时长和景别仍由剧情节拍决定，单次视频生成不超过 15 秒。
+
+工作台新增响应式“本片生产标准”控制台，集中显示当前画风、画幅、目标时长、连续性策略、配音、BGM 和字幕状态。Windows 安装版启动自检也已改为验证真实 HTML 响应，并修复生产标准面板变量错误导致的 `/studio` SSR 500 启动失败。
