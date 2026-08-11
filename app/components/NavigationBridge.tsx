@@ -24,6 +24,7 @@ export default function NavigationBridge() {
       event.stopPropagation();
       setLabel((anchor.textContent || "正在切换页面").trim().slice(0, 24));
       desktop.navigate(`${destination.pathname}${destination.search}${destination.hash}`);
+      window.setTimeout(() => setLabel(""), 1200);
     }
 
     window.addEventListener("click", navigate, true);

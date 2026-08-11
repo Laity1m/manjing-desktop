@@ -20,6 +20,8 @@ export const metadata: Metadata = {
   },
 };
 
+import NavigationBridge from "./components/NavigationBridge";
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="zh-CN"><body>{children}</body></html>;
+  return <html lang="zh-CN"><body><NavigationBridge />{children}</body></html>;
 }

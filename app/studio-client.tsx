@@ -2731,6 +2731,24 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           report = await evaluateShotConsistency(completedScene, repairedUrl, castForScene, previousScene, 2);
           work = work.map((item) => item.id === scene.id ? completedScene : item);
         }
+        if (report.mode === "vision" && report.overall < 85) {
+          setScenes(work.map((item) => item.id === scene.id ? { ...completedScene, consistencyReport: report, consistencyDecision: "reject", status: "error" as SceneStatus } : item));
+          const approved = window.confirm(`AI 质检认为镜头“${scene.title}”仍未达到 85 分（当前 ${report.overall} 分）。\n\n${report.findings.slice(0, 5).join("\n")}\n\n是否删除当前不合格画面，并依据 Canonical 资产重新构建？\n选择“取消”会保留当前结果并标记为人工接受。`);
+          if (approved) {
+            setStatusText(`已获用户同意，正在删除并重构镜头 ${index + 1}：${scene.title}`);
+            recordActivity("image", `用户同意删除“${scene.title}”的不合格结果，正在按 Canonical 资产重构`, "warning");
+            if (completedScene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(completedScene.imageUrl);
+            const userApprovedPrompt = `${frameVisualPrompt(style)}, user approved a full rebuild of this rejected storyboard shot. Fix these visible failures: ${report.findings.join("; ")}. Canonical characters must match exactly: ${characterGuide}. Preserve identity, face shape, hairstyle, age, fatigue details, costume, locked props, environment architecture, light direction and Start State. Never add unapproved accessories. Keep the requested shot size and do not reveal off-screen anchors merely for inspection. ${scene.action}, ${scene.camera}, no text`;
+            const rebuiltUrl = await makeImage(scene, 900 + index, run, characterGuide, aspect, userApprovedPrompt);
+            completedScene = { ...completedScene, imageUrl: rebuiltUrl, remoteImageUrl: undefined, status: "ready" as SceneStatus };
+            report = await evaluateShotConsistency(completedScene, rebuiltUrl, castForScene, previousScene, 3);
+            work = work.map((item) => item.id === scene.id ? completedScene : item);
+            recordActivity("image", `“${scene.title}”已完成用户批准的重构，新图片已写入资产库并重新质检为 ${report.overall} 分`, report.overall >= 85 ? "done" : "warning");
+          } else {
+            report = { ...report, decision: "review", findings: [...report.findings, "用户选择保留当前画面并人工接受。"] };
+            recordActivity("image", `用户选择保留“${scene.title}”当前画面，已标记为人工接受`, "done");
+          }
+        }
         const finalDecision = report.mode === "structural" && report.decision === "reject" ? "review" : report.decision;
         work = work.map((item) => item.id === scene.id ? { ...item, consistencyReport: { ...report, decision: finalDecision }, consistencyDecision: finalDecision, status: finalDecision === "reject" ? "error" as SceneStatus : "ready" as SceneStatus } : item);
         generatedFrames += 1;
