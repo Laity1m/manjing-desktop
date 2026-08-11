@@ -1687,6 +1687,15 @@ footer p { flex: 1; }
 .asset-library-search input { width: 100%; border: 0; outline: 0; padding: 9px 4px; background: transparent; font-size: 8px; }
 .asset-library-message { width: min(1240px, 94vw); margin: 0 auto 14px; color: #82796f; font-size: 8px; }
 .asset-library-message b { margin-right: 8px; color: var(--asset-accent); }
+.asset-batch-toolbar { width: min(1240px, 94vw); margin: 0 auto 18px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid #ddd4c8; border-radius: 16px; background: linear-gradient(135deg, rgba(255,253,249,.98), rgba(246,237,228,.9)); box-shadow: 0 12px 30px rgba(51,43,35,.06); }
+.asset-batch-copy { display: grid; gap: 3px; }
+.asset-batch-copy strong { font-family: var(--font-display); font-size: 13px; }
+.asset-batch-copy span { color: #82796f; font-size: 8px; }
+.asset-batch-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.asset-batch-actions button { min-height: 34px; padding: 0 13px; border: 1px solid #ddd4c8; border-radius: 999px; background: rgba(255,255,255,.85); color: #312923; cursor: pointer; transition: transform .18s ease, border-color .18s ease, background .18s ease; }
+.asset-batch-actions button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--asset-accent); }
+.asset-batch-actions button:disabled { opacity: .42; cursor: not-allowed; }
+.asset-batch-actions button:last-child:not(:disabled) { border-color: #2a2328; background: #2a2328; color: #fff; }
 .asset-library-grid { width: min(1240px, 94vw); margin: 0 auto 60px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .asset-library-grid article { overflow: hidden; border: 1px solid #ddd4c8; border-radius: 18px; background: var(--asset-card); box-shadow: 0 13px 34px rgba(51,43,35,.07); transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; }
 .asset-library-grid article:hover { transform: translateY(-3px); box-shadow: 0 20px 46px rgba(51,43,35,.11); }

@@ -100,3 +100,14 @@ npm run dist --prefix windows-app
 
 - [提交 Issue](https://github.com/Laity1m/manjing-desktop/issues)
 - [查看 Releases](https://github.com/Laity1m/manjing-desktop/releases)
+
+## 原生视频优先与跨镜头一致性
+
+- Seedance、Agnes 与自定义原生视频接口不再强制先生成分镜图，而是按镜头直接生成视频。
+- 每个视频完成后自动提取中间关键帧与镜尾连续帧；镜尾帧和 End State 会传递给下一镜作为起始约束。
+- 镜头总控绑定 Canonical 人物、服装、场景和道具，并约束人物左右位置、景深层级、朝向、手持物与光线方向。
+- 单个镜头失败时会记录错误并继续生成后续镜头，不再让整部作品停在第一段视频。
+- 旁白、广告声、系统播报和画外音只进入声音流程，不生成无意义的人物信息图。
+- 资产库提供常驻批量管理工具条，可全选当前筛选结果并批量删除。
+
+一致性工作流参考了 [ConsisID](https://github.com/PKU-YuanGroup/ConsisID)、[StableAnimator](https://github.com/Francis-Rings/StableAnimator)、[StoryDiffusion](https://github.com/HVision-NKU/StoryDiffusion) 与 [ViMax](https://github.com/HKUDS/ViMax) 的身份保持、姿态控制、跨镜头注意力和首尾帧衔接思路。漫镜实现的是模型无关的工作流层，可继续使用用户自己的视频模型接口。
