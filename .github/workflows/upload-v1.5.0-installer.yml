@@ -27,7 +27,7 @@ jobs:
         shell: pwsh
         run: |
           npm ci
-          npm ci --prefix windows-app
+          npm install --prefix windows-app --no-audit --no-fund
 
       - name: Build embedded application
         shell: pwsh
@@ -50,4 +50,3 @@ jobs:
           $target = Join-Path $installer.DirectoryName "manjing-1.5.0-project-assets-x64.exe"
           Copy-Item -LiteralPath $installer.FullName -Destination $target -Force
           gh release upload v1.5.0 $target --clobber
-
