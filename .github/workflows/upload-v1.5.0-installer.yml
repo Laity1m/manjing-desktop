@@ -26,6 +26,7 @@ jobs:
       - name: Install application dependencies
         shell: pwsh
         run: |
+          npm install --global pnpm@10
           npm ci
           npm install --prefix windows-app --no-audit --no-fund
 
