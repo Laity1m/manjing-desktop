@@ -1,5 +1,7 @@
 "use client";
 
+import { deleteLibraryAssetsByProject } from "../lib/asset-library";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import SiteNav from "../components/SiteNav";
@@ -14,6 +16,7 @@ export default function ProjectsClient() {
   const [series, setSeries] = useState<SeriesProject[]>([]);
   const [legacyCount, setLegacyCount] = useState(0);
   const [selectedId, setSelectedId] = useState("");
+  const [expandedId, setExpandedId] = useState("");
   const [projectName, setProjectName] = useState("");
   const [message, setMessage] = useState("创建项目或导入总剧本开始");
   const [busy, setBusy] = useState(false);
@@ -22,6 +25,7 @@ export default function ProjectsClient() {
     const loaded = loadSeriesProjects();
     setSeries(loaded);
     setSelectedId(loaded[0]?.id || "");
+    setExpandedId(loaded[0]?.id || "");
     void listEditorProjects().then((items) => setLegacyCount(items.length)).catch(() => undefined);
   }, []);
 
@@ -65,6 +69,7 @@ export default function ProjectsClient() {
   function openProject(id: string) {
     const project = series.find((item) => item.id === id);
     setSelectedId(id);
+    setExpandedId(id);
     setMessage(project ? `已打开“${project.name}”，可选择剧集、编辑角色圣经和项目记忆` : "已切换项目");
     window.setTimeout(() => document.querySelector(".series-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
   }
@@ -81,9 +86,13 @@ export default function ProjectsClient() {
     router.push("/studio");
   }
 
-  function removeProject(id: string) {
-    commit(series.filter((item) => item.id !== id), selectedId === id ? "" : selectedId);
-    setMessage("系列项目已删除；已生成的公共素材和剪辑工程未被连带删除");
+  async function removeProject(id: string) {
+    const removedAssetCount = await deleteLibraryAssetsByProject(id);
+    const next = series.filter((item) => item.id !== id);
+    const focus = selectedId === id ? next[0]?.id || "" : selectedId;
+    commit(next, focus);
+    setExpandedId(focus);
+    setMessage(`系列项目已删除，并同步移除 ${removedAssetCount} 项项目专属资产；全局公共资产未受影响`);
   }
 
   return <main className="portal-page series-project-page">
@@ -94,10 +103,11 @@ export default function ProjectsClient() {
     </header>
     <div className="series-status"><b>{series.length} 个系列项目</b><span>{message}</span><em>{legacyCount} 个已生成剪辑工程</em></div>
     {series.length ? <section className="series-shell">
-      <aside className="series-list"><b>我的系列</b>{series.map((item) => <button type="button" key={item.id} className={item.id === selectedId ? "active" : ""} onClick={() => openProject(item.id)} aria-current={item.id === selectedId ? "page" : undefined} title={`打开项目 ${item.name}`}><span>{item.name.slice(0, 1)}</span><div><strong>{item.name}</strong><small>{item.episodes.length} 集 · {item.characters.length} 个角色</small></div><em>{item.id === selectedId ? "当前" : "打开"}</em></button>)}</aside>
-      {selected && <div className="series-workspace">
-        <header><div><span>项目档案</span><input value={selected.name} onChange={(event) => updateSelected({ name: event.target.value })} /><p>来源：{selected.sourceFileName} · 更新于 {new Date(selected.updatedAt).toLocaleString("zh-CN")}</p></div><ConfirmButton onConfirm={() => removeProject(selected.id)} ariaLabel={`删除项目 ${selected.name}`} confirmLabel="确认删除项目">删除项目</ConfirmButton></header>
+      <aside className="series-list"><b>我的系列</b>{series.map((item, index) => <article key={item.id} className={`${item.id === selectedId ? "active" : ""} ${expandedId === item.id ? "expanded" : ""}`}><button type="button" className="series-project-main" onClick={() => expandedId === item.id ? setExpandedId("") : openProject(item.id)} aria-current={item.id === selectedId ? "page" : undefined}><span className="series-project-cover"><i>SERIES</i><b>{String(index + 1).padStart(2, "0")}</b></span><div><strong>{item.name}</strong><small><span>{item.episodes.length} 集</span><span>{item.characters.length} 个角色</span></small></div><em aria-label={expandedId === item.id ? "收起项目" : "展开项目"}>{expandedId === item.id ? "−" : "+"}</em></button>{expandedId === item.id && <div className="series-project-actions"><button type="button" onClick={() => openProject(item.id)}>打开项目</button><a href={`/assets?project=${encodeURIComponent(item.id)}`}>项目资产</a><ConfirmButton onConfirm={() => removeProject(item.id)} ariaLabel={`删除项目 ${item.name}`} confirmLabel="确认删除">删除</ConfirmButton></div>}</article>)}</aside>
+      {selected && expandedId === selected.id && <div className="series-workspace">
+        <header><div><span>项目档案</span><input value={selected.name} onChange={(event) => updateSelected({ name: event.target.value })} /><p>来源：{selected.sourceFileName} · 更新于 {new Date(selected.updatedAt).toLocaleString("zh-CN")}</p></div><div className="series-workspace-actions"><button type="button" onClick={() => setExpandedId("")}>折叠项目</button><a href={`/assets?project=${encodeURIComponent(selected.id)}`}>进入项目资产</a><ConfirmButton onConfirm={() => removeProject(selected.id)} ariaLabel={`删除项目 ${selected.name}`} confirmLabel="确认删除项目">删除项目</ConfirmButton></div></header>
         <section className="series-overview"><article><b>{selected.episodes.length}</b><span>剧集</span></article><article><b>{selected.characters.length}</b><span>角色</span></article><article><b>{selected.memories.length}</b><span>项目记忆</span></article><article><b>{selected.episodes.filter((item) => item.status === "done").length}</b><span>已完成</span></article></section>
+        <section className="series-section production-history"><header><div><span>PRODUCTION HISTORY</span><h2>历史成片与生成记录</h2></div><a href={`/assets?project=${encodeURIComponent(selected.id)}`}>查看全部项目资产</a></header>{selected.productions?.length ? <div>{selected.productions.map((record) => <article key={record.id}><i>▶</i><span><b>{record.title}</b><small>{record.episodeNumber ? `第 ${record.episodeNumber} 集 · ` : ""}{Math.round(record.duration)} 秒 · {new Date(record.createdAt).toLocaleString("zh-CN")}</small></span><a href={`/assets?project=${encodeURIComponent(selected.id)}&asset=${encodeURIComponent(record.assetId)}`}>查看成片</a></article>)}</div> : <p>这个项目还没有完成的成片。工作台完成合成后会自动记录在这里。</p>}</section>
         <section className="series-section"><header><div><span>EPISODES</span><h2>选择剧集开始制作</h2></div><small>工作台只读取本集、项目长期记忆、相关角色和上一集结束状态</small></header><div className="episode-grid">{selected.episodes.map((episode) => <article key={episode.id} className="episode-card" role="button" tabIndex={0} onClick={() => startEpisode(episode.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); startEpisode(episode.id); } }}><i>{String(episode.number).padStart(2, "0")}</i><div><b>{episode.title}</b><p>{episode.summary}</p><small>{episode.status === "producing" ? "制作中" : episode.status === "done" ? "已完成" : "待制作"}</small></div><button type="button" onClick={(event) => { event.stopPropagation(); startEpisode(episode.id); }}>进入制作</button></article>)}</div></section>
         <section className="series-columns">
           <div className="series-section character-bible"><header><div><span>CHARACTER BIBLE</span><h2>角色圣经</h2></div></header>{selected.characters.length ? selected.characters.map((character) => <article key={character.id}><input value={character.name} onChange={(event) => updateSelected({ characters: selected.characters.map((item) => item.id === character.id ? { ...item, name: event.target.value } : item) })} /><textarea value={character.description} onChange={(event) => updateSelected({ characters: selected.characters.map((item) => item.id === character.id ? { ...item, description: event.target.value } : item) })} /><input value={character.relationship} onChange={(event) => updateSelected({ characters: selected.characters.map((item) => item.id === character.id ? { ...item, relationship: event.target.value } : item) })} /></article>) : <p>尚未识别人物，可在剧本中使用“角色名：台词”或人物介绍格式。</p>}</div>

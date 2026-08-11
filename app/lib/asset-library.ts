@@ -132,7 +132,7 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
   }
 }
 
-export async function listLibraryAssets() {
+export async function listLibraryAssets(options: { allProjects?: boolean } = {}) {
   const database = await openLibraryDatabase();
   try {
     const assets = await new Promise<LibraryAsset[]>((resolve, reject) => {
@@ -142,7 +142,7 @@ export async function listLibraryAssets() {
     });
     let activeProjectId = "";
     try { activeProjectId = String(JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}").projectId || ""); } catch { activeProjectId = ""; }
-    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).filter((item) => !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global").sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
+    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).filter((item) => options.allProjects || !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global").sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
   } finally {
     database.close();
   }
@@ -238,4 +238,13 @@ export async function deleteLibraryAsset(id: string) {
   } finally {
     database.close();
   }
+}
+
+export async function deleteLibraryAssetsByProject(projectId: string) {
+  const normalizedProjectId = projectId.trim();
+  if (!normalizedProjectId) return 0;
+  const assets = await listLibraryAssets({ allProjects: true });
+  const projectAssets = assets.filter((asset) => asset.scope !== "global" && asset.projectId === normalizedProjectId);
+  await Promise.all(projectAssets.map((asset) => deleteLibraryAsset(asset.id)));
+  return projectAssets.length;
 }

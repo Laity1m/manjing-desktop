@@ -28,6 +28,18 @@ export type SeriesMemory = {
   locked: boolean;
 };
 
+export type SeriesProductionRecord = {
+  id: string;
+  episodeId?: string;
+  episodeNumber?: number;
+  title: string;
+  createdAt: string;
+  duration: number;
+  assetId: string;
+  editorProjectId?: string;
+  status: "completed" | "failed";
+};
+
 export type SeriesProject = {
   version: 1;
   id: string;
@@ -39,6 +51,7 @@ export type SeriesProject = {
   episodes: SeriesEpisode[];
   characters: SeriesCharacter[];
   memories: SeriesMemory[];
+  productions?: SeriesProductionRecord[];
 };
 
 export const SERIES_PROJECTS_KEY = "manjing-series-projects-v1";
@@ -121,7 +134,14 @@ export function analyzeSeriesScript(name: string, sourceFileName: string, source
   const sourceText = cleanText(source);
   const episodes = splitEpisodes(sourceText);
   const now = new Date().toISOString();
-  return { version: 1, id: uid("series"), name: name.trim() || sourceFileName.replace(/\.[^.]+$/, "") || "未命名系列项目", sourceFileName, sourceText: "", createdAt: now, updatedAt: now, episodes, characters: extractCharacters(sourceText), memories: extractMemories(sourceText, episodes) };
+  return { version: 1, id: uid("series"), name: name.trim() || sourceFileName.replace(/\.[^.]+$/, "") || "未命名系列项目", sourceFileName, sourceText: "", createdAt: now, updatedAt: now, episodes, characters: extractCharacters(sourceText), memories: extractMemories(sourceText, episodes), productions: [] };
+}
+
+export function appendSeriesProductionRecord(projectId: string, record: Omit<SeriesProductionRecord, "id" | "createdAt">) {
+  const projects = loadSeriesProjects();
+  const now = new Date().toISOString();
+  const next = projects.map((project) => project.id === projectId ? { ...project, updatedAt: now, productions: [{ ...record, id: uid("production"), createdAt: now }, ...(project.productions || [])].slice(0, 80) } : project);
+  saveSeriesProjects(next);
 }
 
 export function loadSeriesProjects(): SeriesProject[] {

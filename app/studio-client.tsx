@@ -1,5 +1,7 @@
 "use client";
 
+import { appendSeriesProductionRecord } from "./lib/series-project";
+
 import StudioProjectBinding from "./components/StudioProjectBinding";
 
 import { agentContext, markContextUsed } from "./agent-system/learning-store";
@@ -338,7 +340,7 @@ function shotContinuityRule(scene: Scene, previousScene?: Scene) {
   if (!sameEnvironment) return "Scene change: preserve recurring identities and costumes, then use a short restrained fade-in; do not pretend the old location continues.";
   if (sameSpeakerExchange) return "Dialogue coverage: use a clean hard cut or reaction shot, preserve the 180-degree axis, eyelines, screen direction and relative left/right positions.";
   if (actionCarry) return "Match on action: reserve the final 0.5 seconds in a readable transition pose and begin this shot by continuing that pose for about 0.5 seconds; use at most a 0.1-0.2 second soft blend only when needed.";
-  return "Same-scene continuation: prefer a clean hard cut, preserve geography, exposure, palette, motion amplitude and camera-direction logic.";
+  return "Same-scene continuation: prefer a clean hard cut. Preserve the fixed environment floor plan, doors, windows, furniture, important-prop coordinates, character blocking zones, geography, exposure, palette, motion amplitude and camera-direction logic.";
 }
 const VOICES = [
   { value: "nova", label: "温柔女声" },
@@ -3935,6 +3937,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       activeAudioContext = null;
       const finalType = recorder.mimeType || "video/webm";
       const blob = new Blob(chunks, { type: finalType });
+      const finalExtension = finalType.includes("mp4") ? "mp4" : "webm";
+      const finalAsset = await saveLibraryFile(new File([blob], `${safeFilename(projectTitle)}-最终成片.${finalExtension}`, { type: finalType }), { name: `${projectTitle || "未命名漫剧"}-最终成片`, category: "video", duration: movieDuration, tags: ["最终成片", "生成记录", `作品:${projectTitle || "未命名漫剧"}`], reusable: false, locked: true });
       if (exportUrl) URL.revokeObjectURL(exportUrl);
       const url = URL.createObjectURL(blob);
       setExportUrl(url);
@@ -3944,6 +3948,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setPhase("ready");
       setStatusText(buffers.some(Boolean) ? `AI 漫剧已生成，动态镜头、字幕、配音${soundtrackBuffer ? "和配乐" : ""}均已写入` : "免费流程样片已生成，可直接播放或下载");
       await syncScenesToEditor(movieScenes, url, "studio");
+      try {
+        const active = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}") as { projectId?: string; episodeId?: string; episodeNumber?: number };
+        if (active.projectId) appendSeriesProductionRecord(active.projectId, { episodeId: active.episodeId, episodeNumber: active.episodeNumber, title: projectTitle || "未命名漫剧", duration: movieDuration, assetId: finalAsset.id, editorProjectId: editorProjectIdRef.current, status: "completed" });
+      } catch { /* Final asset remains safely archived even if the project record is unavailable. */ }
       return true;
     } catch (reason) {
       if (runRef.current !== exportRun) {
