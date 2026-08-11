@@ -386,6 +386,8 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
   prompt: [
     { id: "browser-prompt", adapter: "browser", name: "漫镜本地镜头总控", model: "Manjing Shot Compiler", note: "免费默认 · 资产绑定、状态继承与提示词编译", badge: "内置" },
     { id: "pollinations-prompt", adapter: "pollinations", name: "Pollinations 镜头总控", model: "openai", note: "推荐 · 智能整合 Seedance 提示词", badge: "推荐" },
+    { id: "openai-prompt", adapter: "openai", name: "OpenAI 官方镜头总控", model: "gpt-5", endpoint: "https://api.openai.com/v1", note: "OpenAI 官方 API · 独立 Key 与模型 ID", badge: "官方" },
+    { id: "openai-compatible-prompt", adapter: "openai", name: "OpenAI 兼容自定义接口", model: "your-model", endpoint: "", note: "自定义 Base URL、API Key 与模型 ID" },
     { id: "webhook-prompt", adapter: "webhook", name: "自定义镜头总控接口", model: "your-prompt-model", note: "OpenAI 兼容或自建提示词模型" },
   ],
   image: [
