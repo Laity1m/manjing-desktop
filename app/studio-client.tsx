@@ -2037,14 +2037,35 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   async function videoReferences(scene: Scene, previousScene?: Scene) {
-    const fallback = [previousScene?.remoteImageUrl, previousScene?.imageUrl, scene.remoteImageUrl, scene.imageUrl].filter((value): value is string => Boolean(value));
-    if (agentConfigs.video.adapter !== "seedance") return [...new Set(fallback)];
-    const trustedPortraits = characters
-      .filter((character) => scene.characters.includes(character.name) && character.arkAssetId && character.portraitAuthorizationStatus === "authorized")
-      .map((character) => `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`);
+    const cast = characters.filter((character) => isVisualCharacterAsset(character) && scene.characters.includes(character.name));
+    const previousTail = [previousScene?.remoteImageUrl, previousScene?.imageUrl].filter((value): value is string => Boolean(value));
+    const currentAnchors = [scene.remoteImageUrl, scene.imageUrl, ...cast.flatMap((character) => [character.remoteUrl, character.imageUrl])].filter((value): value is string => Boolean(value));
+    const trustedPortraits = agentConfigs.video.adapter === "seedance" ? cast
+      .filter((character) => character.arkAssetId && character.portraitAuthorizationStatus === "authorized")
+      .map((character) => `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`) : [];
     const trustedVoices: string[] = [];
+    const entityReferences: string[] = [];
     try {
       const library = await listLibraryAssets();
+      const propNames = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
+      const environmentIdentity = (scene.environmentKey || scene.title).toLocaleLowerCase("zh-CN");
+      const candidates = library.filter((asset) => {
+        if (asset.mediaType !== "image" || asset.reusable === false) return false;
+        const searchable = `${asset.name} ${asset.identityKey || ""} ${asset.lookName || ""} ${asset.tags.join(" ")}`.toLocaleLowerCase("zh-CN");
+        if (asset.category === "character") return cast.some((character) => searchable.includes(character.name.toLocaleLowerCase("zh-CN")));
+        if (asset.category === "scene") return Boolean(environmentIdentity && searchable.includes(environmentIdentity));
+        if (asset.category === "prop") return propNames.some((name) => searchable.includes(name.toLocaleLowerCase("zh-CN")));
+        return false;
+      }).sort((a, b) => Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || (b.usageCount || 0) - (a.usageCount || 0)).slice(0, 6);
+      const loadedEntities = await loadLibraryAssets(candidates.map((asset) => asset.id));
+      for (const entity of loadedEntities) {
+        if (!entity.url) continue;
+        const response = await fetch(entity.url);
+        if (!response.ok) continue;
+        const dataUrl = await blobToDataUrl(await response.blob());
+        if (dataUrl.startsWith("data:image/")) entityReferences.push(dataUrl);
+      }
+      await Promise.all(candidates.map((asset) => markLibraryAssetUsed(asset.id)));
       const voiceAssets = library.filter((asset) => asset.category === "audio" && asset.reusable !== false && scene.characters.some((name) => `${asset.identityKey || ""} ${asset.name} ${asset.tags.join(" ")}`.includes(name))).slice(0, 3);
       const loadedVoices = await loadLibraryAssets(voiceAssets.map((asset) => asset.id));
       for (const voice of loadedVoices) {
@@ -2056,15 +2077,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       await Promise.all(voiceAssets.map((asset) => markLibraryAssetUsed(asset.id)));
     } catch { /* voice reference is optional */ }
-    if (!scene.imageUrl) return [...new Set([...trustedPortraits, ...trustedVoices, ...fallback])];
+    const orderedReferences = [...previousTail, ...trustedPortraits, ...currentAnchors, ...entityReferences, ...trustedVoices];
+    if (!scene.imageUrl) return [...new Set(orderedReferences)].slice(0, 10);
     try {
       const response = await fetch(scene.imageUrl);
-      if (!response.ok) return [...trustedPortraits, ...trustedVoices, ...fallback];
+      if (!response.ok) return [...new Set(orderedReferences)].slice(0, 10);
       const normalized = await normalizeImageBlobForAspect(await response.blob(), aspect);
       const dataUrl = await blobToDataUrl(normalized);
-      return [...new Set(dataUrl.startsWith("data:image/") ? [...trustedPortraits, ...trustedVoices, ...fallback, dataUrl] : [...trustedPortraits, ...trustedVoices, ...fallback])];
+      return [...new Set(dataUrl.startsWith("data:image/") ? [...orderedReferences, dataUrl] : orderedReferences)].slice(0, 10);
     } catch {
-      return [...new Set([...trustedPortraits, ...trustedVoices, ...fallback])];
+      return [...new Set(orderedReferences)].slice(0, 10);
     }
   }
 
@@ -4128,6 +4150,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           })}</div>
           <div className="workflow-log"><b>制作记录</b><div>{activityLog.length ? activityLog.map((item) => <p key={item.id} className={item.state}><time>{item.time}</time><span>{AGENT_ROLES.find((role) => role.id === item.role)?.title}</span>{item.message}</p>) : <p><time>--:--</time><span>制片组</span>任务开始后，这里会显示每一步真实进度</p>}</div></div>
         </div>}
+      </section>
+
+      <section className="production-pipeline-map section-shell" aria-label="漫剧生产流程">
+        <header><div><span>PRODUCTION PIPELINE</span><h2>从剧本到成片，不再把每一镜当成独立抽卡</h2></div><p>镜头计划、资产标准、连续状态和声音档案贯穿整个项目；只有审核通过的结果才进入长期资产。</p></header>
+        <div className="pipeline-stages">
+          <article><i>01</i><b>项目圣经</b><small>世界观、人物关系、时间线、视觉与声音规则</small></article>
+          <article><i>02</i><b>剧集拆解</b><small>场次、叙事节拍、对白、目标时长</small></article>
+          <article><i>03</i><b>资产规划</b><small>角色身份、造型版本、地点、关键道具、角色声音</small></article>
+          <article><i>04</i><b>镜头设计</b><small>景别、机位、调度、起止状态，不强制生成分镜图</small></article>
+          <article><i>05</i><b>镜头生产</b><small>按模型能力选择文生视频、参考图或首尾帧模式</small></article>
+          <article><i>06</i><b>连续性审核</b><small>身份、造型、空间、道具、动作与光线质量门</small></article>
+          <article><i>07</i><b>声音后期</b><small>角色音色、对白、口型、音效、配乐与字幕</small></article>
+          <article><i>08</i><b>剪辑交付</b><small>节奏调整、失败镜头替换、混音与成片导出</small></article>
+        </div>
       </section>
 
       <section id="works" className="works section-shell">

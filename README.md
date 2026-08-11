@@ -111,3 +111,9 @@ npm run dist --prefix windows-app
 - 资产库提供常驻批量管理工具条，可全选当前筛选结果并批量删除。
 
 一致性工作流参考了 [ConsisID](https://github.com/PKU-YuanGroup/ConsisID)、[StableAnimator](https://github.com/Francis-Rings/StableAnimator)、[StoryDiffusion](https://github.com/HVision-NKU/StoryDiffusion) 与 [ViMax](https://github.com/HKUDS/ViMax) 的身份保持、姿态控制、跨镜头注意力和首尾帧衔接思路。漫镜实现的是模型无关的工作流层，可继续使用用户自己的视频模型接口。
+
+## 漫剧生产原则
+
+漫镜把“镜头计划”“生成参考”和“长期资产”分开管理。镜头表始终保留叙事节拍、景别、机位、人物调度和 Start/End State；视觉分镜不是原生视频模型的强制前置步骤。长期资产只收录通过审核的角色身份与造型、地点布局、关键道具、角色声音和全局风格规则。普通动作帧、旁白、广告声、一次性群众和失败候选不会自动升级为 Canonical 资产。
+
+完整流程为：项目圣经 → 剧集拆解 → 资产规划 → 镜头设计 → 镜头生产 → 连续性审核 → 声音后期 → 剪辑交付。实现参考还包括 [MovieAgent](https://github.com/showlab/MovieAgent)、[PenShot](https://github.com/neopen/story-shot-agent)、[Jellyfish](https://github.com/Forget-C/Jellyfish)、[UnityShots](https://github.com/JIA-Lab-research/UnityShots) 与 [MultiShotMaster](https://github.com/KlingAIResearch/MultiShotMaster)。
