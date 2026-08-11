@@ -19,7 +19,7 @@ export const API_MODE_DEFAULT_ENDPOINTS: Record<DiscoverableApiMode, string> = {
   webhook: "",
 };
 
-const TEXT_ROLES: CustomModelRole[] = ["director", "writer", "editor"];
+const TEXT_ROLES: CustomModelRole[] = ["director", "writer", "prompt", "editor"];
 
 export function apiModesForRole(role: CustomModelRole): DiscoverableApiMode[] {
   if (TEXT_ROLES.includes(role)) return ["openai", "anthropic", "gemini", "pollinations", "webhook"];
