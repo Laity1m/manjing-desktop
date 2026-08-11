@@ -14,6 +14,7 @@ const CHAT_KEY = "manjing-agent-chats-v145";
 const CONFIG_KEY = "manjing-agent-team";
 const DISPATCH_KEY = "manjing-producer-dispatch-v147";
 const PRODUCER_CONFIG_KEY = "manjing-producer-model-v147";
+const PROMPT_DEFAULT_CONFIG: SavedAgentConfig = { adapter: "openai", endpoint: "https://api.openai.com/v1", apiKey: "", model: "gpt-5" };
 const TEXT_MODES = new Set(["openai", "anthropic", "gemini", "pollinations", "webhook"]);
 const welcome = (): Message[] => [{ from: "agent", text: "我已准备好。你可以和我讨论创作、修改方案、交代任务，也可以把重要结论保存为我的长期记忆或技能。" }];
 
@@ -76,6 +77,7 @@ export default function ChatPage() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const requestControllerRef = useRef<AbortController | null>(null);
   const [producerConfig, setProducerConfig] = useState<SavedAgentConfig>({ adapter: "pollinations", endpoint: "https://text.pollinations.ai/openai", apiKey: "", model: "openai" });
+  const [promptConfig, setPromptConfig] = useState<SavedAgentConfig>(PROMPT_DEFAULT_CONFIG);
 
   useEffect(() => {
     const sync = () => setItems(readLearnedItems());
@@ -85,6 +87,8 @@ export default function ChatPage() {
       if (saved && typeof saved === "object") setChats(saved);
       const producer = JSON.parse(localStorage.getItem(PRODUCER_CONFIG_KEY) || "null");
       if (producer && typeof producer === "object") setProducerConfig(producer as SavedAgentConfig);
+      const prompt = readAgentConfigs().prompt;
+      if (prompt && typeof prompt === "object") setPromptConfig({ ...PROMPT_DEFAULT_CONFIG, ...prompt });
     } catch {}
     window.addEventListener("manjing-learning-changed", sync);
     return () => window.removeEventListener("manjing-learning-changed", sync);
@@ -118,6 +122,19 @@ export default function ChatPage() {
       return next;
     });
   }
+
+  function updatePromptConfig(patch: SavedAgentConfig) {
+    setPromptConfig((current) => {
+      const next = { ...current, ...patch };
+      let team: SavedAgentConfigs = {};
+      try { team = JSON.parse(localStorage.getItem(CONFIG_KEY) || "{}"); } catch {}
+      localStorage.setItem(CONFIG_KEY, JSON.stringify({ ...team, prompt: next }));
+      return next;
+    });
+  }
+
+  const independentConfig = agentId === "prompt" ? promptConfig : producerConfig;
+  const updateIndependentConfig = agentId === "prompt" ? updatePromptConfig : updateProducerConfig;
 
   function deleteMessage(index: number) {
     if (!window.confirm("只删除这条聊天记录吗？已经另存为技能或记忆的内容不会被删除。")) return;
@@ -190,10 +207,10 @@ export default function ChatPage() {
 
   return <main className="agent-chat-page"><SiteNav current="chat" /><section className="agent-chat-shell">
     <aside className="agent-roster"><header><span>AGENT TEAM</span><h1>创作团队</h1><p>每个岗位拥有独立对话、技能与长期记忆。</p></header><nav>{AGENT_PROFILES.map((item) => <button key={item.id} className={item.id === agentId ? "active" : ""} onClick={() => setAgentId(item.id)}><i>{item.icon}</i><span><b>{item.name}</b><small>{item.duty}</small></span><em>{item.id === agentId ? "在线" : ""}</em></button>)}</nav><Link className="agent-new-button" href="/learning">＋ 创建学习任务</Link></aside>
-    <section className="agent-conversation"><header><div className="agent-avatar">{agent.icon}</div><div><span>当前对话</span><h2>{agent.name}</h2></div><aside><button onClick={() => setAgentId("producer")}>总制片</button><button onClick={() => setAgentId("director")}>导演对话</button><Link href="/learning">让它去学习</Link><Link href="/studio">转到工作区</Link></aside></header><div className="agent-context-strip"><span>已载入</span><b>{context.filter((item) => item.kind === "memory").length} 条记忆 · {context.filter((item) => item.kind === "skill").length} 个技能{agentId === "producer" ? ` · 当前模型 ${producerConfig.model || "未配置"}` : ""}</b><div className="chat-history-actions"><button disabled={busy || !messages.length} onClick={clearCurrentChat}>清空当前</button><button disabled={busy || !Object.keys(chats).length} onClick={clearAllChats}>清空全部</button></div></div>
+    <section className="agent-conversation"><header><div className="agent-avatar">{agent.icon}</div><div><span>当前对话</span><h2>{agent.name}</h2></div><aside><button onClick={() => setAgentId("producer")}>总制片</button><button onClick={() => setAgentId("director")}>导演对话</button><Link href="/learning">让它去学习</Link><Link href="/studio">转到工作区</Link></aside></header><div className="agent-context-strip"><span>已载入</span><b>{context.filter((item) => item.kind === "memory").length} 条记忆 · {context.filter((item) => item.kind === "skill").length} 个技能{["producer", "prompt"].includes(agentId) ? ` · 当前模型 ${independentConfig.model || "未配置"}` : ""}</b><div className="chat-history-actions"><button disabled={busy || !messages.length} onClick={clearCurrentChat}>清空当前</button><button disabled={busy || !Object.keys(chats).length} onClick={clearAllChats}>清空全部</button></div></div>
       <div className="agent-message-list"><div className="agent-day">今天</div>{messages.map((item, index) => <article key={index} className={`${item.from}${item.error ? " error" : ""}`}><i>{item.from === "agent" ? agent.icon : "我"}</i><div><b>{item.from === "agent" ? agent.name : "你"}</b><button className="message-delete" disabled={busy} onClick={() => deleteMessage(index)} title="删除这条聊天记录">删除</button><p>{item.text}</p>{item.from === "agent" && !item.error && <footer><button onClick={() => remember(item.text, "memory")}>记住这条</button><button onClick={() => remember(item.text, "skill")}>保存为技能</button><Link href="/studio">用于工作区</Link></footer>}</div></article>)}</div>
       <div className="agent-composer"><textarea id="agent-chat-input" ref={inputRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!busy) void send(); } }} placeholder={busy ? `${agent.name} 正在回复，你仍然可以输入下一条消息…` : `给 ${agent.name} 发送消息…`} /><div><Link href="/learning">MCP 搜索 / 本地视频学习</Link><span>{busy ? "正在生成回复，可随时停止" : `已启用上下文 ${context.length} 条`}</span><button className={busy ? "stop" : ""} onClick={() => busy ? stopReply() : void send()}>{busy ? "停止回复" : "发送"}<b>{busy ? "■" : "→"}</b></button></div></div>
     </section>
-    <aside className="agent-inspector"><header><span>AGENT PROFILE</span><h2>{agent.name}</h2><p>{agent.duty}</p></header>{agentId === "producer" && <section className="producer-model-config"><div><b>总制片独立 API</b><em>自动保存</em></div><label>接口模式<select value={producerConfig.adapter || "pollinations"} onChange={(event) => updateProducerConfig({ adapter: event.target.value })}><option value="pollinations">Pollinations</option><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 兼容</option><option value="gemini">Gemini</option><option value="webhook">通用 Webhook</option></select></label><label>API 地址<input value={producerConfig.endpoint || ""} onChange={(event) => updateProducerConfig({ endpoint: event.target.value })} placeholder="https://..." /></label><label>API Key<input type="password" value={producerConfig.apiKey || ""} onChange={(event) => updateProducerConfig({ apiKey: event.target.value })} placeholder="本机保存" /></label><label>模型 ID<input value={producerConfig.model || ""} onChange={(event) => updateProducerConfig({ model: event.target.value })} placeholder="模型 ID" /></label><small>总制片只使用这里配置的文本模型，不再隐式借用其他岗位 API。</small></section>}<section><div><b>本次可调用能力</b><Link href="/skills">管理全部</Link></div>{context.slice(0, 8).map((item, index) => <article key={item.id}><i>{String(index + 1).padStart(2, "0")}</i><span><b>{item.title}</b><small>{item.source} · 自动检索</small></span><em>{item.kind === "skill" ? "技能" : "记忆"}</em></article>)}</section><footer><i /> 本地记忆已同步</footer></aside>
+    <aside className="agent-inspector"><header><span>AGENT PROFILE</span><h2>{agent.name}</h2><p>{agent.duty}</p></header>{["producer", "prompt"].includes(agentId) && <section className="producer-model-config"><div><b>{agentId === "prompt" ? "镜头总控独立 API" : "总制片独立 API"}</b><em>自动保存</em></div><label>接口模式<select value={independentConfig.adapter === "openai" ? (independentConfig.endpoint || "").includes("api.openai.com") ? "openai-official" : "openai-custom" : independentConfig.adapter || "pollinations"} onChange={(event) => { const mode = event.target.value; if (mode === "openai-official") updateIndependentConfig({ adapter: "openai", endpoint: "https://api.openai.com/v1", model: independentConfig.model && independentConfig.model !== "your-model" ? independentConfig.model : "gpt-5" }); else if (mode === "openai-custom") updateIndependentConfig({ adapter: "openai", endpoint: (independentConfig.endpoint || "").includes("api.openai.com") ? "" : independentConfig.endpoint, model: independentConfig.model || "your-model" }); else updateIndependentConfig({ adapter: mode }); }}><option value="pollinations">Pollinations</option><option value="openai-official">OpenAI 官方 API</option><option value="openai-custom">OpenAI 兼容自定义接口</option><option value="anthropic">Anthropic 兼容</option><option value="gemini">Gemini</option><option value="webhook">通用 Webhook</option></select></label><label>Base URL<input value={independentConfig.endpoint || ""} onChange={(event) => updateIndependentConfig({ endpoint: event.target.value })} placeholder={independentConfig.adapter === "openai" ? "https://api.openai.com/v1" : "https://..."} /></label><label>API Key<input type="password" value={independentConfig.apiKey || ""} onChange={(event) => updateIndependentConfig({ apiKey: event.target.value })} placeholder="仅保存在本机" /></label><label>模型 ID<input value={independentConfig.model || ""} onChange={(event) => updateIndependentConfig({ model: event.target.value })} placeholder={agentId === "prompt" ? "例如 gpt-5" : "模型 ID"} /></label><small>{agentId === "prompt" ? "镜头总控的聊天与工作台提示词编译共用此配置，不借用其他岗位 API。" : "总制片只使用这里配置的文本模型，不再隐式借用其他岗位 API。"}</small></section>}<section><div><b>本次可调用能力</b><Link href="/skills">管理全部</Link></div>{context.slice(0, 8).map((item, index) => <article key={item.id}><i>{String(index + 1).padStart(2, "0")}</i><span><b>{item.title}</b><small>{item.source} · 自动检索</small></span><em>{item.kind === "skill" ? "技能" : "记忆"}</em></article>)}</section><footer><i /> 本地记忆已同步</footer></aside>
   </section></main>;
 }
