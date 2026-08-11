@@ -30,7 +30,7 @@ function readAgentConfigs(): SavedAgentConfigs {
 }
 
 function conversationConfig(agentId: string, configs: SavedAgentConfigs) {
-  const own = configs[agentId];
+  const own = ["producer", "director", "writer", "prompt", "editor"].includes(agentId) ? configs[agentId] : undefined;
   if (own && TEXT_MODES.has(String(own.adapter || "")) && own.model) return own;
   for (const fallback of [configs.writer, configs.director, configs.editor]) {
     if (fallback && TEXT_MODES.has(String(fallback.adapter || "")) && fallback.model) return fallback;
@@ -46,6 +46,8 @@ async function responseError(response: Response) {
 function dispatchProducerKnowledge(text: string) {
   if (!/记住|以后|必须|需要|保持|统一|规则|技能|要求|设定|标准|流程/.test(text)) return [] as string[];
   const routes = [
+    { id: "image", name: "生图 Agent", test: /生图|人物图|角色图|场景图|道具图|分镜图|参考图|画面生成|图像一致性/ },
+    { id: "prompt", name: "镜头总控 Agent", test: /提示词|资产调用|Canonical|Start State|End State|Seedance|运镜|镜头状态|参考资产/ },
     { id: "writer", name: "编剧 Agent", test: /剧本|剧情|台词|人物关系|故事|角色弧光/ },
     { id: "director", name: "导演 Agent", test: /导演|表演|风格|调度|一致性|换装|造型/ },
     { id: "storyboard", name: "分镜 Agent", test: /分镜|镜头|场景|构图|道具|景别|机位/ },

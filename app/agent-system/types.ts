@@ -1,4 +1,4 @@
-export type AgentRole = "producer" | "writer" | "director" | "character" | "scene" | "video" | "editor";
+export type AgentRole = "producer" | "writer" | "director" | "character" | "scene" | "storyboard" | "prompt" | "image" | "video" | "voice" | "editor";
 
 export interface Agent {
   id: string;

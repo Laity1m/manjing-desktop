@@ -13,7 +13,7 @@ import { API_MODE_DEFAULT_ENDPOINTS, API_MODE_LABELS, apiModesForRole, discoverA
 import { loadEditorProjectById, persistEditorProject, type EditorProjectClip } from "./lib/editor-project";
 import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/custom-models";
 import { createCanvasFromStudio } from "./lib/production-canvas";
-import { listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
+import { listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
 
 async function archiveGeneratedAsset(url: string, name: string, category: LibraryAssetCategory, duration: number, tags: string[]) {
   if (!url) return;
@@ -25,7 +25,9 @@ async function archiveGeneratedAsset(url: string, name: string, category: Librar
   const blob = await response.blob();
   const extension = blob.type.startsWith("image/") ? (blob.type.includes("jpeg") ? "jpg" : "png") : blob.type.startsWith("audio/") ? (blob.type.includes("mpeg") ? "mp3" : "wav") : "mp4";
   const file = new File([blob], `${name.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120)}.${extension}`, { type: blob.type || (category === "video" ? "video/mp4" : category === "audio" ? "audio/wav" : "image/png") });
-  await saveLibraryFile(file, { category, duration, tags: [...tags, archiveKey] });
+  const identityKey = category === "prop" ? tags.find((tag) => tag.startsWith("asset:prop:"))?.slice("asset:prop:".length) || tags.find((tag) => tag !== "自动生成" && tag !== "重要道具") : undefined;
+  const saved = await saveLibraryFile(file, { category, duration, tags: [...tags, archiveKey], identityKey, locked: category === "prop" });
+  if (category === "prop") await updateLibraryAsset(saved.id, { canonical: true, locked: true, reusable: true, identityKey: identityKey || name });
 }
 
 function autoArchive(url: string, name: string, category: LibraryAssetCategory, duration: number, tags: string[]) {
@@ -42,7 +44,7 @@ function labeledVisualAssets(text: string, label: "场景" | "道具") {
 type Mode = "community" | "cloud";
 type Phase = "idle" | "story" | "characters" | "images" | "video" | "voice" | "music" | "ready" | "exporting" | "error";
 type SceneStatus = "queued" | "writing" | "painting" | "animating" | "voicing" | "ready" | "error";
-type AgentRole = "director" | "writer" | "image" | "video" | "voice" | "editor";
+type AgentRole = "director" | "writer" | "prompt" | "image" | "video" | "voice" | "editor";
 type AgentAdapter = "horde" | "openai" | "anthropic" | "gemini" | "pollinations" | "seedance" | "browser" | "webhook";
 type MotionPreset = "push" | "pull" | "pan-left" | "pan-right" | "float";
 type TransitionPreset = "fade" | "cut" | "flash";
@@ -321,6 +323,7 @@ const TRANSITION_OPTIONS: Array<{ value: TransitionPreset; label: string }> = [
 const AGENT_ROLES: Array<{ id: AgentRole; icon: string; title: string; duty: string; recommends: string[] }> = [
   { id: "director", icon: "导", title: "导演 AI", duty: "审片、纠错、统一风格与节奏", recommends: ["GPT-5.6 Terra", "Gemini 3 Pro", "Qwen 3.5"] },
   { id: "writer", icon: "编", title: "编剧与分镜 AI", duty: "剧本改编、分镜表、提示词", recommends: ["GPT-5.6 Luna", "Gemini 3 Flash", "DeepSeek"] },
+  { id: "prompt", icon: "控", title: "镜头总控 AI", duty: "调用资产、继承状态、整合最终视频提示词", recommends: ["GPT-5.6 Luna", "Gemini 3 Flash", "Qwen 3.5"] },
   { id: "image", icon: "图", title: "生图 AI", duty: "角色设定、场景与一致性关键帧", recommends: ["GPT Image 2", "Nano Banana", "FLUX"] },
   { id: "video", icon: "影", title: "视频 AI", duty: "文生视频、图生视频、参考图生视频", recommends: ["Veo 3.1", "Sora 2", "Seedance 2.0"] },
   { id: "voice", icon: "声", title: "配音 AI", duty: "角色音色、情绪、对白与旁白", recommends: ["Eleven v3", "Gemini TTS", "OpenAI Speech"] },
@@ -338,6 +341,11 @@ const AGENT_PRESETS: Record<AgentRole, AgentPreset[]> = {
     { id: "horde-writer", adapter: "horde", name: "AI Horde 编剧", model: "Gemma 自动调度", note: "免费默认 · 剧本与分镜", badge: "免费" },
     { id: "pollinations-writer", adapter: "pollinations", name: "Pollinations 编剧", model: "openai", note: "推荐 · JSON 分镜", badge: "推荐" },
     { id: "webhook-writer", adapter: "webhook", name: "自定义语言模型", model: "your-llm", note: "OpenAI 兼容或自建转接" },
+  ],
+  prompt: [
+    { id: "browser-prompt", adapter: "browser", name: "漫镜本地镜头总控", model: "Manjing Shot Compiler", note: "免费默认 · 资产绑定、状态继承与提示词编译", badge: "内置" },
+    { id: "pollinations-prompt", adapter: "pollinations", name: "Pollinations 镜头总控", model: "openai", note: "推荐 · 智能整合 Seedance 提示词", badge: "推荐" },
+    { id: "webhook-prompt", adapter: "webhook", name: "自定义镜头总控接口", model: "your-prompt-model", note: "OpenAI 兼容或自建提示词模型" },
   ],
   image: [
     { id: "horde-image", adapter: "horde", name: "AI Horde 生图", model: "Stable Horde", note: "免费默认 · 需要排队", badge: "免费" },
@@ -381,6 +389,50 @@ function uid() {
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function clipStoryboardText(value: string, limit: number) {
+  const text = value.trim();
+  if (text.length <= limit) return text;
+  const headLength = Math.floor(limit * 0.68);
+  const tailLength = Math.max(0, limit - headLength - 32);
+  return `${text.slice(0, headLength)}\n\n【中段已压缩，保留结尾】\n\n${text.slice(-tailLength)}`;
+}
+
+function compactStoryboardContext(value: string, limit = 14000) {
+  const text = value.trim();
+  if (text.length <= limit) return text;
+  const marker = "【本集完整剧本】";
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex < 0) return clipStoryboardText(text, limit);
+  const rules = text.slice(0, markerIndex).trim();
+  const episode = text.slice(markerIndex + marker.length).trim();
+  const rulesBudget = Math.min(3200, Math.floor(limit * 0.24));
+  const compactRules = clipStoryboardText(rules, rulesBudget);
+  const episodeBudget = Math.max(8000, limit - compactRules.length - marker.length - 8);
+  return `${compactRules}\n\n${marker}\n${clipStoryboardText(episode, episodeBudget)}`;
+}
+
+async function withStageTimeout<T>(task: Promise<T>, timeoutMs: number, message: string) {
+  let timer = 0;
+  try {
+    return await Promise.race([
+      task,
+      new Promise<T>((_, reject) => { timer = window.setTimeout(() => reject(new Error(message)), timeoutMs); }),
+    ]);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function withStageProgress<T>(task: Promise<T>, hardTimeoutMs: number, timeoutMessage: string, onTick: (elapsedSeconds: number) => void) {
+  const startedAt = Date.now();
+  const ticker = window.setInterval(() => onTick(Math.floor((Date.now() - startedAt) / 1000)), 10000);
+  try {
+    return await withStageTimeout(task, hardTimeoutMs, timeoutMessage);
+  } finally {
+    window.clearInterval(ticker);
+  }
 }
 
 function formatTime(value: number) {
@@ -486,7 +538,7 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, 
   }
   const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
   if (sceneSource.length < minimumScenes) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
-  const picked = sceneSource.slice(0, targetSeconds <= 15 ? 1 : Math.max(minimumScenes, Math.min(8, maximumScenes))) as Array<Record<string, unknown>>;
+  const picked = sceneSource.slice(0, targetSeconds <= 15 ? 1 : Math.max(minimumScenes, Math.min(16, maximumScenes))) as Array<Record<string, unknown>>;
   const normalizedDurations = normalizeSceneDurations(picked, targetSeconds);
   const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
   const rawCharacters = characterSource.slice(0, 4) as Array<Record<string, unknown>>;
@@ -820,7 +872,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [sceneAction, setSceneAction] = useState<SceneAction | null>(null);
   const [seedanceApiKey, setSeedanceApiKey] = useState("");
   const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-2-0-260128");
-  const [videoResolution, setVideoResolution] = useState<"480p" | "720p" | "1080p">("1080p");
+  const [videoResolution, setVideoResolution] = useState<"480p" | "720p" | "1080p">("720p");
   const [importMessage, setImportMessage] = useState("可按需导入，已具备的环节会自动跳过");
   const [scriptImported, setScriptImported] = useState(false);
   const [volcengineSdk, setVolcengineSdk] = useState<{ installed: boolean; version: string; signerReady: boolean; note: string } | null>(null);
@@ -916,7 +968,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setLibtvProjectUrl(savedCloudEngines.libtvProjectUrl || "");
           setSeedanceApiKey(savedCloudEngines.seedanceKey || "");
           setSeedanceModel(savedCloudEngines.seedanceModel || "doubao-seedance-2-0-260128");
-          setVideoResolution(savedCloudEngines.videoResolution || "1080p");
+          setVideoResolution(savedCloudEngines.videoResolution || "720p");
         }
         if (savedWorkspace) {
           if (savedWorkspace.projectTitle) setProjectTitle(savedWorkspace.projectTitle);
@@ -1111,6 +1163,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   useEffect(() => {
     if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceKey: seedanceApiKey, seedanceModel, videoResolution }));
   }, [libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, videoResolution, agentTeamLoaded]);
+
+  useEffect(() => {
+    const producing = runRef.current !== 0 && !["idle", "ready", "error"].includes(phase);
+    if (producing) window.localStorage.setItem("manjing-production-runtime-v1", JSON.stringify({ active: true, phase, progress, statusText, projectTitle, updatedAt: Date.now() }));
+    else window.localStorage.removeItem("manjing-production-runtime-v1");
+    const protectWindow = (event: BeforeUnloadEvent) => {
+      if (!producing) return;
+      event.preventDefault();
+      event.returnValue = "漫剧仍在制作，关闭窗口会中断当前任务。";
+    };
+    window.addEventListener("beforeunload", protectWindow);
+    return () => window.removeEventListener("beforeunload", protectWindow);
+  }, [phase, progress, statusText, projectTitle]);
 
   useEffect(() => {
     if (!agentTeamLoaded) return;
@@ -1636,7 +1701,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return response;
   }
 
-  async function customApiText(role: "director" | "writer" | "editor", payload: Record<string, unknown>) {
+  async function customApiText(role: "director" | "writer" | "prompt" | "editor", payload: Record<string, unknown>) {
     const config = agentConfigs[role];
     const learned = agentContext(role).slice(0, 8);
     const learnedContext = learned.length ? `\n\n以下是用户已审核启用的岗位技能与记忆，请在适用时运用，并避免机械照抄：\n${learned.map((item) => `- [${item.kind === "skill" ? "技能" : "记忆"}] ${item.title}：${item.content}`).join("\n")}` : "";
@@ -1733,7 +1798,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     throw new Error(options.timeoutMessage || "生成等待超时，请稍后重试");
   }
 
-  async function pollinationsText(role: "director" | "writer" | "editor", system: string, user: string) {
+  async function pollinationsText(role: "director" | "writer" | "prompt" | "editor", system: string, user: string) {
     const key = agentKey(role);
     if (!key.startsWith("pk_")) throw new Error(`${agentName(role)}需要 Pollinations 发布密钥`);
     const response = await fetch("https://gen.pollinations.ai/v1/chat/completions", {
@@ -1759,24 +1824,39 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generateStoryboard(run: number) {
     const minimumCount = sceneCountForDuration(productionDuration);
-    const maximumCount = productionDuration <= 15 ? 1 : Math.min(8, minimumCount + 3);
+    const maximumCount = productionDuration <= 15 ? 1 : Math.min(16, minimumCount + 3);
     const config = agentConfigs.writer;
-    const sourceText = scriptImported ? `这是用户已经完成并锁定的剧本。不得改写剧情、人物关系或结局，只把原剧本结构化拆成分镜：\n${story.trim()}` : story.trim();
+    const storyboardStory = compactStoryboardContext(story.trim());
+    const sourceText = scriptImported ? `这是用户已经完成并锁定的剧本。不得改写剧情、人物关系或结局，只把原剧本结构化拆成分镜：\n${storyboardStory}` : storyboardStory;
+    setStatusText(`${agentName("writer")}正在生成分镜 · 本次上下文 ${Math.ceil(storyboardStory.length / 1000)}K 字符`);
     if (config.adapter === "horde") {
       const task = await startHorde("story", { story: `${sourceText}\n\n${productionDuration <= 15 ? `目标只有 ${productionDuration} 秒，必须设计为一个连续完整镜头，不得拆镜。` : `请分析剧情节拍、场景变化、视角变化和动作复杂度，自主决定 ${minimumCount}–${maximumCount} 个镜头，并为每镜独立决定不同或相同的合理时长；不得机械平均。`} 每镜最多15秒，总时长必须等于目标时长。`, style, count: maximumCount, role: "writer", model: config.model });
-      const result = await pollHorde("text", task.id, run);
+      const result = await pollHorde("text", task.id, run, {
+        maxAttempts: 30,
+        timeoutMessage: "免费分镜模型排队超过 90 秒，请稍后重试或切换更快的编剧模型",
+        onPending: (attempt) => {
+          setProgress(Math.min(10, 4 + Math.ceil(attempt / 5)));
+          setStatusText(`免费分镜 AI 正在排队 · 已等待 ${attempt * 3} 秒 / 最长 90 秒 · 上下文 ${Math.ceil(storyboardStory.length / 1000)}K 字符`);
+        },
+      });
       return String(result.text || "");
     }
     const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。" : "把故事改编为可拍摄短剧。"}${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，必须设计为一个连续完整镜头，禁止拆成多个镜头。` : `先分析剧情 Beat、场景/时空变化、视角变化、动作复杂度和情绪节奏，自主决定 ${minimumCount}–${maximumCount} 个镜头。每个镜头的时长由叙事需要独立决定，可以相同也可以不同，禁止机械平均；重要动作和情绪可更长，转场与反应可更短。`}每镜不得超过15秒，总时长必须精确等于目标时长。先为全剧建立场景身份：同一地点、时间、天气和布景必须复用同一个 environmentKey，并写出 environmentBible，固定空间布局、门窗方向、道具位置、主色调与光线方向。每镜必须写 continuity 说明如何承接上一镜，并用 endState 记录镜头结束时人物位置、朝向、手持道具和动作姿态；正式换景时明确说明。只返回 JSON，所有内容使用简体中文。结构：{"title":"标题","music":"无歌词配乐描述","shotPlan":{"count":镜头数,"reason":"拆镜或不拆镜的简短理由"},"characters":[{"name":"角色名","role":"身份","appearance":"固定五官、发型、服装、年龄和气质","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","environmentKey":"场景身份","environmentBible":"固定背景和空间规则","continuity":"与上一镜的关系或换景说明","endState":"镜头结束状态","characters":["角色名"],"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"运镜","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色外观与场景背景跨镜头必须一致；每镜都要推动剧情。`;
-    const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n资产规划要求：每个镜头的 visual 必须使用 [场景:场景身份] 标记固定场景，并用 [道具:道具1,道具2] 标记真正推动剧情或跨镜重复出现的重要道具；普通桌椅和无关装饰不要列为重要道具。分镜图必须组合已有的人物身份、当前造型、场景和道具资产，不得脱离资产重新设计。\n${scriptImported ? "用户定稿剧本" : "故事"}：${story.trim()}`;
-    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("writer", { task: "storyboard", system, prompt: user, minimumCount, maximumCount, duration: productionDuration });
-    return pollinationsText("writer", system, user);
+    const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n资产规划要求：每个镜头的 visual 必须使用 [场景:场景身份] 标记固定场景，并用 [道具:道具1,道具2] 标记真正推动剧情或跨镜重复出现的重要道具；普通桌椅和无关装饰不要列为重要道具。分镜图必须组合已有的人物身份、当前造型、场景和道具资产，不得脱离资产重新设计。\n${scriptImported ? "用户定稿剧本" : "故事"}：${storyboardStory}`;
+    const storyboardTask = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
+      ? customApiText("writer", { task: "storyboard", system, prompt: user, minimumCount, maximumCount, duration: productionDuration })
+      : pollinationsText("writer", system, user);
+    const storyboardTimeoutMs = Math.min(600000, 180000 + Math.ceil(productionDuration / 30) * 60000);
+    return withStageProgress(storyboardTask, storyboardTimeoutMs, `分镜模型连续 ${Math.round(storyboardTimeoutMs / 1000)} 秒没有返回，请检查接口状态或切换模型后重试`, (elapsed) => {
+      setProgress(Math.min(12, 5 + Math.floor(elapsed / 45)));
+      setStatusText(`${agentName("writer")}仍在生成完整分镜 · 已等待 ${elapsed} 秒${elapsed >= 120 ? " · 漫镜继续等待原请求，不会重复提交" : ""} · 上下文 ${Math.ceil(storyboardStory.length / 1000)}K 字符`);
+    });
   }
 
   async function directorReview(draft: string, run: number) {
     const config = agentConfigs.director;
     const minimumCount = sceneCountForDuration(productionDuration);
-    const maximumCount = productionDuration <= 15 ? 1 : Math.min(8, minimumCount + 3);
+    const maximumCount = productionDuration <= 15 ? 1 : Math.min(16, minimumCount + 3);
     setStatusText(`${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
     if (config.adapter === "horde") {
       const task = await startHorde("director", { story: story.trim(), style, draft, count: maximumCount, minCount: minimumCount, model: config.model });
@@ -1791,9 +1871,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       return String(result.text || draft);
     }
     const system = `你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜。${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，最终必须只有一个连续完整镜头，发现拆镜必须合并。` : `根据剧情 Beat、场景变化、视角必要性、动作复杂度和情绪节奏，独立决定 ${minimumCount}–${maximumCount} 镜，并逐镜决定时长；可以相同也可以不同，但禁止机械平均。`}单镜不得超过15秒，总时长必须精确等于目标时长。检查每个 environmentKey 的 environmentBible 是否稳定，逐镜校验人物站位、朝向、视线、手持道具、动作方向、背景布局和光线连续性；判断 continuity 是连续动作、同场景换机位、反打还是正式换景，并保证上一镜 endState 能被下一镜自然承接。更新 shotPlan 后只返回完整 JSON，不要解释。`;
-    const user = `原故事：${story.trim()}\n视觉风格：${style}\n编剧初稿：${draft}`;
-    if (CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) return customApiText("director", { task: "review_storyboard", system, prompt: user, draft });
-    return pollinationsText("director", system, user);
+    const user = `原故事：${compactStoryboardContext(story.trim())}\n视觉风格：${style}\n编剧初稿：${draft}`;
+    const reviewTask = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
+      ? customApiText("director", { task: "review_storyboard", system, prompt: user, draft })
+      : pollinationsText("director", system, user);
+    return withStageProgress(reviewTask, 420000, "导演复核连续 420 秒没有返回，请检查导演模型接口", (elapsed) => {
+      setStatusText(`${agentName("director")}正在复核分镜 · 已等待 ${elapsed} 秒 · 不会重复提交`);
+    });
   }
 
   async function seedanceRequest(path: string, init: RequestInit, label: string, maxAttempts = 3) {
@@ -1841,6 +1925,43 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     if (lastResponse) return lastResponse;
     throw new Error(`${label}失败：没有收到接口响应`);
+  }
+
+  async function compileShotMotionPrompt(scene: Scene, sceneIndex: number, previousScene?: Scene) {
+    const cast = characters.filter((character) => scene.characters.includes(character.name));
+    const props = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
+    const assetBindings = {
+      characters: cast.map((character) => ({ name: character.name, assetId: character.arkAssetId || character.id, appearance: character.appearance })),
+      scene: { id: scene.environmentKey || scene.title, bible: scene.environmentBible || scene.visual },
+      props,
+      startFrame: scene.remoteImageUrl || scene.imageUrl || "",
+      previousEndFrame: previousScene?.remoteImageUrl || previousScene?.imageUrl || "",
+    };
+    const deterministic = `${motionVisualPrompt(style)}, preserve the exact character identities, faces, hair and current costumes from the bound canonical assets. Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the storyboard frame"}. ${previousScene ? `Continue spatially and physically from shot ${sceneIndex}: ${previousScene.endState || previousScene.action}.` : "This is the opening shot."} Current action: ${scene.action}. Camera movement: ${scene.camera}. Important props that must remain correct: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state that the next shot can inherit"}. ${scene.speaker ? `${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement.` : "Natural performance and physically coherent motion."} Preserve architecture, prop positions, weather, time, palette and light direction. One continuous cinematic shot, no unintended cuts, no subtitles, no duplicated people, no identity drift.`;
+    const config = agentConfigs.prompt;
+    if (config.adapter === "browser") {
+      recordActivity("prompt", `镜头 ${sceneIndex + 1} 已由本地镜头总控完成资产绑定与提示词编译`, "done");
+      return deterministic;
+    }
+    const learned = agentContext("prompt").slice(0, 8);
+    const system = `你是漫镜的镜头总控 Agent，位于导演与视频 Agent 之间。你不改写剧情，只负责绑定 Canonical 资产、继承 Start/End State、整合表演与运镜，并针对目标视频模型编译最终提示词。只返回 JSON：{"prompt":"最终视频提示词","negativePrompt":"必须避免的问题","assetBindings":["实际使用的资产ID"],"continuityCheck":"状态继承检查"}。提示词必须是一个连续镜头，禁止虚构未提供的资产。${learned.length ? `\n已启用技能：\n${learned.map((item) => `- ${item.title}：${item.content.slice(0, 900)}`).join("\n")}` : ""}`;
+    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: scene.camera, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
+    try {
+      setStatusText(`${agentName("prompt")}正在为镜头 ${sceneIndex + 1} 绑定资产并编译最终提示词`);
+      const raw = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
+        ? await withStageTimeout(customApiText("prompt", { task: "compile_video_prompt", system, prompt: user, shot: scene, assets: assetBindings }), 60000, "镜头总控等待超过 60 秒")
+        : await withStageTimeout(pollinationsText("prompt", system, user), 60000, "镜头总控等待超过 60 秒");
+      const jsonText = raw.replace(/```json/gi, "").replace(/```/g, "").match(/\{[\s\S]*\}/)?.[0] || raw;
+      const parsed = JSON.parse(jsonText) as { prompt?: string; negativePrompt?: string };
+      const compiled = String(parsed.prompt || "").trim();
+      if (!compiled) throw new Error("镜头总控没有返回最终提示词");
+      markContextUsed(learned.map((item) => item.id));
+      recordActivity("prompt", `镜头 ${sceneIndex + 1} 的资产、状态和运镜提示词已编译`, "done");
+      return `${compiled}${parsed.negativePrompt ? ` Avoid: ${parsed.negativePrompt}` : ""}`;
+    } catch (reason) {
+      recordActivity("prompt", `镜头总控接口未完成，已安全降级到本地提示词编译：${reason instanceof Error ? reason.message : "未知错误"}`, "warning");
+      return deterministic;
+    }
   }
 
   async function videoReferences(scene: Scene) {
@@ -2087,8 +2208,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (!current) return fallback;
     const references = (await Promise.all([...castForScene.slice(0, 4).map((character) => consistencyImage(character.imageUrl || "", `Canonical角色：${character.name}`)), previousScene?.imageUrl ? consistencyImage(previousScene.imageUrl, "上一镜结束画面") : Promise.resolve(null)])).filter(Boolean) as Array<{ url: string; label: string }>;
     try {
-      const system = "你是影视连续性审核引擎。必须真实比较所给图片，不得因为提示词声称一致就直接给高分。只返回JSON。每项0-100；看不到或没有依据的项返回null。";
-      const prompt = `审核当前生成分镜与角色标准图、上一镜画面是否一致。预期人物：${castForScene.map((item) => `${item.name}(${item.appearance})`).join("；") || "无"}。预期场景：${scene.environmentKey || scene.title}；${scene.environmentBible || scene.visual}。重要道具：${labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").join("、") || "无明确重要道具"}。Start State：${scene.startState || "首镜"}。动作：${scene.action}。请检查人物身份、服装、场景、道具、空间关系、镜头承接和光线。返回：{"scores":{"characterIdentity":0,"costume":0,"scene":0,"props":0,"spatialContinuity":0,"shotContinuity":0,"lighting":0},"findings":["具体问题"]}`;
+      const system = "你是影视连续性审核引擎。必须真实比较所给图片，不得因为提示词声称一致就直接给高分。只返回JSON。每项0-100；看不到、被遮挡、画外或没有依据的项必须返回null且不得写成缺陷。只审核本镜头景别和构图中实际可见、且剧本明确要求出现的内容，禁止要求一个近景同时展示完整房间、下装或所有场景锚点。旁白、广告声等无实体角色不审核人物和服装。新增耳饰、纹身、眼镜等标准图没有的身份特征属于真实偏差。";
+      const prompt = `审核当前生成分镜与角色标准图、上一镜画面是否一致。镜头标题：${scene.title}。景别/机位：${scene.camera}。预期人物：${castForScene.map((item) => `${item.name}(${item.appearance})`).join("；") || "无实体人物"}。预期场景：${scene.environmentKey || scene.title}；${scene.environmentBible || scene.visual}。重要道具：${labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").join("、") || "无明确重要道具"}。Start State：${scene.startState || "首镜"}。动作：${scene.action}。先判断每项是否应在当前景别中可见，再检查人物身份、服装、场景、道具、空间关系、镜头承接和光线。未入镜的房门、床、窗户、下装或被遮挡的五官不得扣分；只有本镜头明确要求出现却缺失，或实际出现但与 Canonical 标准冲突时才扣分。返回：{"scores":{"characterIdentity":0,"costume":0,"scene":0,"props":0,"spatialContinuity":0,"shotContinuity":0,"lighting":0},"findings":["只写可见且可修复的具体偏差"]}`;
       const response = await fetch("/api/desktop/invoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: config.adapter, endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, role: "director", task: "consistency_check", system, prompt, images: [current, ...references] }) });
       if (!response.ok) return { ...fallback, findings: [...fallback.findings, `视觉审核接口不可用（${response.status}），已降级为结构检查。`] };
       const data = await response.json() as { text?: string };
@@ -2455,9 +2576,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         } catch (reason) {
           if (runRef.current !== run) throw new Error("任务已取消");
           const detail = reason instanceof Error ? reason.message : "接口没有返回有效结果";
-          if (agentConfigs.director.adapter !== "horde") throw new Error(`${agentName("director")}复核失败：${detail}`);
-          setStatusText("AI Horde 免费导演排队超时，保留编剧初稿继续制作");
-          recordActivity("director", `AI Horde 免费导演未及时交稿（${detail}），已采用编剧初稿继续制作`, "warning");
+          setStatusText(`${agentName("director")}暂未完成复核，已保留编剧初稿并继续制作`);
+          recordActivity("director", `${agentName("director")}复核未及时完成（${detail}），已安全降级采用编剧初稿，不中断后续制作`, "warning");
         }
         setProgress(15);
         try {
@@ -2519,9 +2639,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const environmentPlans = [...new Map(work.map((scene) => [scene.environmentKey || labeledVisualAssets(scene.visual, "场景")[0] || scene.title, scene])).entries()].slice(0, 16);
       const propNames = [...new Set(work.flatMap((scene) => labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具")))].slice(0, 16);
       recordActivity("image", `生图岗位已提取 ${environmentPlans.length} 个场景资产与 ${propNames.length} 个重要道具资产`);
+      const reusablePropAssets = (await listLibraryAssets()).filter((asset) => asset.category === "prop" && asset.reusable !== false).sort((a, b) => Number(b.canonical) - Number(a.canonical) || Number(b.locked) - Number(a.locked));
+      const propUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
+      for (const prop of propNames) {
+        const normalized = prop.trim().toLocaleLowerCase("zh-CN");
+        const existing = reusablePropAssets.find((asset) => `${asset.identityKey || ""} ${asset.name} ${asset.tags.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalized));
+        if (!existing) continue;
+        const [loaded] = await loadLibraryAssets([existing.id]);
+        if (!loaded?.url) continue;
+        const response = await fetch(loaded.url);
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        const reference = propUploadKey ? await uploadPollinationsMedia(blob, `canonical-prop-${existing.id}.png`, propUploadKey) : await blobToDataUrl(blob);
+        propAssetReferences.set(prop, reference);
+        await markLibraryAssetUsed(existing.id);
+        recordActivity("image", `重要道具“${prop}”已绑定资产库 Canonical 版本，不再重新设计`, "done");
+      }
       for (let index = 0; index < environmentPlans.length; index += 1) {
         const [environmentKey, scene] = environmentPlans[index];
-        const prompt = `${frameVisualPrompt(style)}, environment concept sheet for ${environmentKey}, ${scene.environmentBible || scene.visual}, empty set without people, lock exact architecture, doors, windows, furniture, important prop positions, weather, time of day, palette and light direction, cinematic production design reference, no text`;
+        const prompt = `${frameVisualPrompt(style)}, environment concept sheet for ${environmentKey}, ${scene.environmentBible || scene.visual}, empty set without people and without movable important story props, lock only architecture, doors, windows, fixed furniture, weather, time of day, palette and light direction; canonical props will be composited later from separate reference assets, do not invent or redesign them, cinematic production design reference, no text`;
         if (agentConfigs.image.adapter !== "horde") {
           const asset = await pollinationsMedia("image", prompt, 200 + index, { imageAspect: aspect });
           const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
@@ -2535,6 +2671,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       for (let index = 0; index < propNames.length; index += 1) {
         const prop = propNames[index];
+        if (propAssetReferences.has(prop)) continue;
         const ownerScenes = work.filter((scene) => labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").includes(prop));
         const prompt = `${frameVisualPrompt(style)}, production prop identity sheet for ${prop}, exact shape, material, color, scale and distinctive details, front side and three-quarter reference views, neutral background, no person, no redesign, no text`;
         const referenceScene = ownerScenes[0] || work[0];
@@ -2573,7 +2710,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const sceneProps = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
           const framePrompt = `${frameVisualPrompt(style)}, final storyboard frame assembled from locked character identity, current costume, environment and prop references; do not redesign referenced assets. ${continuityGuide} Important props: ${sceneProps.join(", ") || "none"}. Shot: ${scene.shot}. Visual: ${scene.visual}. Action: ${scene.action}. expressive face, natural anatomy and hands, layered depth for camera motion, coherent spatial layout, no text, no speech bubbles, no panel borders`;
           const environmentReference = sceneAssetReferences.get(scene.environmentKey || labeledVisualAssets(scene.visual, "场景")[0] || scene.title);
-          const references = [...castForScene.map((item) => item.remoteUrl).filter(Boolean), ...(environmentReference ? [environmentReference] : []), ...sceneProps.map((prop) => propAssetReferences.get(prop)).filter(Boolean), ...(sameEnvironment && previousScene?.remoteImageUrl ? [previousScene.remoteImageUrl] : [])].filter((value, refIndex, all) => all.indexOf(value) === refIndex) as string[];
+          const references = [...castForScene.map((item) => item.remoteUrl).filter(Boolean), ...sceneProps.map((prop) => propAssetReferences.get(prop)).filter(Boolean), ...(environmentReference ? [environmentReference] : []), ...(sameEnvironment && previousScene?.remoteImageUrl ? [previousScene.remoteImageUrl] : [])].filter((value, refIndex, all) => all.indexOf(value) === refIndex) as string[];
           const frame = await pollinationsMedia("image", framePrompt, index, { references });
           const frameUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : frameUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`, frameUploadKey) : "";
@@ -2588,7 +2725,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (report.mode === "vision" && report.overall < 85) {
           setStatusText(`镜头 ${index + 1} 一致性 ${report.overall} 分，正在进行唯一一次约束修复`);
           recordActivity("image", `“${scene.title}”一致性未达85分：${report.findings.join("；").slice(0, 180)}，自动修复一次`, "warning");
-          const repairPrompt = `${frameVisualPrompt(style)}, regenerate this exact storyboard shot while correcting these failures: ${report.findings.join("; ")}. Canonical characters: ${characterGuide}. Locked environment: ${scene.environmentBible || scene.visual}. Start state that must be preserved: ${scene.startState}. Important props: ${labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").join(", ")}. Do not redesign faces, costumes, scene architecture or props. ${scene.action}, ${scene.camera}, no text`;
+          const repairPrompt = `${frameVisualPrompt(style)}, regenerate this exact storyboard shot while correcting only visible, actionable failures: ${report.findings.join("; ")}. Canonical characters: ${characterGuide}. Match the supplied canonical face shape, facial proportions, hairstyle, age, fatigue details and costume exactly. Never add earrings, necklaces, glasses, tattoos, hair ornaments or other accessories unless explicitly present in the canonical asset or script. Locked environment: ${scene.environmentBible || scene.visual}. Preserve only environment anchors visible in this shot; do not widen or change the requested shot merely to reveal off-screen anchors. Start state that must be preserved: ${scene.startState}. Important props: ${labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").join(", ")}. Do not redesign faces, costumes, scene architecture or props. ${scene.action}, ${scene.camera}, no text`;
           const repairedUrl = await makeImage(scene, 500 + index, run, characterGuide, aspect, repairPrompt);
           completedScene = { ...completedScene, imageUrl: repairedUrl, remoteImageUrl: undefined };
           report = await evaluateShotConsistency(completedScene, repairedUrl, castForScene, previousScene, 2);
@@ -2625,7 +2762,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setScenes(work);
           const previousScene = index > 0 ? work[index - 1] : undefined;
           const sameEnvironment = Boolean(previousScene && scene.environmentKey && previousScene.environmentKey === scene.environmentKey);
-          const motionPrompt = `${motionVisualPrompt(style)}, preserve the exact character identity, face, hair and costume from the start frame. Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. ${sameEnvironment ? `Continue spatially and physically from the prior shot end state: ${previousScene?.endState || previousScene?.action}.` : scene.continuity || "Establish the new environment clearly."} Current action: ${scene.action}. Camera: ${scene.camera}. End this shot in the exact state: ${scene.endState || "a stable pose that can continue into the next shot"}. ${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement. Preserve architecture, prop positions, weather, time, color palette and light direction. One continuous cinematic shot, coherent physics, no subtitles, no cuts.`;
+          const motionPrompt = await compileShotMotionPrompt(scene, index, previousScene);
           const clip = await pollinationsMedia("video", motionPrompt, index, { references: await videoReferences(scene), duration: scene.duration, resumeKey: scene.id });
           work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus } : item);
           autoArchive(clip.url, `${projectTitle}-${scene.title}-视频`, "video", Math.max(4, Math.min(15, scene.duration)), ["自动生成", "视频", scene.id]);

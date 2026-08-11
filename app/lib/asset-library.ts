@@ -65,7 +65,7 @@ function normalizedAssetMetadata(asset: LibraryAsset): LibraryAsset {
   const extension = asset.name.match(/\.[a-z0-9]{2,8}$/i)?.[0] || "";
   const stem = asset.name.slice(0, extension ? -extension.length : undefined);
   const semantic = stem.match(/(?:^|-)([^-]+)-(角色设定|人物设定|角色资产|场景|分镜|视频|道具设定|配音|口型视频)$/);
-  const inferredIdentity = asset.identityKey || (asset.category === "character" ? semantic?.[1] : undefined);
+  const inferredIdentity = asset.identityKey || (["character", "prop"].includes(asset.category) ? semantic?.[1] : undefined);
   return {
     ...asset,
     name: semantic ? `${semantic[1]}-${semantic[2]}${extension}` : asset.name,

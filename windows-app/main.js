@@ -7,6 +7,7 @@ const { createDesktopRuntime, invokeImageModel, volcengineSdkStatus } = require(
 
 const APP_SCHEME = "manjing";
 const APP_URL = "manjing://app/";
+let companionWindow = null;
 const isSmokeTest = process.argv.includes("--smoke-test");
 const isDirectorModelSmokeTest = process.argv.includes("--smoke-director-model");
 const isEditorHandoffSmokeTest = process.argv.includes("--smoke-editor-handoff");
@@ -86,6 +87,68 @@ function finishSmokeTest() {
   setTimeout(() => app.exit(0), 250);
 }
 
+function openCompanionWindow(url) {
+  const revealCompanion = () => {
+    if (!companionWindow || companionWindow.isDestroyed()) return;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      companionWindow.setBounds(mainWindow.getBounds());
+      mainWindow.hide();
+    }
+    companionWindow.show();
+    companionWindow.focus();
+  };
+  if (companionWindow && !companionWindow.isDestroyed()) {
+    companionWindow.hide();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+    companionWindow.webContents.once("did-finish-load", revealCompanion);
+    void companionWindow.loadURL(url);
+    return;
+  }
+  const initialBounds = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : { width: 1280, height: 820 };
+  companionWindow = new BrowserWindow({
+    ...initialBounds,
+    minWidth: 860,
+    minHeight: 620,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#f4f1eb",
+    title: "漫镜 · AI 漫剧工作室",
+    icon: path.join(__dirname, "build", "icon.svg"),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      spellcheck: false,
+      webSecurity: true
+    }
+  });
+  companionWindow.setMenuBarVisibility(false);
+  companionWindow.webContents.once("did-finish-load", revealCompanion);
+  companionWindow.on("closed", () => {
+    companionWindow = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  companionWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+    if (isAppUrl(targetUrl)) void companionWindow.loadURL(targetUrl);
+    else {
+      const target = safeHttpsUrl(targetUrl);
+      if (target) void shell.openExternal(target);
+    }
+    return { action: "deny" };
+  });
+  companionWindow.webContents.on("will-navigate", (event, targetUrl) => {
+    if (isAppUrl(targetUrl)) return;
+    event.preventDefault();
+    const target = safeHttpsUrl(targetUrl);
+    if (target) void shell.openExternal(target);
+  });
+  void companionWindow.loadURL(url);
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -127,7 +190,9 @@ function createWindow() {
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isAppUrl(url)) {
-      void mainWindow.loadURL(url);
+      const target = new URL(url);
+      if (target.searchParams.get("companion") === "1") openCompanionWindow(url);
+      else void mainWindow.loadURL(url);
     } else {
       const target = safeHttpsUrl(url);
       if (target) void shell.openExternal(target);

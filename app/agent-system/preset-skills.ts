@@ -1,6 +1,6 @@
 export interface PresetSkill {
   id: string;
-  agentId: "director" | "writer" | "storyboard" | "video" | "voice" | "editor";
+  agentId: "director" | "writer" | "storyboard" | "prompt" | "image" | "video" | "voice" | "editor";
   title: string;
   content: string;
   tags: string[];
@@ -9,6 +9,33 @@ export interface PresetSkill {
 }
 
 export const PRESET_SKILLS: PresetSkill[] = [
+  {
+    id: "prompt-canonical-asset-binding",
+    agentId: "prompt",
+    title: "Canonical 资产绑定与调用",
+    content: "编译视频提示词前，必须先读取当前项目、剧集与镜头编号，再绑定已锁定的人物身份、当前造型、场景、关键道具、上一镜结束画面和可用声音资产。优先使用 Canonical 资产 ID，不得仅凭相似名称猜测资产。提示词中明确哪些内容必须保持、哪些内容允许变化；找不到必要资产时标记缺失，不得虚构已经绑定。",
+    tags: ["Canonical", "资产调用", "人物一致性", "项目资产"],
+    source: "漫镜内置 · 镜头总控 Agent",
+    sourceUrl: "https://github.com/Laity1m/manjing-desktop",
+  },
+  {
+    id: "prompt-state-propagation",
+    agentId: "prompt",
+    title: "Start State / End State 镜头状态传递",
+    content: "每个镜头提示词必须读取上一镜 End State 作为本镜 Start State，核对人物位置、朝向、动作姿态、手持道具、门窗状态、服装、时间和光线。只有剧本明确发生变化时才能修改状态。提示词结尾写明本镜必须达到的 End State，为下一镜提供可继承状态。",
+    tags: ["Start State", "End State", "连续性", "状态传递"],
+    source: "漫镜内置 · 镜头总控 Agent",
+    sourceUrl: "https://github.com/Laity1m/manjing-desktop",
+  },
+  {
+    id: "prompt-seedance-camera-language",
+    agentId: "prompt",
+    title: "Seedance 2.0 运镜提示词编排",
+    content: "根据导演意图选择且只选择必要运镜。推进用于加强主体和情绪，拉远用于揭示环境，横移用于跟随或展示空间，环绕用于突出主体关系，升降用于尺度变化，甩镜用于明确转场，跟拍用于连续行动。提示词按主体初始状态、动作过程、运镜方向与速度、环境动态、结束状态、稳定性限制的顺序编写；避免同时堆叠冲突运镜和过多动作。",
+    tags: ["Seedance 2.0", "运镜", "提示词", "镜头语言"],
+    source: "漫镜内置 · Seedance 运镜规范",
+    sourceUrl: "https://github.com/Laity1m/manjing-desktop",
+  },
   {
     id: "director-creative-brief",
     agentId: "director",

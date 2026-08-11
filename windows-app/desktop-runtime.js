@@ -4,10 +4,28 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { invokeEnterpriseAsset } = require("./enterprise-assets");
 
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const API_TIMEOUT_MS = 30000;
-const TEXT_ROLE_TIMEOUT_MS = { writer: 120000, director: 120000, editor: 90000 };
+const TEXT_ROLE_TIMEOUT_MS = {
+  producer: 300000,
+  writer: 420000,
+  director: 420000,
+  character: 300000,
+  scene: 300000,
+  storyboard: 420000,
+  prompt: 180000,
+  image: 300000,
+  video: 300000,
+  voice: 300000,
+  editor: 300000,
+};
+const TEXT_TASK_TIMEOUT_MS = {
+  storyboard: 600000,
+  review_storyboard: 420000,
+  compile_video_prompt: 180000,
+};
 const IMAGE_GENERATION_TIMEOUT_MS = 180000;
 const TRANSIENT_PROVIDER_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504, 520, 522, 524]);
 const SEEDANCE_ARK_API = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks";
@@ -344,8 +362,20 @@ async function invokeTextModel(input, fetchImpl = fetch) {
     if (!target) throw Object.assign(new Error("通用 Webhook 需要填写有效接口地址"), { statusCode: 400 });
     body = { role: input?.role, model, task: input?.task, system, prompt, images, ...(input?.payload || {}) };
   }
-  const timeoutMs = TEXT_ROLE_TIMEOUT_MS[role] || 90000;
-  const roleLabel = { writer: "编剧 AI", director: "导演 AI", editor: "剪辑 AI" }[role] || "文本 AI";
+  const timeoutMs = TEXT_TASK_TIMEOUT_MS[String(input?.task || "")] || TEXT_ROLE_TIMEOUT_MS[role] || 300000;
+  const roleLabel = {
+    producer: "总制片 AI",
+    writer: "编剧 AI",
+    director: "导演 AI",
+    character: "角色 AI",
+    scene: "场景 AI",
+    storyboard: "分镜 AI",
+    prompt: "镜头总控 AI",
+    image: "生图 AI",
+    video: "视频 AI",
+    voice: "配音 AI",
+    editor: "剪辑 AI",
+  }[role] || "文本 AI";
   const data = await fetchProviderJson(target, {
     method: "POST",
     headers: providerHeaders(mode, apiKey, true),
@@ -934,6 +964,7 @@ async function desktopApiResponse(request, url, dataRoot) {
     }
     if (request.method !== "POST") return jsonResponse({ error: "只支持 GET 或 POST 请求" }, 405);
     const input = await readJsonRequest(request);
+    if (url.pathname === "/api/desktop/enterprise-assets") return jsonResponse(await invokeEnterpriseAsset(input));
     if (url.pathname === "/api/desktop/models") return jsonResponse(await discoverRemoteModels(input));
     if (url.pathname === "/api/desktop/mcp") return jsonResponse(await invokeMcp(input));
     if (url.pathname === "/api/desktop/invoke") return jsonResponse(await invokeTextModel(input));

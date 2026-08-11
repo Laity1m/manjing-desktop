@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import SiteNav from "../components/SiteNav";
 import ConfirmButton from "../components/ConfirmButton";
+import EnterpriseAssetPanel from "./EnterpriseAssetPanel";
 import { deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, saveLibraryFile, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "../lib/asset-library";
 
 const CATEGORY_LABELS: Record<LibraryAssetCategory, string> = {
@@ -161,6 +162,7 @@ export default function AssetLibraryClient() {
   return <main className="portal-page asset-library-page">
     <SiteNav current="assets" />
     <header className="asset-library-hero"><div><p>复用素材库</p><h1>资产库</h1><span>AI 依据剧本中的角色、场景、道具与镜头命名，后续按同名资产自动引用。</span></div><div className="asset-library-primary"><button onClick={() => inputRef.current?.click()} disabled={busy}>导入素材</button><button className="secondary" onClick={sendToStudio} disabled={busy}>发送到工作台</button>{selected.length > 0 && <ConfirmButton onConfirm={removeSelected} disabled={busy} ariaLabel={`批量删除 ${selected.length} 个资产`} confirmLabel={`确认删除 ${selected.length} 个`}>批量删除</ConfirmButton>}<input ref={inputRef} hidden multiple type="file" accept="image/*,video/*,audio/*" onChange={(event) => { void importFiles(event.target.files); event.currentTarget.value = ""; }} /></div></header>
+    <EnterpriseAssetPanel />
     <section className="asset-library-controls"><div className="asset-kind-tabs"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>全部</button>{(Object.keys(CATEGORY_LABELS) as LibraryAssetCategory[]).map((key) => <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{CATEGORY_LABELS[key]}</button>)}</div><label>分类<select value={category} onChange={(event) => setCategory(event.target.value as LibraryAssetCategory)}>{(Object.keys(CATEGORY_LABELS) as LibraryAssetCategory[]).map((key) => <option key={key} value={key}>{CATEGORY_LABELS[key]}</option>)}</select></label><label className="asset-library-search"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索素材" /></label></section>
     <p className="asset-library-message" role="status"><b>{selected.length ? `${selected.length} 个已选` : "0 个已选"}</b> {message}</p>
     {visible.length ? <section className="asset-library-grid">{visible.map((asset) => <article key={asset.id} className={selected.includes(asset.id) ? "selected" : ""}>

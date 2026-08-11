@@ -1,6 +1,6 @@
 {
   "name": "manjing-desktop",
-  "version": "1.4.9",
+  "version": "1.5.0",
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "description": "漫镜 AI 漫剧工作室 Windows 原生直载安装版",
@@ -24,7 +24,7 @@
   "build": {
     "appId": "com.manjing.desktop",
     "productName": "漫镜",
-    "artifactName": "漫镜-1.4.9-系列项目系统-${arch}.${ext}",
+    "artifactName": "漫镜-${version}-系列项目系统-${arch}.${ext}",
     "asar": true,
     "compression": "maximum",
     "directories": {
@@ -35,6 +35,7 @@
       "main.js",
       "preload.js",
       "desktop-runtime.js",
+      "enterprise-assets.js",
       "build/icon.svg",
       "build/icon.png",
       "package.json"

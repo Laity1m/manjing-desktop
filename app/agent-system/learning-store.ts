@@ -66,20 +66,69 @@ export const AGENT_PROFILES: AgentProfile[] = [
   { id: "director", name: "导演 Agent", icon: "导", duty: "统筹风格、表演和镜头语言" },
   { id: "writer", name: "编剧 Agent", icon: "编", duty: "学习剧情、对白和人物弧光" },
   { id: "storyboard", name: "分镜 Agent", icon: "镜", duty: "拆解场次、景别和节奏" },
+  { id: "prompt", name: "镜头总控 Agent", icon: "控", duty: "调用项目资产、继承镜头状态并编译最终视频提示词" },
+  { id: "image", name: "生图 Agent", icon: "图", duty: "生成人物、造型、场景、道具与一致性分镜图" },
   { id: "video", name: "视频 Agent", icon: "影", duty: "学习动态提示词和模型适配" },
   { id: "voice", name: "配音 Agent", icon: "声", duty: "学习声音、情绪和对白表演" },
   { id: "editor", name: "剪辑 Agent", icon: "剪", duty: "学习剪辑、字幕、音效和完播节奏" },
 ];
 
 const STORE_KEY = "manjing-agent-learning-v145";
-const PRESET_KEY = "manjing-agent-preset-skills-v1";
+const PRESET_KEY = "manjing-agent-preset-skills-v2";
+const IMPORTED_PRESET_KEY = "manjing-agent-imported-skills-v1";
+let learnedItemsCache: LearnedItem[] | null = null;
+let importedSkillsLoading = false;
+
+function scheduleImportedDefaultSkills() {
+  if (typeof window === "undefined" || importedSkillsLoading || localStorage.getItem(IMPORTED_PRESET_KEY) === "1") return;
+  importedSkillsLoading = true;
+  const load = () => {
+    void import("./imported-default-skills").then(({ IMPORTED_DEFAULT_SKILLS }) => {
+      const current = readLearnedItems();
+      const imported = IMPORTED_DEFAULT_SKILLS.map((preset) => ({
+        ...createLearnedItem({
+          agentId: preset.agentId,
+          kind: "skill",
+          title: preset.title,
+          content: preset.content,
+          source: preset.source,
+          sourceUrl: preset.sourceUrl,
+          confidence: 100,
+          enabled: true,
+          status: "approved" as const,
+          memoryClass: "permanent" as const,
+          scope: "agent" as const,
+          importance: 8,
+          tags: preset.tags,
+          whyRemembered: "漫镜内置岗位技能，已在浏览器空闲时完成分类入库",
+        }),
+        id: `preset-${preset.id}`,
+        sourceHash: `preset-${preset.id}`,
+      }));
+      localStorage.setItem(IMPORTED_PRESET_KEY, "1");
+      writeLearnedItems(mergeLearnedItems(current, imported));
+    }).catch(() => {
+      importedSkillsLoading = false;
+    });
+  };
+  if ("requestIdleCallback" in window) {
+    (window as Window & { requestIdleCallback: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback(load, { timeout: 2500 });
+  } else {
+    window.setTimeout(load, 120);
+  }
+}
 
 export function readLearnedItems(): LearnedItem[] {
   if (typeof window === "undefined") return [];
+  scheduleImportedDefaultSkills();
+  if (learnedItemsCache) return learnedItemsCache;
   try {
     const parsed = JSON.parse(localStorage.getItem(STORE_KEY) || "[]");
     const current = Array.isArray(parsed) ? parsed.map(normalizeLearnedItem).filter(Boolean) as LearnedItem[] : [];
-    if (localStorage.getItem(PRESET_KEY) === "1") return current;
+    if (localStorage.getItem(PRESET_KEY) === "1") {
+      learnedItemsCache = current;
+      return current;
+    }
     const presets = PRESET_SKILLS.map((preset) => ({
       ...createLearnedItem({
         agentId: preset.agentId,
@@ -103,6 +152,7 @@ export function readLearnedItems(): LearnedItem[] {
     const seeded = mergeLearnedItems(current, presets);
     localStorage.setItem(STORE_KEY, JSON.stringify(seeded));
     localStorage.setItem(PRESET_KEY, "1");
+    learnedItemsCache = seeded;
     return seeded;
   } catch {
     return [];
@@ -111,6 +161,7 @@ export function readLearnedItems(): LearnedItem[] {
 
 export function writeLearnedItems(items: LearnedItem[]) {
   const normalized = mergeLearnedItems([], items).slice(-2000);
+  learnedItemsCache = normalized;
   localStorage.setItem(STORE_KEY, JSON.stringify(normalized));
   window.dispatchEvent(new CustomEvent("manjing-learning-changed"));
 }
@@ -165,7 +216,7 @@ export function mergeLearnedItems(current: LearnedItem[], incoming: LearnedItem[
 
 export function agentContext(agentId: string, limit = 20, projectId = "") {
   const now = Date.now();
-  const compatibleAgentIds = agentId === "image" ? new Set(["image", "storyboard"]) : agentId === "storyboard" ? new Set(["storyboard", "image"]) : new Set([agentId]);
+  const compatibleAgentIds = agentId === "image" ? new Set(["image", "storyboard"]) : agentId === "storyboard" ? new Set(["storyboard", "image"]) : agentId === "prompt" ? new Set(["prompt", "storyboard", "video"]) : new Set([agentId]);
   return readLearnedItems()
     .filter((item) => item.status === "approved" && item.enabled && !item.archivedAt)
     .filter((item) => compatibleAgentIds.has(item.agentId) || item.scope === "user" || (item.scope === "project" && item.projectId === projectId))

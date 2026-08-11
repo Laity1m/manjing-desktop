@@ -154,10 +154,15 @@ export function buildEpisodeContext(project: SeriesProject, episode: SeriesEpiso
 }
 
 export function activateSeriesEpisode(project: SeriesProject, episode: SeriesEpisode) {
-  const context = { projectId: project.id, projectName: project.name, episodeId: episode.id, episodeNumber: episode.number, episodeTitle: episode.title, context: buildEpisodeContext(project, episode), activatedAt: new Date().toISOString() };
-  const compactContext = { projectId: context.projectId, projectName: context.projectName, episodeId: context.episodeId, episodeNumber: context.episodeNumber, episodeTitle: context.episodeTitle, activatedAt: context.activatedAt };
+  const rawContext = buildEpisodeContext(project, episode);
+  const contextLimit = 60000;
+  const compactContext = rawContext.length <= contextLimit
+    ? rawContext
+    : `${rawContext.slice(0, 40000)}\n\n【超长本集上下文已压缩，完整原文仍保留在项目库】\n\n${rawContext.slice(-19500)}`;
+  const context = { projectId: project.id, projectName: project.name, episodeId: episode.id, episodeNumber: episode.number, episodeTitle: episode.title, context: compactContext, activatedAt: new Date().toISOString() };
+  const compactMetadata = { projectId: context.projectId, projectName: context.projectName, episodeId: context.episodeId, episodeNumber: context.episodeNumber, episodeTitle: context.episodeTitle, activatedAt: context.activatedAt };
   sessionStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(context));
-  try { localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(compactContext)); } catch { /* Session context remains authoritative for this production run. */ }
+  try { localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(compactMetadata)); } catch { /* Session context remains authoritative for this production run. */ }
   try { localStorage.setItem("manjing-text-draft", context.context); } catch { sessionStorage.setItem("manjing-text-draft", context.context); }
   try { localStorage.setItem("manjing-new-studio", "1"); } catch { /* Optional navigation hint. */ }
   localStorage.removeItem("manjing-studio-open-project");

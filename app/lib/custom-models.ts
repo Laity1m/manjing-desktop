@@ -1,4 +1,4 @@
-export type CustomModelRole = "director" | "writer" | "image" | "video" | "voice" | "editor";
+export type CustomModelRole = "director" | "writer" | "prompt" | "image" | "video" | "voice" | "editor";
 export type CustomModelAdapter = "openai" | "anthropic" | "gemini" | "pollinations" | "seedance" | "browser" | "webhook";
 
 export type CustomModel = {

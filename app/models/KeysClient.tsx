@@ -32,7 +32,7 @@ const PROVIDERS: Provider[] = [
   { id: "horde", badge: "免费", name: "AI Horde", role: "匿名社区编剧、导演和生图队列", keyName: "无需 Key", format: "默认即可使用", cost: "免费社区算力", color: "gray", docs: "https://github.com/Haidra-Org/AI-Horde", steps: ["进入 AI 工作台", "选择“免费默认阵容”", "输入故事并开始生成", "高峰期需要排队，输出可能被自动补全"], models: ["社区 LLM", "Stable Horde"] },
 ];
 
-const ROLE_LABELS: Record<CustomModelRole, string> = { director: "导演 AI", writer: "编剧与分镜 AI", image: "生图 AI", video: "视频 AI", voice: "配音 AI", editor: "剪辑 AI" };
+const ROLE_LABELS: Record<CustomModelRole, string> = { director: "导演 AI", writer: "编剧与分镜 AI", prompt: "镜头总控 AI", image: "生图 AI", video: "视频 AI", voice: "配音 AI", editor: "剪辑 AI" };
 const EMPTY_MODEL: Omit<CustomModel, "id"> = { role: "writer", name: "", adapter: "webhook", model: "", endpoint: "", apiKey: "", note: "" };
 
 export default function KeysClient() {
