@@ -1,0 +1,53 @@
+name: Build and upload v1.5.0 installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-installer:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout current source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            windows-app/package-lock.json
+
+      - name: Install application dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          npm ci --prefix windows-app
+
+      - name: Build embedded application
+        shell: pwsh
+        run: npx vinext build
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: npm run dist --prefix windows-app
+
+      - name: Upload installer to v1.5.0
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = Get-ChildItem -LiteralPath "windows-app/release" -Filter "*x64.exe" |
+            Where-Object { $_.Name -notlike "*uninstaller*" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) { throw "Windows installer was not generated." }
+          $target = Join-Path $installer.DirectoryName "manjing-1.5.0-project-assets-x64.exe"
+          Copy-Item -LiteralPath $installer.FullName -Destination $target -Force
+          gh release upload v1.5.0 $target --clobber
+
