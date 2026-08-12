@@ -16,6 +16,7 @@ import { loadEditorProjectById, persistEditorProject, type EditorProjectClip } f
 import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/custom-models";
 import { createCanvasFromStudio } from "./lib/production-canvas";
 import { listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
+import { consistencyGateWarnings, videoConsistencyAccepted, videoPreflightAccepted } from "./lib/consistency-gate";
 
 async function archiveGeneratedAsset(url: string, name: string, category: LibraryAssetCategory, duration: number, tags: string[]) {
   if (!url) return;
@@ -101,11 +102,13 @@ type Scene = {
   endState?: string;
   consistencyReport?: ConsistencyReport;
   consistencyDecision?: "pass" | "review" | "reject";
+  preflightOverride?: "continue" | "reuse";
   imageUrl?: string;
   remoteImageUrl?: string;
   audioUrl?: string;
   videoUrl?: string;
   candidateVideoUrl?: string;
+  errorMessage?: string;
   status: SceneStatus;
   model?: string;
   motion?: MotionPreset;
@@ -2580,16 +2583,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
   }
 
-  function videoConsistencyAccepted(report: ConsistencyReport, hasVisibleCharacters: boolean) {
-    if (report.mode !== "vision" || report.overall < 90) return false;
-    const score = (key: keyof ConsistencyScores) => report.scores[key];
-    if (hasVisibleCharacters && (score("characterIdentity") === null || Number(score("characterIdentity")) < 90 || score("castIntegrity") === null || Number(score("castIntegrity")) < 95)) return false;
-    const limits: Array<[keyof ConsistencyScores, number]> = [
-      ["costume", 88], ["visualStyle", 92], ["scene", 88], ["props", 85], ["spatialContinuity", 88], ["shotContinuity", 90], ["lighting", 85],
-    ];
-    return limits.every(([key, limit]) => score(key) === null || Number(score(key)) >= limit);
-  }
-
   function archiveAcceptedVideoFrames(scene: Scene, frames: { middle: string; end: string }) {
   }
 
@@ -3157,7 +3150,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }
         let completedScene = work.find((item) => item.id === scene.id) || scene;
         let report = await evaluateShotConsistency(completedScene, completedScene.imageUrl || "", castForScene, previousScene, 1);
-        const framePassesGate = () => nativeProductionKeyframe ? videoConsistencyAccepted(report, castForScene.length > 0) : report.mode !== "vision" || report.overall >= 85;
+        const framePassesGate = () => nativeProductionKeyframe ? videoPreflightAccepted(completedScene.preflightOverride, report, castForScene.length > 0) : report.mode !== "vision" || report.overall >= 85;
         if (!framePassesGate()) {
           setStatusText(`镜头 ${index + 1} 生产首帧未通过视频前置质检，正在进行一次低成本修复`);
           recordActivity("image", `“${scene.title}”生产首帧未达到视频提交标准：${report.findings.join("；").slice(0, 180)}，先修首帧、不提交视频`, "warning");
@@ -3169,23 +3162,23 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }
         if (!framePassesGate()) {
           setScenes(work.map((item) => item.id === scene.id ? { ...completedScene, consistencyReport: report, consistencyDecision: "reject", status: "error" as SceneStatus } : item));
-          const approved = window.confirm(`AI 质检认为镜头“${scene.title}”仍未达到视频提交标准（总分需90+，人物、人数、服装和画风还要通过单项硬门槛；当前 ${report.overall} 分）。\n\n${report.findings.slice(0, 5).join("\n")}\n\n是否删除当前不合格首帧，并依据 Canonical 资产重新构建？\n选择“取消”会保留画面供查看，但不会提交视频模型。`);
+          const warnings = consistencyGateWarnings(report, castForScene.length > 0);
+          const approved = window.confirm(`AI 质检认为镜头“${scene.title}”需要人工复核（当前 ${report.overall} 分）。\n\n${[...report.findings.slice(0, 4), ...warnings.slice(0, 3)].join("\n")}\n\n确定：人工接受当前首帧并继续生成视频。\n取消：暂停此镜头，稍后可重做、继续或标记为可复用。`);
           if (approved) {
-            setStatusText(`已获用户同意，正在删除并重构镜头 ${index + 1}：${scene.title}`);
-            recordActivity("image", `用户同意删除“${scene.title}”的不合格结果，正在按 Canonical 资产重构`, "warning");
-            if (completedScene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(completedScene.imageUrl);
-            const userApprovedPrompt = `${frameVisualPrompt(style)}, user approved a full rebuild of this rejected storyboard shot. Fix these visible failures: ${report.findings.join("; ")}. Canonical characters must match exactly: ${characterGuide}. Preserve identity, face shape, hairstyle, age, fatigue details, costume, locked props, environment architecture, light direction and Start State. Never add unapproved accessories. Keep the requested shot size and do not reveal off-screen anchors merely for inspection. ${scene.action}, ${scene.camera}, no text`;
-            const rebuiltUrl = await makeImage(scene, 900 + index, run, characterGuide, aspect, userApprovedPrompt);
-            completedScene = { ...completedScene, imageUrl: rebuiltUrl, remoteImageUrl: undefined, status: "ready" as SceneStatus };
-            report = await evaluateShotConsistency(completedScene, rebuiltUrl, castForScene, previousScene, 3);
+            const reusable = window.confirm(`是否把“${scene.title}”当前首帧保存为可复用分镜？\n\n确定：保存并继续生成视频。\n取消：仅用于本次视频生成。`);
+            completedScene = { ...completedScene, preflightOverride: reusable ? "reuse" : "continue", status: "ready" as SceneStatus, errorMessage: undefined };
+            report = { ...report, decision: "review", findings: [...report.findings, reusable ? "用户人工批准，并标记当前首帧可复用。" : "用户人工批准，仅用于本次视频生成。"] };
+            if (reusable && completedScene.imageUrl) {
+              runtimeShotReuseRef.current.set(shotReuseIdentity(scene), completedScene.imageUrl);
+              autoArchive(completedScene.imageUrl, `${projectTitle}-${scene.title}-人工批准首帧`, "scene", scene.duration, ["人工批准", "可复用分镜", "分镜", scene.id, `asset:${shotReuseIdentity(scene)}`]);
+            }
             work = work.map((item) => item.id === scene.id ? completedScene : item);
-            recordActivity("image", `“${scene.title}”已完成用户批准的重构，新图片已写入资产库并重新质检为 ${report.overall} 分`, report.overall >= 85 ? "done" : "warning");
+            recordActivity("image", `用户人工接受“${scene.title}”当前首帧，${reusable ? "已标记可复用并" : "将"}继续生成视频`, "warning");
           } else {
-            report = { ...report, decision: "review", findings: [...report.findings, "用户选择保留当前画面并人工接受。"] };
-            recordActivity("image", `用户选择保留“${scene.title}”当前画面，已标记为人工接受`, "done");
+            recordActivity("image", `“${scene.title}”已暂停，等待用户选择重做、继续或标记复用`, "warning");
           }
         }
-        const finalDecision = nativeProductionKeyframe ? (framePassesGate() ? "pass" : "reject") : report.mode === "structural" && report.decision === "reject" ? "review" : report.decision;
+        const finalDecision = nativeProductionKeyframe ? (completedScene.preflightOverride ? "review" : framePassesGate() ? "pass" : "reject") : report.mode === "structural" && report.decision === "reject" ? "review" : report.decision;
         work = work.map((item) => item.id === scene.id ? { ...item, consistencyReport: { ...report, decision: finalDecision }, consistencyDecision: finalDecision, status: finalDecision === "reject" ? "error" as SceneStatus : "ready" as SceneStatus } : item);
         generatedFrames += 1;
         setScenes(work);
@@ -3207,8 +3200,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             setProgress(44 + Math.round(((index + 1) / Math.max(1, work.length)) * 26));
             continue;
           }
-          if (scene.consistencyDecision === "reject") {
-            const message = "生产首帧未通过人物、人数、服装或画风硬门槛，未提交视频模型，避免生成低分视频和浪费额度";
+          if (scene.consistencyDecision === "reject" && !scene.preflightOverride) {
+            const message = "生产首帧等待人工复核；可选择重做、继续生成或标记为可复用";
             work = work.map((item) => item.id === scene.id ? { ...item, status: "error" as SceneStatus, errorMessage: message } : item);
             setScenes(work);
             recordActivity("video", `“${scene.title}”${message}`, "warning");
@@ -3223,8 +3216,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             const visibleCast = cast.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
             if (!scene.imageUrl) throw new Error("缺少通过质检的生产首帧，已在视频创建和扣费前停止");
             const preflight = await evaluateShotConsistency(scene, scene.imageUrl, visibleCast, previousScene, (scene.consistencyReport?.attempts || 0) + 1);
-            if (!videoConsistencyAccepted(preflight, visibleCast.length > 0)) {
-              const message = `生产首帧前置质检仅 ${preflight.overall} 分或存在单项硬失败，未提交视频模型`;
+            if (!videoPreflightAccepted(scene.preflightOverride, preflight, visibleCast.length > 0)) {
+              const message = `生产首帧前置质检为 ${preflight.overall} 分，等待人工决定是否继续或复用`;
               work = work.map((item) => item.id === scene.id ? { ...item, consistencyReport: preflight, consistencyDecision: "reject" as const, status: "error" as SceneStatus, errorMessage: message } : item);
               setScenes(work);
               recordActivity("video", `“${scene.title}”${message}`, "warning");
@@ -3535,8 +3528,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             continue;
           }
           const preflight = await evaluateShotConsistency(scene, scene.imageUrl, visibleCast, previousScene, (scene.consistencyReport?.attempts || 0) + 1);
-          if (!videoConsistencyAccepted(preflight, visibleCast.length > 0)) {
-            const message = `生产首帧前置质检仅 ${preflight.overall} 分或存在单项硬失败，未提交视频模型`;
+          if (!videoPreflightAccepted(scene.preflightOverride, preflight, visibleCast.length > 0)) {
+            const message = `生产首帧前置质检为 ${preflight.overall} 分，等待人工决定是否继续或复用`;
             work = work.map((item) => item.id === scene.id ? { ...item, consistencyReport: preflight, consistencyDecision: "reject" as const, status: "error" as SceneStatus, errorMessage: message } : item);
             setScenes(work);
             recordActivity("video", `“${scene.title}”${message}`, "warning");
@@ -3661,7 +3654,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setSceneAction({ id: scene.id, type: "image" });
     runRef.current = run;
     setError("");
-    updateScene(scene.id, { status: "painting" });
+    updateScene(scene.id, { status: "painting", preflightOverride: undefined, consistencyDecision: undefined, consistencyReport: undefined, errorMessage: undefined });
     recordActivity("image", `${agentName("image")}正在重绘“${scene.title}”`);
     try {
       if (scene.imageUrl) URL.revokeObjectURL(scene.imageUrl);
@@ -3689,7 +3682,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
   }
 
-  async function generateVideo(scene: Scene) {
+  async function generateVideo(scene: Scene, manualPreflight = false) {
     if (sceneActionRef.current) return;
     if (agentConfigs.video.adapter === "browser") {
       setConfiguringRole("video");
@@ -3723,9 +3716,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const visibleCast = characters.filter((character) => isVisualCharacterAsset(character) && (scene.characters.includes(character.name) || scene.speaker === character.name));
       if (!scene.imageUrl) throw new Error("缺少生产首帧，请先让生图 AI 生成并通过前置质检，再提交视频模型");
       const preflight = await evaluateShotConsistency(scene, scene.imageUrl, visibleCast, previousScene, (scene.consistencyReport?.attempts || 0) + 1);
-      if (!videoConsistencyAccepted(preflight, visibleCast.length > 0)) {
-        updateScene(scene.id, { consistencyReport: preflight, consistencyDecision: "reject", status: "error", errorMessage: `生产首帧前置质检仅 ${preflight.overall} 分或存在单项硬失败` });
-        throw new Error(`视频创建已在扣费前停止：生产首帧仅 ${preflight.overall} 分或存在人物、人数、服装、画风单项硬失败`);
+      if (!manualPreflight && !videoPreflightAccepted(scene.preflightOverride, preflight, visibleCast.length > 0)) {
+        updateScene(scene.id, { consistencyReport: preflight, consistencyDecision: "reject", status: "error", errorMessage: `生产首帧前置质检为 ${preflight.overall} 分，等待人工决定是否继续或复用` });
+        throw new Error(`生产首帧为 ${preflight.overall} 分；请在镜头下方选择重做、人工继续或标记复用`);
       }
       const prompt = await compileShotMotionPrompt(scene, Math.max(0, sceneIndex), previousScene);
       const clip = await pollinationsMedia("video", prompt, Math.max(0, sceneIndex), { references: await videoReferences(scene, previousScene), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
@@ -3749,6 +3742,29 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setSceneAction(null);
       }
     }
+  }
+
+  async function approvePreflightFrame(scene: Scene, reusable: boolean) {
+    if (!scene.imageUrl || sceneActionRef.current || busy) return;
+    const approvedScene: Scene = {
+      ...scene,
+      preflightOverride: reusable ? "reuse" : "continue",
+      consistencyDecision: "review",
+      consistencyReport: scene.consistencyReport ? {
+        ...scene.consistencyReport,
+        decision: "review",
+        findings: [...scene.consistencyReport.findings, reusable ? "用户人工批准，并标记当前首帧可复用。" : "用户人工批准，仅用于本次视频生成。"].slice(0, 8),
+      } : scene.consistencyReport,
+      status: "ready",
+      errorMessage: undefined,
+    };
+    if (reusable) {
+      runtimeShotReuseRef.current.set(shotReuseIdentity(scene), scene.imageUrl);
+      autoArchive(scene.imageUrl, `${projectTitle}-${scene.title}-人工批准首帧`, "scene", scene.duration, ["人工批准", "可复用分镜", "分镜", scene.id, `asset:${shotReuseIdentity(scene)}`]);
+    }
+    updateScene(scene.id, approvedScene);
+    recordActivity("director", `“${scene.title}”首帧已人工批准，${reusable ? "已加入可复用资产并" : "未加入资产库，"}继续提交视频模型`, "warning");
+    await generateVideo(approvedScene, true);
   }
 
   async function approveCandidateVideo(scene: Scene) {
@@ -4558,7 +4574,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
       <section id="works" className="works section-shell">
         <div className="section-heading"><span>02</span><div><p>剪辑工作台</p><input className="workbench-project-title" aria-label="修改作品标题" value={scenes.length ? projectTitle : "生成后在这里剪辑"} disabled={!scenes.length} onChange={(event) => setProjectTitle(event.target.value)} onBlur={(event) => { const title = event.target.value.trim() || "未命名作品"; setProjectTitle(title); const raw = window.localStorage.getItem("manjing-active-series-context-v1"); if (raw) { try { const context = JSON.parse(raw); window.localStorage.setItem("manjing-active-series-context-v1", JSON.stringify({ ...context, productionTitle: title })); } catch { /* workspace autosave still preserves the title */ } } }} /></div><aside>{scenes.length ? `${scenes.length} 个镜头 · ${formatTime(totalDuration)}` : "尚无作品"}</aside></div>
-        {scenes.some((scene) => scene.consistencyReport) && <div className="consistency-dashboard"><header><div><span>CONSISTENCY ENGINE</span><h3>镜头一致性报告</h3></div><b>{Math.round(scenes.filter((scene) => scene.consistencyReport).reduce((sum, scene) => sum + (scene.consistencyReport?.overall || 0), 0) / Math.max(1, scenes.filter((scene) => scene.consistencyReport).length))}<small>/100 平均</small></b></header><div>{scenes.filter((scene) => scene.consistencyReport).map((scene, index) => <article key={scene.id} className={scene.consistencyDecision || "review"}><i>{String(index + 1).padStart(2, "0")}</i><span><strong>{scene.title}</strong><small>{scene.consistencyReport?.mode === "vision" ? "视觉审核" : "结构检查"} · {scene.consistencyReport?.findings[0] || "未发现明显问题"}</small></span><em>{scene.consistencyReport?.overall}</em><b>{scene.consistencyDecision?.toUpperCase()}</b></article>)}</div></div>}
+        {scenes.some((scene) => scene.consistencyReport) && <div className="consistency-dashboard"><header><div><span>CONSISTENCY ENGINE</span><h3>镜头一致性报告</h3><small>总分达到 90 自动进入视频生成；低于 90 可由用户决定重做、继续或复用。</small></div><b>{Math.round(scenes.filter((scene) => scene.consistencyReport).reduce((sum, scene) => sum + (scene.consistencyReport?.overall || 0), 0) / Math.max(1, scenes.filter((scene) => scene.consistencyReport).length))}<small>/100 平均</small></b></header><div>{scenes.filter((scene) => scene.consistencyReport).map((scene, index) => { const automaticPass = (scene.consistencyReport?.overall || 0) >= 90 && !scene.candidateVideoUrl; const displayDecision = scene.preflightOverride ? "review" : automaticPass ? "pass" : scene.consistencyDecision || "review"; return <article key={scene.id} className={displayDecision}><i>{String(index + 1).padStart(2, "0")}</i><span><strong>{scene.title}</strong><small>{scene.consistencyReport?.mode === "vision" ? "视觉审核" : "结构检查"} · {scene.consistencyReport?.findings[0] || "未发现明显问题"}</small></span><em>{scene.consistencyReport?.overall}</em><b>{scene.preflightOverride ? "MANUAL" : automaticPass ? "PASS" : displayDecision.toUpperCase()}</b></article>; })}</div></div>}
         {characters.some(isVisualCharacterAsset) && <div className="production-assets">
           <div className="asset-heading"><div><b>角色资产库</b><span>仅为实际出镜人物生成大头照与正、侧、背三视图；旁白和广告声只保留声音档案</span></div><em>{characters.filter((item) => isVisualCharacterAsset(item) && item.status === "ready").length}/{characters.filter(isVisualCharacterAsset).length} 已锁定</em></div>
           <div className="character-list">{characters.filter(isVisualCharacterAsset).map((character) => <article key={character.id} className={character.status}>
@@ -4600,6 +4616,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <div><span>QUALITY HOLD</span><b>这个镜头已隔离，等待你处理</b><p>{current.consistencyReport?.findings.slice(0, 2).join("；") || "人物、服装、画风或镜头连续性没有通过硬性检查。"}</p></div>
               <strong>{current.consistencyReport?.overall ?? "--"}<small>/100</small></strong>
               <div className="candidate-review-actions"><button className="candidate-rebuild" onClick={() => void generateVideo(current)} disabled={busy || Boolean(sceneAction)}>按失败原因重生成</button><button onClick={() => void approveCandidateVideo(current)} disabled={busy || Boolean(sceneAction)}>仍然人工批准</button><button className="candidate-delete" onClick={() => discardCandidateVideo(current)} disabled={busy || Boolean(sceneAction)}>删除候选</button></div>
+            </div>}
+            {!showFilm && nativeVideoEnabled && current?.imageUrl && !current.videoUrl && !current.candidateVideoUrl && current.consistencyDecision === "reject" && <div className="candidate-review-panel preflight-review-panel">
+              <div><span>PREFLIGHT REVIEW</span><b>首帧等待你的决定</b><p>{[...(current.consistencyReport?.findings.slice(0, 2) || []), ...(current.consistencyReport ? consistencyGateWarnings(current.consistencyReport, current.characters.length > 0).slice(0, 2) : [])].join("；") || "当前总分低于自动通过线，你可以自行决定是否进入视频生成。"}</p></div>
+              <strong>{current.consistencyReport?.overall ?? "--"}<small>/100</small></strong>
+              <div className="candidate-review-actions"><button className="candidate-rebuild" onClick={() => void regenerateImage(current, Math.max(0, scenes.findIndex((scene) => scene.id === current.id)))} disabled={busy || Boolean(sceneAction)}>按问题重做首帧</button><button onClick={() => void approvePreflightFrame(current, false)} disabled={busy || Boolean(sceneAction)}>人工通过并生成视频</button><button onClick={() => void approvePreflightFrame(current, true)} disabled={busy || Boolean(sceneAction)}>设为可复用并生成</button></div>
             </div>}
             {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}>{editorSyncState === "saving" ? `整理素材 ${editorSyncProgress}%` : "进入专业剪辑台"}</button><button onClick={downloadFilm}>下载成片</button></div> : <>
               <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
