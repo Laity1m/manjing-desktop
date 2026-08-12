@@ -82,8 +82,8 @@ function defaultSemanticRegions(category: LibraryAssetCategory, mediaType: Libra
   if (category !== "character" || mediaType !== "image") return undefined;
   return [
     { id: "face", label: "脸部标准区域", purpose: "face", box: [0, 0, 0.38, 1] },
-    { id: "front", label: "正面全身区域", purpose: "body", box: [0.38, 0.04, 0.2, 0.92] },
-    { id: "side", label: "侧面全身区域", purpose: "body", box: [0.59, 0.04, 0.18, 0.92] },
+    { id: "front", label: "正面服装全身区域（五官遮挡）", purpose: "costume", box: [0.38, 0.04, 0.2, 0.92] },
+    { id: "side", label: "侧面服装全身区域（五官遮挡）", purpose: "costume", box: [0.59, 0.04, 0.18, 0.92] },
     { id: "back", label: "背面全身区域", purpose: "costume", box: [0.79, 0.04, 0.2, 0.92] },
   ];
 }

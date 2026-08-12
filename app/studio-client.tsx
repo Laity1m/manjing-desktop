@@ -329,7 +329,7 @@ function characterVisualPrompt(name: string) {
 }
 
 function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
-  return `${characterVisualPrompt(styleName)}, ${character.name}, ${character.role}, ${character.appearance}. 16:9 horizontal standard character turnaround model sheet on a pure seamless light-gray cyclorama studio background. Strict layout from left to right: an extreme close-up of the front face at the far left, then a front full-body view, a side full-body view, and a back full-body view. The face, facial proportions, hairstyle, hair color, costume, accessories, footwear, socks and body proportions must remain exactly identical across all four views. Show the three full-body views completely from head to toe without cropping. Calm natural standing posture, both arms hanging naturally, empty hands, no props, no scenery, no furniture, no text, no labels, no decorative frame. 构图硬性要求：16:9 横版，纯浅灰色无缝影棚背景；画面最左侧为人物正面面部大特写，右侧依次排列人物正面全身、侧面全身、背面全身三视图；四个视图的面部、发型、服装、饰品、鞋袜和身体比例严格一致；人物从头到脚完整展示，站姿沉稳自然，双手自然下垂，不拿任何道具。`;
+  return `${characterVisualPrompt(styleName)}, ${character.name}, ${character.role}, ${character.appearance}. 16:9 horizontal identity-and-outfit production sheet on a pure seamless light-gray cyclorama background. The far-left identity portrait is a large eye-level strict frontal close-up: head yaw 0 degrees, pitch 0 degrees, roll 0 degrees, face centered, both eyes looking directly into the camera, both eyebrows and both sides of the jaw equally visible, symmetrical ears when the hairstyle permits, neutral relaxed expression. Absolutely no profile, side face, three-quarter view, tilted head, raised or lowered chin, looking away, hair covering an eye, hand near face, prop or facial occlusion in the identity portrait. To the right, show front, side and back full-body outfit turnarounds from head to toe. Preserve the exact head silhouette, hairstyle, hair color, body proportions, costume, accessories, footwear and socks; cover only the facial-feature skin area of the front and side full-body views with a clean background-colored neutral matte so those views cannot introduce alternate facial identities. Keep hair, skull silhouette, ears, neck and clothing visible; the back view needs no facial matte. Calm natural standing posture, arms hanging naturally, empty hands, no props, scenery, furniture, text, labels or decorative frame. 构图硬性要求：最左侧大头照必须平视、严格正脸、双眼直视镜头，头部水平无歪斜，不允许侧脸、侧颜、三分之二侧脸、低头、仰头、斜视、遮眼或手挡脸；右侧只负责服装和身材的正面、侧面、背面三视图，正面与侧面三视图的五官区域使用与背景一致的浅灰柔性遮罩，保留发型、头型、耳侧、颈部和完整服装。`;
 }
 
 function isVisualCharacterAsset(character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
@@ -2400,13 +2400,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const config = agentConfigs[role];
     const mediaAspect = kind === "image" ? options.imageAspect || aspect : aspect;
     const referenceUrls = (options.references || []).map((reference) => typeof reference === "string" ? reference : reference.url).filter(Boolean);
+    const transferableImageReferences = kind === "image" ? await Promise.all(referenceUrls.slice(0, 6).map(async (reference) => {
+      if (!reference.startsWith("blob:")) return reference;
+      const response = await fetch(reference);
+      if (!response.ok) throw new Error("人物参考图读取失败，已停止生成，避免重新设计人物");
+      return blobToDataUrl(await response.blob());
+    })) : referenceUrls;
     if (config.adapter === "openai") {
       if (kind !== "image") throw new Error("OpenAI 兼容图片接口只能用于生图岗位");
       if (!validAgentEndpoint(config.endpoint)) throw new Error("生图 AI 需要填写 OpenAI 兼容 API 地址");
       const response = await fetch("/api/desktop/image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "openai", endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, prompt, aspect: mediaAspect }),
+        body: JSON.stringify({ mode: "openai", endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, prompt, aspect: mediaAspect, references: transferableImageReferences }),
       });
       if (!response.ok) throw new Error(await responseError(response));
       const data = await response.json() as { dataUrl?: string };
@@ -2424,7 +2430,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       return seedanceVideo(prompt, { ...options, references: structuredReferences });
     }
     if (config.adapter === "webhook") {
-      const media = await webhookMedia(role, { task: kind, prompt, index, aspect: mediaAspect, resolution: kind === "video" ? videoResolution : undefined, ...options, references: referenceUrls });
+      const media = await webhookMedia(role, { task: kind, prompt, index, aspect: mediaAspect, resolution: kind === "video" ? videoResolution : undefined, ...options, references: kind === "image" ? transferableImageReferences : referenceUrls });
       if (kind !== "image") return media;
       const blob = await normalizeImageBlobForAspect(media.blob, mediaAspect);
       return { url: URL.createObjectURL(blob), blob, remoteUrl: "" };
@@ -2585,8 +2591,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   function archiveAcceptedVideoFrames(scene: Scene, frames: { middle: string; end: string }) {
-    autoArchive(frames.middle, `${projectTitle}-${scene.title}-视频关键帧`, "scene", 0, ["自动生成", "视频关键帧", scene.id, `asset:video-keyframe:${scene.id}:middle`]);
-    autoArchive(frames.end, `${projectTitle}-${scene.title}-镜尾连续帧`, "scene", 0, ["自动生成", "镜尾连续帧", scene.id, `asset:video-keyframe:${scene.id}:end`]);
   }
 
   async function inspectGeneratedVideo(scene: Scene, videoUrl: string, castForScene: CharacterAsset[], previousScene?: Scene) {
@@ -3121,7 +3125,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setStatusText(`正在制作第 ${index + 1}/${work.length} 个一致性分镜`);
         updateScene(scene.id, { status: "painting" });
         const presentCast = cast.filter((character) => scene.characters.includes(character.name) || scene.speaker === character.name);
-        const castForScene = presentCast.length ? presentCast : cast.slice(0, 2);
+        const castForScene = presentCast;
         const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
         const previousScene = index > 0 ? work[index - 1] : undefined;
         const sameEnvironment = Boolean(previousScene && scene.environmentKey && previousScene.environmentKey === scene.environmentKey);
@@ -3132,13 +3136,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const sceneProps = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
           const framePrompt = `${frameVisualPrompt(style)}, final production first frame for image-to-video, assembled from locked character identity, current costume, environment and prop references; do not redesign referenced assets. ${continuityGuide} Important props: ${sceneProps.join(", ") || "none"}. Shot: ${scene.shot}. Visual: ${scene.visual}. Action: ${scene.action}. expressive face, natural anatomy and hands, layered depth for camera motion, coherent spatial layout, no text, no speech bubbles, no panel borders`;
           const environmentReference = sceneAssetReferences.get(scene.environmentKey || labeledVisualAssets(scene.visual, "场景")[0] || scene.title);
-          const references = [...castForScene.map((item) => item.remoteUrl).filter(Boolean), ...sceneProps.map((prop) => propAssetReferences.get(prop)).filter(Boolean), ...(environmentReference ? [environmentReference] : []), ...(sameEnvironment && previousScene?.remoteImageUrl ? [previousScene.remoteImageUrl] : [])].filter((value, refIndex, all) => all.indexOf(value) === refIndex) as string[];
+          const characterReferences = castForScene.map((item) => item.remoteUrl || item.imageUrl).filter(Boolean) as string[];
+          if (castForScene.length && characterReferences.length !== castForScene.length) throw new Error(`生产首帧缺少人物参考图：${castForScene.filter((item) => !item.remoteUrl && !item.imageUrl).map((item) => item.name).join("、")}；已停止生成，避免换脸或换装`);
+          const references = [...characterReferences, ...sceneProps.map((prop) => propAssetReferences.get(prop)).filter(Boolean), ...(environmentReference ? [environmentReference] : []), ...(sameEnvironment && (previousScene?.remoteImageUrl || previousScene?.imageUrl) ? [previousScene.remoteImageUrl || previousScene.imageUrl] : [])].filter((value, refIndex, all) => Boolean(value) && all.indexOf(value) === refIndex) as string[];
           const frame = await pollinationsMedia("image", framePrompt, index, { references });
           const frameUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : frameUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}.png`, frameUploadKey) : "";
           work = work.map((item) => item.id === scene.id ? { ...item, imageUrl: frame.url, remoteImageUrl, status: "ready" as SceneStatus } : item);
           runtimeShotReuseRef.current.set(shotReuseIdentity(scene), frame.url);
-          if (!nativeProductionKeyframe) autoArchive(frame.url, `${projectTitle}-${scene.environmentKey || scene.title}-${scene.title}-分镜`, "scene", scene.duration, ["自动生成", "分镜", "分镜合成", scene.id, scene.environmentKey || "场景待定", `asset:${shotReuseIdentity(scene)}`, ...sceneProps.map((prop) => `prop:${prop}`)]);
         } else {
           const reusable = await reusableSceneResult(scene);
           if (reusable) {
@@ -3482,7 +3487,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             if (scene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.imageUrl);
             if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
             work = work.map((item) => item.id === scene.id ? { ...item, imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" as SceneStatus } : item);
-            autoArchive(frame.url, `${projectTitle}-${scene.title}-分镜`, "scene", scene.duration, ["自动生成", "分镜", scene.id]);
           } else {
             const characterGuide = castForScene.map((character) => `${character.name}: ${character.appearance}`).join("; ");
             const imageUrl = await makeImage(scene, sceneIndex, run, characterGuide);
@@ -3667,7 +3671,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const revisionUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : revisionUploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${index + 1}-revision.png`, revisionUploadKey) : "";
         updateScene(scene.id, { imageUrl: frame.url, remoteImageUrl, videoUrl: undefined, status: "ready" });
-        autoArchive(frame.url, `${projectTitle}-${scene.title}-分镜`, "scene", scene.duration, ["自动生成", "分镜", scene.id]);
       } else {
         const characterGuide = characters.filter((character) => isVisualCharacterAsset(character) && scene.characters.includes(character.name)).map((character) => `${character.name}: ${character.appearance}`).join("; ");
         const imageUrl = await makeImage(scene, index, run, characterGuide);
@@ -4564,7 +4567,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           </article>)}</div>
           <div className="quality-gates">
             <span className={characters.every((item) => item.imageUrl) ? "passed" : ""}>角色参考</span>
-            <span className={scenes.every((item) => item.imageUrl) ? "passed" : ""}>一致性分镜</span>
+            <span className={scenes.every((item) => item.imageUrl) ? "passed" : ""}>视频生产首帧</span>
             <span className={nativeVideoEnabled && scenes.every((item) => item.videoUrl) ? "passed" : ""}>动态表演</span>
             <span className={generatedVoiceEnabled && voiceEnabled && scenes.every((item) => item.audioUrl) ? "passed" : ""}>分角色配音</span>
             <span className={generatedVoiceEnabled && bgmEnabled && !!musicUrl ? "passed" : ""}>剧情配乐</span>
@@ -4572,10 +4575,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           </div>
         </div>}
         {!!scenes.length && <div className="delivery-center">
-          <div className="delivery-heading"><div><b>交付物与素材库</b><span>剧本、分镜、角色图、镜头图片、视频、配音和成片都可以单独下载</span></div><label className="project-import">导入漫镜工程<input type="file" accept="application/json,.json" onChange={(event) => { void importProject(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
+          <div className="delivery-heading"><div><b>交付物与素材库</b><span>剧本、镜头计划、角色图、视频、配音和成片都可以单独下载；内部生产首帧不进入资产库</span></div><label className="project-import">导入漫镜工程<input type="file" accept="application/json,.json" onChange={(event) => { void importProject(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
           <div className="delivery-actions">
             <button onClick={downloadScript}><i>文</i><span><b>下载剧本</b><small>TXT · 含对白、动作和声音</small></span></button>
-            <button onClick={downloadStoryboard}><i>镜</i><span><b>下载分镜</b><small>JSON · 可交给其他模型继续制作</small></span></button>
+            <button onClick={downloadStoryboard}><i>镜</i><span><b>下载镜头计划</b><small>JSON · 不包含分镜图片资产</small></span></button>
             <button onClick={downloadProject}><i>工</i><span><b>保存工程</b><small>JSON · 保留剪辑参数，稍后再改</small></span></button>
             <button onClick={downloadFilm} disabled={!exportUrl}><i>片</i><span><b>下载成片</b><small>{exportUrl ? "视频文件已就绪" : "重新合成后可下载"}</small></span></button>
             <button className="send-to-editor" onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}><i>剪</i><span><b>{editorSyncState === "saving" ? `正在逐个整理素材 ${editorSyncProgress}%` : "进入专业剪辑台"}</b><small>{editorSyncState === "ready" ? "AI 工程已同步，可继续精剪" : "自动带入视频、图片、配音和字幕"}</small></span></button>
@@ -4606,7 +4609,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           </div>
 
           <div className="timeline-panel">
-            <div className="timeline-title"><div><b>智能分镜</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
+            <div className="timeline-title"><div><b>智能镜头计划</b><span>点击选择，下面可编辑</span></div><button onClick={addScene}>＋ 新增镜头</button></div>
             <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.imageUrl ? <img src={scene.imageUrl} alt="" loading="lazy" /> : scene.videoUrl ? <span className="video-thumbnail-placeholder">▶</span> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.imageUrl ? "一致性关键帧" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
             {selectedScene && <div className="scene-editor">
               <div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")} · 属性检查器</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button onClick={() => duplicateScene(selected)}>复制</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div>

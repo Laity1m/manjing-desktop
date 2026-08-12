@@ -443,17 +443,39 @@ async function invokeImageModel(input, fetchImpl = fetch) {
   const prompt = String(input?.prompt || "").trim();
   if (!model || !prompt) throw Object.assign(new Error("生图模型 ID 和提示词不能为空"), { statusCode: 400 });
   const base = cleanApiBase(mode, input?.endpoint);
-  const target = appendApiPath(base, "images/generations");
-  const data = await fetchProviderJson(target, {
-    method: "POST",
-    headers: providerHeaders(mode, String(input?.apiKey || "").trim(), true),
-    body: JSON.stringify({
-      model,
-      prompt,
-      n: 1,
-      size: input?.aspect === "16:9" ? "1536x1024" : "1024x1536"
-    })
-  }, fetchImpl, {
+  const references = Array.isArray(input?.references) ? input.references.map(String).filter(Boolean).slice(0, 6) : [];
+  const size = input?.aspect === "16:9" ? "1536x1024" : "1024x1536";
+  const target = appendApiPath(base, references.length ? "images/edits" : "images/generations");
+  let request;
+  if (references.length) {
+    const form = new FormData();
+    form.append("model", model);
+    form.append("prompt", prompt);
+    form.append("n", "1");
+    form.append("size", size);
+    for (let index = 0; index < references.length; index += 1) {
+      const reference = references[index];
+      let bytes;
+      let contentType = "image/png";
+      if (/^data:image\//i.test(reference)) {
+        const match = reference.match(/^data:([^;,]+);base64,(.+)$/i);
+        if (!match) throw Object.assign(new Error(`第 ${index + 1} 张人物参考图格式无效`), { statusCode: 400 });
+        contentType = match[1];
+        bytes = Buffer.from(match[2], "base64");
+      } else {
+        const { response } = await fetchProviderResponse(reference, {}, fetchImpl, { timeoutMs: API_TIMEOUT_MS, maxAttempts: 3, retryLabel: `人物参考图 ${index + 1}` });
+        if (!response.ok) throw Object.assign(new Error(`第 ${index + 1} 张人物参考图读取失败（${response.status}）`), { statusCode: 502 });
+        contentType = (response.headers.get("content-type") || "image/png").split(";")[0];
+        bytes = Buffer.from(await response.arrayBuffer());
+      }
+      if (!contentType.startsWith("image/") || !bytes?.byteLength) throw Object.assign(new Error(`第 ${index + 1} 张参考素材不是有效图片`), { statusCode: 400 });
+      form.append("image[]", new Blob([bytes], { type: contentType }), `reference-${index + 1}.${contentType.includes("jpeg") ? "jpg" : "png"}`);
+    }
+    request = { method: "POST", headers: providerHeaders(mode, String(input?.apiKey || "").trim(), false), body: form };
+  } else {
+    request = { method: "POST", headers: providerHeaders(mode, String(input?.apiKey || "").trim(), true), body: JSON.stringify({ model, prompt, n: 1, size }) };
+  }
+  const data = await fetchProviderJson(target, request, fetchImpl, {
     timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
     timeoutMessage: `生图模型 ${model} 在 180 秒内没有响应；请检查服务商任务队列后重新运行生图岗位`,
     maxAttempts: 3,
