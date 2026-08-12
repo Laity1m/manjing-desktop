@@ -38,7 +38,11 @@ jobs:
         shell: pwsh
         run: npm run dist --prefix windows-app
 
-      - name: Upload installer to v1.5.0
+      - name: Verify consistency review gate
+        shell: pwsh
+        run: node --test tests/consistency-gate.test.mjs
+
+      - name: Upload fixed installers to v1.5.0
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,6 +52,8 @@ jobs:
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
           if (-not $installer) { throw "Windows installer was not generated." }
-          $target = Join-Path $installer.DirectoryName "manjing-1.5.0-project-assets-x64.exe"
-          Copy-Item -LiteralPath $installer.FullName -Destination $target -Force
-          gh release upload v1.5.0 $target --clobber
+          $projectAssets = Join-Path $installer.DirectoryName "manjing-1.5.0-project-assets-x64.exe"
+          $latest = Join-Path $installer.DirectoryName "manjing-1.5.0-latest-x64.exe"
+          Copy-Item -LiteralPath $installer.FullName -Destination $projectAssets -Force
+          Copy-Item -LiteralPath $installer.FullName -Destination $latest -Force
+          gh release upload v1.5.0 $projectAssets $latest --clobber
