@@ -33,6 +33,7 @@ const SEEDANCE_TASK_PATTERN = /^cgt-[a-z0-9-]{8,100}$/i;
 const SEEDANCE_MODEL_PATTERN = /^(?:doubao-seedance-[a-z0-9-]+|ep-[a-z0-9-]+)$/i;
 const SEEDANCE_CREATE_CACHE = new Map();
 const SEEDANCE_CREATE_INFLIGHT = new Map();
+const TEXT_PROTOCOL_CACHE = new Map();
 const API_DEFAULT_ENDPOINTS = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
@@ -353,8 +354,7 @@ async function invokeTextModel(input, fetchImpl = fetch) {
   const apiKey = String(input?.apiKey || "").trim();
   let target;
   let body;
-  let fallbackTarget;
-  let fallbackBody;
+  let protocolCandidates = [];
   if (mode === "openai" || mode === "pollinations") {
     const userContent = images.length ? [{ type: "text", text: prompt }, ...images.map((item) => ({ type: "image_url", image_url: { url: item.url, detail: "low" }, name: item.label }))] : prompt;
     const chatTarget = appendApiPath(base, "chat/completions");
@@ -364,11 +364,23 @@ async function invokeTextModel(input, fetchImpl = fetch) {
       const responsesBody = images.length
         ? { model, instructions: system, input: [{ role: "user", content: [{ type: "input_text", text: prompt }, ...images.map((item) => ({ type: "input_image", image_url: item.url, detail: "low" }))] }] }
         : { model, instructions: system, input: prompt };
-      const prefersResponses = /\/responses\/?(?:[?#].*)?$/i.test(String(input?.endpoint || "").trim());
-      target = prefersResponses ? responsesTarget : chatTarget;
-      body = prefersResponses ? responsesBody : chatBody;
-      fallbackTarget = prefersResponses ? chatTarget : responsesTarget;
-      fallbackBody = prefersResponses ? chatBody : responsesBody;
+      const rawEndpoint = validRemoteUrl(String(input?.endpoint || "").trim());
+      const exactPath = rawEndpoint && /\/(?:chat\/completions|responses)\/?$/i.test(rawEndpoint.pathname) ? rawEndpoint : null;
+      const versionedBase = new URL(base.href);
+      if (!/\/v\d+(?:beta)?\/?$/i.test(versionedBase.pathname)) versionedBase.pathname = `${versionedBase.pathname.replace(/\/+$/, "")}/v1`;
+      const candidates = [
+        exactPath && { target: exactPath, body: /\/responses\/?$/i.test(exactPath.pathname) ? responsesBody : chatBody },
+        { target: chatTarget, body: chatBody },
+        { target: responsesTarget, body: responsesBody },
+        { target: appendApiPath(versionedBase, "chat/completions"), body: chatBody },
+        { target: appendApiPath(versionedBase, "responses"), body: responsesBody }
+      ].filter(Boolean);
+      const unique = new Map(candidates.map((candidate) => [candidate.target.href, candidate]));
+      const cacheKey = `${String(input?.endpoint || "")}|${model}`;
+      const cached = TEXT_PROTOCOL_CACHE.get(cacheKey);
+      protocolCandidates = [...unique.values()].sort((a, b) => Number(b.target.href === cached) - Number(a.target.href === cached));
+      target = protocolCandidates[0].target;
+      body = protocolCandidates[0].body;
     } else {
       target = chatTarget;
       body = chatBody;
@@ -403,27 +415,21 @@ async function invokeTextModel(input, fetchImpl = fetch) {
     timeoutMessage: `${roleLabel} 模型 ${model} 在 ${Math.round(timeoutMs / 1000)} 秒内没有响应；已保留现有成果，请检查地址、网络或服务商队列后重新运行该岗位`
   };
   let data;
-  try {
-    data = await fetchProviderJson(target, {
-      method: "POST",
-      headers: providerHeaders(mode, apiKey, true),
-      body: JSON.stringify(body)
-    }, fetchImpl, requestOptions);
-  } catch (error) {
-    const canSwitchOpenAiProtocol = mode === "openai" && fallbackTarget && [404, 405].includes(Number(error?.providerStatus));
-    if (!canSwitchOpenAiProtocol) throw error;
-    try {
-      data = await fetchProviderJson(fallbackTarget, {
-        method: "POST",
-        headers: providerHeaders(mode, apiKey, true),
-        body: JSON.stringify(fallbackBody)
-      }, fetchImpl, requestOptions);
-    } catch (fallbackError) {
-      if ([404, 405].includes(Number(fallbackError?.providerStatus))) {
-        throw Object.assign(new Error("OpenAI 兼容接口的 /chat/completions 与 /responses 均不可用。请填写包含正确代理前缀的 Base URL，或在通用 Webhook 模式中填写服务商的完整接口地址"), { statusCode: 502, providerStatus: fallbackError.providerStatus });
+  if (mode === "openai" && protocolCandidates.length) {
+    let lastError;
+    for (const candidate of protocolCandidates) {
+      try {
+        data = await fetchProviderJson(candidate.target, { method: "POST", headers: providerHeaders(mode, apiKey, true), body: JSON.stringify(candidate.body) }, fetchImpl, requestOptions);
+        TEXT_PROTOCOL_CACHE.set(`${String(input?.endpoint || "")}|${model}`, candidate.target.href);
+        break;
+      } catch (error) {
+        lastError = error;
+        if (![404, 405].includes(Number(error?.providerStatus))) throw error;
       }
-      throw fallbackError;
     }
+    if (!data) throw Object.assign(new Error(`镜头总控接口没有可用的 OpenAI 生成路径。已尝试：${protocolCandidates.map((candidate) => candidate.target.pathname).join("、")}。请确认服务商的完整生成接口地址`), { statusCode: 502, providerStatus: lastError?.providerStatus });
+  } else {
+    data = await fetchProviderJson(target, { method: "POST", headers: providerHeaders(mode, apiKey, true), body: JSON.stringify(body) }, fetchImpl, requestOptions);
   }
   const text = responseText(data);
   if (!text) throw Object.assign(new Error("接口调用成功，但没有返回可用文本"), { statusCode: 502 });

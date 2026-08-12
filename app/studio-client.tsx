@@ -933,6 +933,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const runtimeShotReuseRef = useRef(new Map<string, string>());
   const runtimeVoiceReuseRef = useRef(new Map<string, { url: string; duration: number }>());
   const canonicalVoiceVideoRef = useRef(new Map<string, string>());
+  const canonicalStyleImageRef = useRef("");
 
   const totalDuration = useMemo(() => scenes.reduce((sum, item) => sum + item.duration, 0), [scenes]);
   const productionDuration = targetDuration || 30;
@@ -2046,14 +2047,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const props = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
     const continuityRule = shotContinuityRule(scene, previousScene);
     const voiceover = sceneVoiceover(scene);
+    const stylePreset = visualStyle(style);
+    const styleBible = `STYLE LOCK (${style}): ${stylePreset.base}; ${stylePreset.frame}; ${stylePreset.motion}. Every frame must use this exact rendering language, line treatment, material shading, facial design language, color palette, contrast and lighting model. Never switch to photorealism, live action, 3D render, western comic, watercolor, flat illustration or another anime style.`;
     const vocalDirection = voiceover.mode === "onscreen_dialogue"
-      ? `${voiceover.speaker} says exactly “${voiceover.script}” in Mandarin with synchronized natural lip movement.`
+      ? `${voiceover.speaker} says exactly “${voiceover.script}” in Mandarin. Use restrained syllable-sized lip motion, stable jaw width and cheeks, natural blinking and eye focus; no rubber mouth, oversized mouth opening, frozen stare or exaggerated expression.`
       : voiceover.mode === "inner_monologue"
         ? `Play “${voiceover.script}” as ${voiceover.speaker}'s internal monologue voice-over; visible mouths remain closed.`
         : voiceover.mode === "voice_over"
           ? `Play “${voiceover.script}” as an off-screen voice-over by ${voiceover.speaker}; do not create a narrator image or animate visible lips.`
           : "No spoken dialogue or narration; retain appropriate ambience and action sounds.";
     const physicalContinuity = "At frame zero, every visible person and every important prop must already exist in a physically plausible position. If the script explicitly requires a later entrance, keep that subject off-screen at frame zero and show a complete physical entrance from a frame edge, doorway, behind an occluder, or through a motivated camera pan/dolly reveal. People and objects must never materialize, fade in, grow out of a screen, morph into existence, teleport, duplicate, swap identity, or disappear without a visible exit or an intentional cut. Props may enter only through a visible hand, container, doorway, or continuous physical movement. Preserve exact person count, hand occupancy, left/right screen position, depth layer and prop ownership until the scripted action visibly changes them.";
+    const performanceLock = "IDENTITY AND PERFORMANCE LOCK: canonical character images are the only identity source. Preserve exact skull silhouette, facial landmarks, eye spacing, eyelid shape, nose bridge, mouth width, jawline, ears, hairstyle, age, body proportions and costume. The previous-shot frame controls blocking and pose only and must never override canonical identity. Use subtle continuous micro-expressions, one primary body action at a time, realistic weight shift, stable shoulders and neck, anatomically plausible hands, limited head rotation, smooth acceleration and deceleration. Keep facial features temporally stable during speech and movement. No beauty-filter face, generic AI face, face replacement, identity blending, face melting, asymmetrical eyes, warped teeth, rubber lips, stiff mannequin pose, twitching, floating limbs or impossible joints.";
     const assetBindings = {
       characters: cast.map((character) => ({ name: character.name, assetId: character.arkAssetId || character.id, appearance: character.appearance })),
       scene: { id: scene.environmentKey || scene.title, bible: scene.environmentBible || scene.visual },
@@ -2061,7 +2065,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       startFrame: scene.remoteImageUrl || scene.imageUrl || "",
       previousEndFrame: previousScene?.remoteImageUrl || previousScene?.imageUrl || "",
     };
-    const deterministic = `${motionVisualPrompt(style)}, preserve the exact character identities, facial geometry, facial landmarks, hair, body proportions and current costumes from the bound canonical assets. Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue exactly from the previous shot end frame and end state: ${previousScene.endState || previousScene.action}. Preserve every character's normalized screen position (left/center/right), depth layer (foreground/midground/background), facing direction, pose, hand occupancy and prop position unless the action explicitly changes it.` : "This is the opening shot."} Continuity and transition rule: ${continuityRule} Current action: ${scene.action}. Camera movement: ${scene.camera}. Keep global motion treatment consistent: restrained breathing, stable hair and cloth amplitude, coherent camera speed, matching exposure, contrast, saturation and light direction. Important props that must remain visually identical and correctly placed: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state that the next shot can inherit"}. ${scene.speaker ? `${scene.speaker} performs with ${scene.emotion} emotion and natural mouth movement.` : "Natural performance and physically coherent motion."} Preserve architecture, prop positions, person count, weather, time, palette and light direction. Keep the canonical face stable in frontal, profile and moving views. One continuous cinematic shot, no unintended cuts, no subtitles, no duplicated people, no identity swap, no face morphing, no facial asymmetry, no deformed eyes or mouth, no extra fingers or limbs, no prop replacement, no sudden position jump. ${physicalContinuity}`;
+    const deterministic = `${styleBible} ${performanceLock} Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue blocking and physical state from the previous shot end frame: ${previousScene.endState || previousScene.action}. Preserve screen position, depth, facing direction, hand occupancy and prop position unless the action visibly changes it.` : "This is the opening shot."} Continuity rule: ${continuityRule} Current action: ${scene.action}. Camera: ${scene.camera}. Execute the action in three readable phases: settle, one motivated action, settle. Use restrained breathing, stable hair and cloth amplitude, smooth camera speed, matching exposure, contrast, saturation and light direction. Locked props: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state for the next shot"}. ${vocalDirection} One continuous cinematic shot, no unintended cuts, no subtitles. ${physicalContinuity}`;
     const config = agentConfigs.prompt;
     if (config.adapter === "browser") {
       recordActivity("prompt", `镜头 ${sceneIndex + 1} 已由本地镜头总控完成资产绑定与提示词编译`, "done");
@@ -2069,7 +2073,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const learned = agentContext("prompt").slice(0, 8);
     const system = `你是漫镜的镜头总控 Agent，位于导演与视频 Agent 之间。你不改写剧情，只负责绑定 Canonical 资产、继承 Start/End State、整合表演与运镜，并针对目标视频模型编译最终提示词。只返回 JSON：{"prompt":"最终视频提示词","negativePrompt":"必须避免的问题","assetBindings":["实际使用的资产ID"],"continuityCheck":"状态继承检查"}。提示词必须是一个连续镜头，禁止虚构未提供的资产。${learned.length ? `\n已启用技能：\n${learned.map((item) => `- ${item.title}：${item.content.slice(0, 900)}`).join("\n")}` : ""}`;
-    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, productionStandard: { transitionRule: continuityRule, physicalContinuity, motionTreatment: "restrained and globally consistent", colorContinuity: "match exposure, white balance, contrast and saturation to adjacent shots", stateHandoffSeconds: 0.5 }, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: scene.camera, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, dialogue: scene.dialogue, voiceMode: voiceover.mode, emotion: scene.emotion }, assetBindings, deterministicFallback: `${deterministic} Voice direction: ${vocalDirection}` });
+    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, styleBible, productionStandard: { transitionRule: continuityRule, physicalContinuity, performanceLock, motionTreatment: "restrained three-phase motion", colorContinuity: "exact style, exposure, white balance, contrast and saturation lock", stateHandoffSeconds: 0.5 }, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: scene.camera, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, dialogue: scene.dialogue, voiceMode: voiceover.mode, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
     try {
       setStatusText(`${agentName("prompt")}正在为镜头 ${sceneIndex + 1} 绑定资产并编译最终提示词`);
       const raw = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
@@ -2179,12 +2183,18 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const firstFrameUrl = await usableReferenceUrl(inheritedEndFrame || ownStartFrame, true);
     if (firstFrameUrl) pushReference({ kind: "image", role: "first_frame", url: firstFrameUrl, name: inheritedEndFrame ? `上一镜尾帧：${previousScene?.title || "连续镜头"}` : `本镜首帧：${scene.title}` });
 
+    const styleAnchor = await usableReferenceUrl(canonicalStyleImageRef.current);
+    if (styleAnchor) pushReference({ kind: "image", role: "reference_image", url: styleAnchor, name: `全片固定风格：${style}` });
+
     for (const character of cast) {
       if (agentConfigs.video.adapter === "seedance" && character.arkAssetId && character.portraitAuthorizationStatus === "authorized") {
         pushReference({ kind: "image", role: "reference_image", url: `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`, name: `Canonical 人物：${character.name}` });
       }
       const characterUrl = await usableReferenceUrl(character.remoteUrl || character.imageUrl);
-      if (characterUrl) pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `人物标准图：${character.name}` });
+      if (characterUrl) {
+        if (!canonicalStyleImageRef.current) canonicalStyleImageRef.current = character.remoteUrl || character.imageUrl || "";
+        pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `Canonical 人物身份：${character.name}` });
+      }
     }
 
     try {
@@ -3112,7 +3122,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             } catch (reason) {
               recordActivity("video", `“${scene.title}”视频已生成，关键帧提取失败但不影响后续成片：${reason instanceof Error ? reason.message : "未知错误"}`, "warning");
             }
-            work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, imageUrl: continuityFrames?.middle || item.imageUrl, remoteImageUrl: clip.lastFrameUrl || continuityFrames?.end || item.remoteImageUrl, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
+            let videoConsistency: ConsistencyReport | undefined;
+            if (continuityFrames?.middle) {
+              videoConsistency = await evaluateShotConsistency(scene, continuityFrames.middle, cast.filter((character) => scene.characters.includes(character.name)), previousScene, 1);
+              if (videoConsistency.overall < 85) recordActivity("video", `“${scene.title}”视频中间帧一致性仅 ${videoConsistency.overall} 分，已标记复核且不会用该镜尾继续放大人物漂移`, "warning");
+            }
+            const reliableTail = !videoConsistency || videoConsistency.overall >= 85 ? clip.lastFrameUrl || continuityFrames?.end || item.remoteImageUrl : item.remoteImageUrl;
+            work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: clip.url, imageUrl: continuityFrames?.middle || item.imageUrl, remoteImageUrl: reliableTail, consistencyReport: videoConsistency || item.consistencyReport, consistencyDecision: videoConsistency?.overall && videoConsistency.overall < 85 ? "review" : item.consistencyDecision, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
             autoArchive(clip.url, `${projectTitle}-${scene.title}-视频`, "video", Math.max(4, Math.min(15, scene.duration)), ["自动生成", "视频", scene.id]);
             generatedClips += 1;
             setScenes(work);
