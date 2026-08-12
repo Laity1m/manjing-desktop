@@ -155,6 +155,7 @@ export function loadSeriesProjects(): SeriesProject[] {
 export function saveSeriesProjects(projects: SeriesProject[]) {
   const compact = projects.slice(0, 12).map((project) => ({ ...project, sourceText: "" }));
   localStorage.setItem(SERIES_PROJECTS_KEY, JSON.stringify(compact));
+  window.dispatchEvent(new CustomEvent("manjing-series-projects-changed"));
 }
 
 export function buildEpisodeContext(project: SeriesProject, episode: SeriesEpisode) {

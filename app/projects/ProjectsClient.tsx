@@ -23,9 +23,11 @@ export default function ProjectsClient() {
 
   useEffect(() => {
     const loaded = loadSeriesProjects();
-    setSeries(loaded);
-    setSelectedId(loaded[0]?.id || "");
-    setExpandedId(loaded[0]?.id || "");
+    queueMicrotask(() => {
+      setSeries(loaded);
+      setSelectedId(loaded[0]?.id || "");
+      setExpandedId(loaded[0]?.id || "");
+    });
     void listEditorProjects().then((items) => setLegacyCount(items.length)).catch(() => undefined);
   }, []);
 
@@ -78,6 +80,12 @@ export default function ProjectsClient() {
     if (!selected) return;
     const episode = selected.episodes.find((item) => item.id === episodeId);
     if (!episode) return;
+    try {
+      if (JSON.parse(localStorage.getItem("manjing-production-runtime-v1") || "null")?.active === true) {
+        setMessage("当前工作台任务仍在后台制作，请等待完成或停止任务后再切换剧集");
+        return;
+      }
+    } catch { /* Invalid runtime metadata must not block a valid handoff. */ }
     activateSeriesEpisode(selected, episode);
     const nextProject = { ...selected, updatedAt: new Date().toISOString(), episodes: selected.episodes.map((item) => item.id === episode.id ? { ...item, status: "producing" as const } : item) };
     const nextSeries = series.map((item) => item.id === selected.id ? nextProject : item);

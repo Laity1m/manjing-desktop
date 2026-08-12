@@ -1,5 +1,7 @@
 export type LibraryAssetCategory = "character" | "scene" | "prop" | "video" | "audio" | "other";
 export type LibraryMediaType = "image" | "video" | "audio";
+export type AssetReferencePurpose = "identity" | "face" | "hair" | "costume" | "body" | "scene-layout" | "lighting" | "style" | "prop-geometry" | "prop-material" | "spatial-anchor" | "voice" | "shot-continuity";
+export type AssetSemanticRegion = { id: string; label: string; purpose: AssetReferencePurpose; box: [number, number, number, number] };
 
 export type LibraryAsset = {
   id: string;
@@ -16,6 +18,14 @@ export type LibraryAsset = {
   canonical: boolean;
   identityKey?: string;
   lookName?: string;
+  entityId?: string;
+  variantName?: string;
+  purposes?: AssetReferencePurpose[];
+  semanticDescription?: string;
+  semanticRegions?: AssetSemanticRegion[];
+  recognitionStatus?: "pending" | "recognized" | "confirmed" | "rejected";
+  recognitionConfidence?: number;
+  recognizedAt?: string;
   parentAssetId?: string;
   arkAssetId?: string;
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
@@ -59,6 +69,25 @@ function assetMediaType(file: Blob) {
   return null;
 }
 
+function defaultAssetPurposes(category: LibraryAssetCategory, mediaType: LibraryMediaType): AssetReferencePurpose[] {
+  if (category === "character") return ["identity", "face", "hair", "costume", "body"];
+  if (category === "scene") return ["scene-layout", "lighting", "style", "spatial-anchor"];
+  if (category === "prop") return ["prop-geometry", "prop-material", "spatial-anchor"];
+  if (category === "audio") return ["voice"];
+  if (category === "video") return ["shot-continuity", "style", "spatial-anchor"];
+  return mediaType === "audio" ? ["voice"] : mediaType === "video" ? ["shot-continuity"] : ["style"];
+}
+
+function defaultSemanticRegions(category: LibraryAssetCategory, mediaType: LibraryMediaType): AssetSemanticRegion[] | undefined {
+  if (category !== "character" || mediaType !== "image") return undefined;
+  return [
+    { id: "face", label: "脸部标准区域", purpose: "face", box: [0, 0, 0.38, 1] },
+    { id: "front", label: "正面全身区域", purpose: "body", box: [0.38, 0.04, 0.2, 0.92] },
+    { id: "side", label: "侧面全身区域", purpose: "body", box: [0.59, 0.04, 0.18, 0.92] },
+    { id: "back", label: "背面全身区域", purpose: "costume", box: [0.79, 0.04, 0.2, 0.92] },
+  ];
+}
+
 function normalizedAssetMetadata(asset: LibraryAsset): LibraryAsset {
   const generated = asset.tags?.some((item) => item === "自动生成" || item.startsWith("generated:"));
   if (!generated) return asset;
@@ -82,7 +111,7 @@ function transactionDone(transaction: IDBTransaction, message: string) {
   });
 }
 
-export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global" } = {}) {
+export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; entityId?: string; variantName?: string; purposes?: AssetReferencePurpose[]; semanticDescription?: string; semanticRegions?: AssetSemanticRegion[]; recognitionStatus?: "pending" | "recognized" | "confirmed" | "rejected"; recognitionConfidence?: number; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global" } = {}) {
   if (file.size > MAX_ASSET_BYTES) throw new Error("单个资产不能超过 512MB");
   const mediaType = assetMediaType(file);
   if (!mediaType) throw new Error(`“${file.name}”不是支持的图片、视频或音频`);
@@ -100,21 +129,34 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
   let activeContext: { projectId?: string; episodeId?: string } = {};
   try { activeContext = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}"); } catch { activeContext = {}; }
   const projectId = options.projectId?.trim() || activeContext.projectId?.trim() || undefined;
+  const category = options.category || (mediaType === "video" ? "video" : mediaType === "audio" ? "audio" : "other");
+  const entityId = options.entityId?.trim() || inferredIdentity?.trim() || scriptName?.trim() || undefined;
+  const purposes = (options.purposes?.length ? options.purposes : defaultAssetPurposes(category, mediaType)).slice(0, 12);
+  const semanticRegions = options.semanticRegions?.length ? options.semanticRegions.slice(0, 12) : defaultSemanticRegions(category, mediaType);
+  const semanticTags = [entityId ? `entity:${entityId}` : "", ...purposes.map((purpose) => `purpose:${purpose}`)].filter(Boolean);
   const asset: LibraryAsset = {
     id: uid("asset"),
     mediaId: uid("media"),
     name: (generated ? generatedName : options.name?.trim() || file.name).slice(0, 180),
     mediaType,
-    category: options.category || (mediaType === "video" ? "video" : mediaType === "audio" ? "audio" : "other"),
+    category,
     size: file.size,
     duration: Math.max(0, Number(options.duration) || (mediaType === "image" ? 5 : 0)),
-    tags,
+    tags: [...new Set([...tags, ...semanticTags])].slice(0, 24),
     createdAt: new Date().toISOString(),
     reusable: options.reusable !== false,
     locked: options.locked === true,
     canonical: false,
     identityKey: inferredIdentity?.slice(0, 120) || undefined,
     lookName: inferredLook?.slice(0, 120) || undefined,
+    entityId: entityId?.slice(0, 120) || undefined,
+    variantName: options.variantName?.trim().slice(0, 120) || inferredLook?.slice(0, 120) || undefined,
+    purposes,
+    semanticDescription: options.semanticDescription?.trim().slice(0, 1000) || (entityId ? `${entityId} 的${categoryName}，供 Agent 按用途引用` : undefined),
+    semanticRegions,
+    recognitionStatus: options.recognitionStatus || (generated ? "recognized" : "pending"),
+    recognitionConfidence: Math.max(0, Math.min(1, Number(options.recognitionConfidence ?? (generated ? 0.98 : 0)))),
+    recognizedAt: generated || options.recognitionStatus === "recognized" || options.recognitionStatus === "confirmed" ? new Date().toISOString() : undefined,
     parentAssetId: options.parentAssetId?.trim() || undefined,
     projectId,
     episodeId: options.episodeId?.trim() || activeContext.episodeId?.trim() || undefined,
@@ -178,7 +220,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -197,6 +239,14 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...(typeof patch.canonical === "boolean" ? { canonical: patch.canonical } : {}),
       ...(typeof patch.identityKey === "string" ? { identityKey: patch.identityKey.trim().slice(0, 120) || undefined } : {}),
       ...(typeof patch.lookName === "string" ? { lookName: patch.lookName.trim().slice(0, 120) || undefined } : {}),
+      ...(typeof patch.entityId === "string" ? { entityId: patch.entityId.trim().slice(0, 120) || undefined } : {}),
+      ...(typeof patch.variantName === "string" ? { variantName: patch.variantName.trim().slice(0, 120) || undefined } : {}),
+      ...(Array.isArray(patch.purposes) ? { purposes: [...new Set(patch.purposes)].slice(0, 12) } : {}),
+      ...(typeof patch.semanticDescription === "string" ? { semanticDescription: patch.semanticDescription.trim().slice(0, 1000) || undefined } : {}),
+      ...(Array.isArray(patch.semanticRegions) ? { semanticRegions: patch.semanticRegions.slice(0, 12) } : {}),
+      ...(patch.recognitionStatus ? { recognitionStatus: patch.recognitionStatus } : {}),
+      ...(typeof patch.recognitionConfidence === "number" ? { recognitionConfidence: Math.max(0, Math.min(1, patch.recognitionConfidence)) } : {}),
+      ...(typeof patch.recognizedAt === "string" ? { recognizedAt: patch.recognizedAt } : {}),
       ...(typeof patch.parentAssetId === "string" ? { parentAssetId: patch.parentAssetId.trim() || undefined } : {}),
       ...(typeof patch.arkAssetId === "string" ? { arkAssetId: patch.arkAssetId.trim().replace(/^asset:\/\//i, "").slice(0, 180) || undefined } : {}),
       ...(patch.portraitAuthorizationStatus ? { portraitAuthorizationStatus: patch.portraitAuthorizationStatus } : {}),

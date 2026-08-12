@@ -67,13 +67,15 @@ export default function AssetLibraryClient() {
 
   useEffect(() => {
     const projects = loadSeriesProjects();
-    setSeriesProjects(projects);
     const requestedProject = new URLSearchParams(window.location.search).get("project") || "";
-    if (requestedProject && projects.some((item) => item.id === requestedProject)) {
-      setAssetProjectId(requestedProject);
-      setExpandedProjectId(requestedProject);
-    }
-    void refresh().catch((reason) => setMessage(reason instanceof Error ? reason.message : "资产库加载失败"));
+    queueMicrotask(() => {
+      setSeriesProjects(projects);
+      if (requestedProject && projects.some((item) => item.id === requestedProject)) {
+        setAssetProjectId(requestedProject);
+        setExpandedProjectId(requestedProject);
+      }
+      void refresh().catch((reason) => setMessage(reason instanceof Error ? reason.message : "资产库加载失败"));
+    });
     return () => { Object.values(previews).forEach((url) => { if (url.startsWith("blob:")) URL.revokeObjectURL(url); }); };
   }, []);
 
@@ -156,6 +158,12 @@ export default function AssetLibraryClient() {
 
   function sendToStudio() {
     if (!selected.length) { setMessage("请先选择要发送到工作台的资产"); return; }
+    try {
+      if (JSON.parse(localStorage.getItem("manjing-production-runtime-v1") || "null")?.active === true) {
+        setMessage("当前漫剧仍在后台制作，完成或停止后才能切换工作台资产");
+        return;
+      }
+    } catch { /* Invalid runtime metadata must not block a valid asset handoff. */ }
     localStorage.setItem("manjing-studio-library-import", JSON.stringify(selected));
     router.push("/studio");
   }

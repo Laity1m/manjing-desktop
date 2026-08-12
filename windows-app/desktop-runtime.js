@@ -840,8 +840,9 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         const role = kind === "image"
           ? requestedRole === "first_frame" ? "first_frame" : requestedRole === "last_frame" ? "last_frame" : "reference_image"
           : kind === "video" ? "reference_video" : "reference_audio";
+        const token = `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`;
         content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
-        acceptedReferences.push({ kind, role, name: String(reference?.name || `${kind}-${counts[kind]}`).slice(0, 120) });
+        acceptedReferences.push({ kind, role, token, name: String(reference?.name || `${kind}-${counts[kind]}`).slice(0, 120) });
       }
     } else {
       const imageUrl = seedanceReferenceUrl(input?.imageUrl) || seedanceReferenceUrl(rawReferences.find((item) => item?.kind === "image")?.url);
@@ -849,6 +850,13 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         content.push({ type: "image_url", image_url: { url: imageUrl }, role: "first_frame" });
         acceptedReferences.push({ kind: "image", role: "first_frame", name: "首帧" });
       }
+    }
+    if (acceptedReferences.length && content[0]?.type === "text") {
+      const bindings = acceptedReferences.map((reference) => {
+        const purpose = reference.role === "first_frame" ? "严格作为本镜起始画面并延续其人物、服装、构图和空间状态" : reference.role === "last_frame" ? "严格作为本镜结束目标" : reference.role === "reference_audio" ? "只锁定该人物音色、年龄感、语速和口音，不改变画面" : reference.role === "reference_video" ? "只参考其动作、口型或运镜，不复制其剧情内容" : "严格锁定对应人物、服装、场景、道具或视觉风格";
+        return `${reference.token || "@Image1"} = ${reference.name}；用途：${purpose}`;
+      }).join("\n");
+      content[0].text += `\n\n多模态资产绑定清单（必须逐项使用，不得重新设计）：\n${bindings}\n同一参考名称包含多个用途时必须同时执行，不得只取其中一个。若不同参考存在冲突，优先级为：首帧连续状态 > Canonical人物身份与服装 > 全片固定风格 > Canonical场景和道具 > 动作参考。禁止把动画人物真人化或把真人动画化；禁止新增参考中没有的耳饰、服装、人物或关键道具。`;
     }
     const suppliedRequestId = String(input?.requestId || "").trim();
     const requestId = /^[a-z0-9-]{8,80}$/i.test(suppliedRequestId) ? suppliedRequestId : require("node:crypto").randomUUID();

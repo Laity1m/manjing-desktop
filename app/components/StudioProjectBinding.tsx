@@ -17,12 +17,31 @@ export default function StudioProjectBinding() {
     try { active = JSON.parse(sessionStorage.getItem("manjing-active-series-context-v1") || localStorage.getItem("manjing-active-series-context-v1") || "{}"); } catch { /* Use the first available project. */ }
     const initialProject = loaded.find((item) => item.id === active.projectId) || loaded[0];
     const initialEpisode = initialProject?.episodes.find((item) => item.id === active.episodeId) || initialProject?.episodes[0];
+    queueMicrotask(() => {
     setProjects(loaded);
     setProjectId(initialProject?.id || "");
     setEpisodeId(initialEpisode?.id || "");
     if (active.projectId && initialProject) setMessage(`当前已绑定：${initialProject.name} · 第 ${active.episodeNumber || initialEpisode?.number || 1} 集`);
+    });
   }, []);
 
+  useEffect(() => {
+    const refresh = () => {
+      const loaded = loadSeriesProjects();
+      setProjects(loaded);
+      setProjectId((current) => loaded.some((item) => item.id === current) ? current : loaded[0]?.id || "");
+      setEpisodeId((current) => loaded.some((item) => item.episodes.some((episode) => episode.id === current)) ? current : loaded[0]?.episodes[0]?.id || "");
+    };
+    const refreshFromStorage = (event: StorageEvent) => {
+      if (!event.key || event.key === "manjing-series-projects-v1") refresh();
+    };
+    window.addEventListener("manjing-series-projects-changed", refresh);
+    window.addEventListener("storage", refreshFromStorage);
+    return () => {
+      window.removeEventListener("manjing-series-projects-changed", refresh);
+      window.removeEventListener("storage", refreshFromStorage);
+    };
+  }, []);
   const project = useMemo(() => projects.find((item) => item.id === projectId), [projects, projectId]);
   const episode = useMemo(() => project?.episodes.find((item) => item.id === episodeId), [project, episodeId]);
 
@@ -36,8 +55,14 @@ export default function StudioProjectBinding() {
   function bindProject() {
     if (!project || !episode) { setMessage("请先选择项目和剧集"); return; }
     try {
+      if (JSON.parse(localStorage.getItem("manjing-production-runtime-v1") || "null")?.active === true) {
+        setMessage("当前漫剧仍在后台制作，请等待完成或先停止任务后再切换项目");
+        return;
+      }
+    } catch { /* Invalid runtime metadata must not block an explicit project binding. */ }    try {
       const context = activateSeriesEpisode(project, episode);
       window.dispatchEvent(new CustomEvent("manjing-series-context-changed", { detail: context }));
+      window.localStorage.removeItem("manjing-new-studio");
       setMessage(`已绑定“${project.name}”第 ${episode.number} 集，工作台内容和资产归属已同步`);
     } catch (reason) {
       setMessage(reason instanceof Error ? `绑定失败：${reason.message}` : "绑定失败，请重试");

@@ -271,7 +271,7 @@ export default function VideoClient() {
   }, [customModels]);
 
   useEffect(() => {
-    try {
+    queueMicrotask(() => { try {
       const settings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as {
         video?: VideoConfig;
       };
@@ -286,6 +286,7 @@ export default function VideoClient() {
         aspect: "9:16" | "16:9";
         duration: number;
         resolution: string;
+        voiceEnabled: boolean;
         voiceLanguage: string;
         voiceStyle: string;
         voiceScript: string;
@@ -296,6 +297,7 @@ export default function VideoClient() {
       if (draft.aspect) setAspect(draft.aspect);
       if (draft.duration) setDuration(draft.duration);
       if (draft.resolution) setResolution(draft.resolution);
+      if (typeof draft.voiceEnabled === "boolean") setVoiceEnabled(draft.voiceEnabled);
       if (draft.voiceLanguage) setVoiceLanguage(draft.voiceLanguage);
       if (draft.voiceStyle) setVoiceStyle(draft.voiceStyle);
       if (draft.voiceScript) setVoiceScript(draft.voiceScript);
@@ -314,11 +316,11 @@ export default function VideoClient() {
           if (matched) setSelectedPreset(matched.id);
         }
       }).catch(() => undefined);
-      void fetchHistory();
+      void listEditorProjects().then((items) => setHistory(items.filter((item) => item.source === "video"))).catch(() => setHistory([]));
     } catch {
       setCustomModels(loadCustomModels());
-      void fetchHistory();
-    }
+      void listEditorProjects().then((items) => setHistory(items.filter((item) => item.source === "video"))).catch(() => setHistory([]));
+    } });
   }, []);
 
   useEffect(() => {
@@ -333,6 +335,7 @@ export default function VideoClient() {
           aspect,
           duration,
           resolution,
+          voiceEnabled,
           voiceLanguage,
           voiceStyle,
           voiceScript,
@@ -345,7 +348,7 @@ export default function VideoClient() {
         // ignore local storage failure
       }
     }, 450);
-  }, [prompt, negativePrompt, style, aspect, duration, resolution, voiceLanguage, voiceStyle, voiceScript, config]);
+  }, [prompt, negativePrompt, style, aspect, duration, resolution, voiceEnabled, voiceLanguage, voiceStyle, voiceScript, config]);
 
   useEffect(() => () => {
     if (saveDraftRef.current) window.clearTimeout(saveDraftRef.current);
@@ -524,10 +527,6 @@ export default function VideoClient() {
     } finally {
       setHistoryLoading(false);
     }
-  };
-
-  const fetchHistory = () => {
-    void refreshHistory();
   };
 
   const createSeedanceTask = async (payload: {
@@ -785,7 +784,7 @@ export default function VideoClient() {
       const archivedResponse = await fetch(sourceUrl);
       if (archivedResponse.ok) {
         const archivedBlob = await archivedResponse.blob();
-        const archivedFile = new File([archivedBlob], `${name || "AI视频"}-${Date.now()}.mp4`, { type: archivedBlob.type || "video/mp4" });
+        const archivedFile = new File([archivedBlob], `${name || "AI视频"}-${projectId}.mp4`, { type: archivedBlob.type || "video/mp4" });
         await saveLibraryFile(archivedFile, { category: "video", duration, tags: ["自动生成", "AI视频", config.model] });
       }
     } catch (archiveError) {
@@ -1068,6 +1067,7 @@ export default function VideoClient() {
               <button
                 type="button"
                 className={`toggle ${voiceEnabled ? "on" : ""}`}
+                aria-label="生成视频配音"
                 aria-pressed={voiceEnabled}
                 onClick={() => setVoiceEnabled((value) => !value)}
               >

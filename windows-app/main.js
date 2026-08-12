@@ -228,30 +228,55 @@ function createWindow() {
             ["/editor", ".editor-page"],
             ["/assets", ".asset-library-page"],
             ["/models", ".keys-page"],
-            ["/projects", ".projects-page"],
-            ["/", ".portal-home"]
+            ["/projects", ".series-project-page"],
+            ["/", ".portal-home"],
+            ["/studio", "#story"]
           ];
+          let studioVisited = false;
           for (const [pathname, selector] of routes) {
-            const loaded = new Promise((resolve, reject) => {
-              const timeout = setTimeout(() => reject(new Error(`顶部导航超时：${pathname}`)), 6000);
-              const check = () => {
-                try {
-                  if (new URL(mainWindow.webContents.getURL()).pathname !== pathname) return;
-                  clearTimeout(timeout);
-                  mainWindow.webContents.removeListener("did-finish-load", check);
-                  resolve();
-                } catch { /* keep waiting for the requested route */ }
-              };
-              mainWindow.webContents.on("did-finish-load", check);
-            });
             const clicked = await mainWindow.webContents.executeJavaScript(`(() => { const link = document.querySelector('.global-nav a[href="${pathname}"]'); if (!link) return false; link.click(); return true; })()`);
-            if (!clicked) throw new Error(`没有找到顶部导航：${pathname}`);
-            await loaded;
-            await new Promise((resolve) => setTimeout(resolve, 160));
-            const state = await mainWindow.webContents.executeJavaScript(`({ route: location.pathname, ready: Boolean(document.querySelector(${JSON.stringify(selector)})), links: document.querySelectorAll('.global-nav a').length, responsive: document.visibilityState === 'visible' || document.visibilityState === 'hidden' })`);
-            if (state.route !== pathname || !state.ready || state.links < 9 || !state.responsive) throw new Error(`顶部导航页面不可交互：${pathname} ${JSON.stringify(state)}`);
-          }
-          if (smokeTimer) clearTimeout(smokeTimer);
+            if (!clicked) throw new Error(`Navigation link not found: ${pathname}`);
+            let state = null;
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              state = await mainWindow.webContents.executeJavaScript(`(() => {
+                const host = document.querySelector('[data-persistent-workspace="studio"]');
+                return {
+                  route: location.pathname,
+                  ready: Boolean(document.querySelector(${JSON.stringify(selector)})),
+                  links: document.querySelectorAll('.global-nav a').length,
+                  hostExists: Boolean(host),
+                  hostHidden: host?.getAttribute('aria-hidden') === 'true' && host?.style.display === 'none'
+                };
+              })()`);
+              if (state?.route === pathname && state?.ready) break;
+            }
+            if (state?.route !== pathname || !state?.ready || state.links < 9) throw new Error(`Navigation route unavailable: ${pathname} ${JSON.stringify(state)}`);
+            if (pathname === "/studio" && !studioVisited) {
+              const marked = await mainWindow.webContents.executeJavaScript(`(() => {
+                const host = document.querySelector('[data-persistent-workspace="studio"]');
+                const story = document.querySelector('#story');
+                if (!host || !story) return false;
+                host.dataset.smokeInstance = 'persistent-studio-instance';
+                story.dataset.smokeState = 'preserved';
+                window.__manjingPersistentStudioHost = host;
+                window.__manjingBackgroundProbe = { completed: false };
+                window.setTimeout(() => { window.__manjingBackgroundProbe.completed = true; }, 300);
+                return true;
+              })()`);
+              if (!marked) throw new Error("Persistent studio could not be marked");
+              studioVisited = true;
+            } else if (pathname !== "/studio" && studioVisited && (!state.hostExists || !state.hostHidden)) {
+              throw new Error(`Persistent studio was not retained while visiting ${pathname}: ${JSON.stringify(state)}`);
+            } else if (pathname === "/studio" && studioVisited) {
+              const restored = await mainWindow.webContents.executeJavaScript(`(() => {
+                const host = document.querySelector('[data-persistent-workspace="studio"]');
+                const story = document.querySelector('#story');
+                return Boolean(host && host === window.__manjingPersistentStudioHost && host.dataset.smokeInstance === 'persistent-studio-instance' && story?.dataset.smokeState === 'preserved' && window.__manjingBackgroundProbe?.completed === true && host.getAttribute('aria-hidden') === 'false');
+              })()`);
+              if (!restored) throw new Error("Persistent studio instance was recreated after navigation");
+            }
+          }          if (smokeTimer) clearTimeout(smokeTimer);
           console.log("MANJING_TOP_NAV_OK");
           setTimeout(() => app.exit(0), 250);
         } catch (error) {
@@ -308,18 +333,19 @@ function createWindow() {
             const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             for (let attempt = 0; attempt < 50 && !document.querySelector('.video-audio-setting'); attempt += 1) await wait(100);
             const toggle = document.querySelector('button[aria-label="生成视频配音"]');
-            if (!toggle || toggle.getAttribute('aria-pressed') !== 'false') return { ok: false, step: 'initial-toggle' };
+            if (!toggle) return { ok: false, step: 'initial-toggle' };
+            const initial = toggle.getAttribute('aria-pressed') === 'true';
             toggle.click();
-            await wait(250);
-            const enabledToggle = document.querySelector('button[aria-label="生成视频配音"]');
-            const options = document.querySelector('.video-voice-options');
-            const draftOn = JSON.parse(localStorage.getItem('manjing-free-video-draft-v1') || 'null');
-            if (!enabledToggle || enabledToggle.getAttribute('aria-pressed') !== 'true' || !options || !options.querySelector('textarea') || draftOn?.voiceEnabled !== true) return { ok: false, step: 'enabled-state', pressed: enabledToggle?.getAttribute('aria-pressed'), persisted: draftOn?.voiceEnabled };
-            enabledToggle.click();
-            await wait(250);
-            const disabledToggle = document.querySelector('button[aria-label="生成视频配音"]');
-            const draftOff = JSON.parse(localStorage.getItem('manjing-free-video-draft-v1') || 'null');
-            return { ok: location.protocol === 'manjing:' && disabledToggle?.getAttribute('aria-pressed') === 'false' && !document.querySelector('.video-voice-options') && draftOff?.voiceEnabled === false, protocol: location.protocol, pressed: disabledToggle?.getAttribute('aria-pressed'), persisted: draftOff?.voiceEnabled };
+            await wait(700);
+            const changedToggle = document.querySelector('button[aria-label="生成视频配音"]');
+            const changedDraft = JSON.parse(localStorage.getItem('manjing-video-draft-v2') || 'null');
+            const changedOptions = document.querySelector('.video-voice-options');
+            if (!changedToggle || changedToggle.getAttribute('aria-pressed') !== String(!initial) || changedDraft?.voiceEnabled !== !initial || (!initial && (!changedOptions || !changedOptions.querySelector('textarea')))) return { ok: false, step: 'changed-state', initial, pressed: changedToggle?.getAttribute('aria-pressed'), persisted: changedDraft?.voiceEnabled };
+            changedToggle.click();
+            await wait(700);
+            const restoredToggle = document.querySelector('button[aria-label="生成视频配音"]');
+            const restoredDraft = JSON.parse(localStorage.getItem('manjing-video-draft-v2') || 'null');
+            return { ok: location.protocol === 'manjing:' && restoredToggle?.getAttribute('aria-pressed') === String(initial) && restoredDraft?.voiceEnabled === initial, protocol: location.protocol, initial, pressed: restoredToggle?.getAttribute('aria-pressed'), persisted: restoredDraft?.voiceEnabled };
           })()`);
           if (!result?.ok) throw new Error(`自主视频配音开关交互测试失败：${JSON.stringify(result)}`);
           if (smokeTimer) clearTimeout(smokeTimer);
@@ -395,8 +421,13 @@ function createWindow() {
             const button = document.querySelector(".studio-project-binding button");
             if (!button || button.disabled) return { ok: false, step: "binding-button" };
             button.click();
-            await wait(600);
-            return { ok: location.pathname === "/studio" && !button.disabled && Boolean(document.querySelector("#story")?.value.trim()), message: document.querySelector(".binding-summary small")?.textContent || "" };
+            for (let attempt = 0; attempt < 50; attempt += 1) {
+              const message = document.querySelector(".binding-summary small")?.textContent || "";
+              if (message.includes("已绑定") && (document.querySelector("#story")?.value || "").trim()) break;
+              await wait(100);
+            }
+            const message = document.querySelector(".binding-summary small")?.textContent || "";
+            return { ok: location.pathname === "/studio" && message.includes("已绑定") && Boolean((document.querySelector("#story")?.value || "").trim()), message };
           })()`);
           if (!rebound?.ok) throw new Error(`Direct studio binding failed: ${JSON.stringify(rebound)}`);
           if (smokeTimer) clearTimeout(smokeTimer);

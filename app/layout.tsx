@@ -21,7 +21,8 @@ export const metadata: Metadata = {
 };
 
 import NavigationBridge from "./components/NavigationBridge";
+import PersistentWorkspace from "./components/PersistentWorkspace";
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="zh-CN"><body><NavigationBridge />{children}</body></html>;
+  return <html lang="zh-CN"><body><NavigationBridge /><PersistentWorkspace>{children}</PersistentWorkspace></body></html>;
 }

@@ -30,8 +30,11 @@ export default function ProjectDetailClient() {
   useEffect(() => {
     let active = true;
     if (!projectId) {
-      setLoading(false);
-      setMessage("未指定项目");
+      queueMicrotask(() => {
+        if (!active) return;
+        setLoading(false);
+        setMessage("未指定项目");
+      });
       return;
     }
     void getEditorProjectMetadataById(projectId).then((stored) => {
@@ -82,6 +85,12 @@ export default function ProjectDetailClient() {
 
   function continueProject() {
     if (action) return;
+    try {
+      if (JSON.parse(localStorage.getItem("manjing-production-runtime-v1") || "null")?.active === true) {
+        setMessage("当前漫剧仍在后台制作，完成或停止后才能切换工程");
+        return;
+      }
+    } catch { /* Invalid runtime metadata must not block an explicit project action. */ }
     if (!project) {
       if (draft?.id) localStorage.setItem("manjing-studio-open-project", draft.id);
       router.push("/studio");
