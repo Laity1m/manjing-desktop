@@ -292,6 +292,12 @@ async function discoverRemoteModels(input, fetchImpl = fetch) {
 }
 
 function responseText(data) {
+  const responsesOutputText = data?.output_text;
+  if (typeof responsesOutputText === "string" && responsesOutputText.trim()) return responsesOutputText;
+  if (Array.isArray(data?.output)) {
+    const text = data.output.flatMap((item) => Array.isArray(item?.content) ? item.content : []).map((item) => item?.text || item?.output_text || "").join("").trim();
+    if (text) return text;
+  }
   const direct = data?.text || data?.content || data?.result;
   if (typeof direct === "string" && direct.trim()) return direct;
   const openAi = data?.choices?.[0]?.message?.content;
@@ -347,10 +353,26 @@ async function invokeTextModel(input, fetchImpl = fetch) {
   const apiKey = String(input?.apiKey || "").trim();
   let target;
   let body;
+  let fallbackTarget;
+  let fallbackBody;
   if (mode === "openai" || mode === "pollinations") {
-    target = appendApiPath(base, "chat/completions");
     const userContent = images.length ? [{ type: "text", text: prompt }, ...images.map((item) => ({ type: "image_url", image_url: { url: item.url, detail: "low" }, name: item.label }))] : prompt;
-    body = { model, messages: [{ role: "system", content: system }, { role: "user", content: userContent }] };
+    const chatTarget = appendApiPath(base, "chat/completions");
+    const chatBody = { model, messages: [{ role: "system", content: system }, { role: "user", content: userContent }] };
+    if (mode === "openai") {
+      const responsesTarget = appendApiPath(base, "responses");
+      const responsesBody = images.length
+        ? { model, instructions: system, input: [{ role: "user", content: [{ type: "input_text", text: prompt }, ...images.map((item) => ({ type: "input_image", image_url: item.url, detail: "low" }))] }] }
+        : { model, instructions: system, input: prompt };
+      const prefersResponses = /\/responses\/?(?:[?#].*)?$/i.test(String(input?.endpoint || "").trim());
+      target = prefersResponses ? responsesTarget : chatTarget;
+      body = prefersResponses ? responsesBody : chatBody;
+      fallbackTarget = prefersResponses ? chatTarget : responsesTarget;
+      fallbackBody = prefersResponses ? chatBody : responsesBody;
+    } else {
+      target = chatTarget;
+      body = chatBody;
+    }
   } else if (mode === "anthropic") {
     target = appendApiPath(base, "messages");
     body = { model, max_tokens: 4096, system, messages: [{ role: "user", content: prompt }] };
@@ -376,14 +398,33 @@ async function invokeTextModel(input, fetchImpl = fetch) {
     voice: "配音 AI",
     editor: "剪辑 AI",
   }[role] || "文本 AI";
-  const data = await fetchProviderJson(target, {
-    method: "POST",
-    headers: providerHeaders(mode, apiKey, true),
-    body: JSON.stringify(body)
-  }, fetchImpl, {
+  const requestOptions = {
     timeoutMs,
     timeoutMessage: `${roleLabel} 模型 ${model} 在 ${Math.round(timeoutMs / 1000)} 秒内没有响应；已保留现有成果，请检查地址、网络或服务商队列后重新运行该岗位`
-  });
+  };
+  let data;
+  try {
+    data = await fetchProviderJson(target, {
+      method: "POST",
+      headers: providerHeaders(mode, apiKey, true),
+      body: JSON.stringify(body)
+    }, fetchImpl, requestOptions);
+  } catch (error) {
+    const canSwitchOpenAiProtocol = mode === "openai" && fallbackTarget && [404, 405].includes(Number(error?.providerStatus));
+    if (!canSwitchOpenAiProtocol) throw error;
+    try {
+      data = await fetchProviderJson(fallbackTarget, {
+        method: "POST",
+        headers: providerHeaders(mode, apiKey, true),
+        body: JSON.stringify(fallbackBody)
+      }, fetchImpl, requestOptions);
+    } catch (fallbackError) {
+      if ([404, 405].includes(Number(fallbackError?.providerStatus))) {
+        throw Object.assign(new Error("OpenAI 兼容接口的 /chat/completions 与 /responses 均不可用。请填写包含正确代理前缀的 Base URL，或在通用 Webhook 模式中填写服务商的完整接口地址"), { statusCode: 502, providerStatus: fallbackError.providerStatus });
+      }
+      throw fallbackError;
+    }
+  }
   const text = responseText(data);
   if (!text) throw Object.assign(new Error("接口调用成功，但没有返回可用文本"), { statusCode: 502 });
   return { text };
@@ -771,10 +812,13 @@ async function invokeSeedance(input, fetchImpl = fetch) {
     const voiceEnabled = rawVoiceover.enabled === true;
     const backgroundMusic = rawVoiceover.backgroundMusic === true;
     const audioEnabled = rawVoiceover.audioEnabled !== false;
+    const voiceMode = String(rawVoiceover.mode || "onscreen_dialogue");
     const musicInstruction = backgroundMusic ? "生成符合剧情节奏的无歌词背景音乐，音乐不得遮盖人声。" : "不要生成背景音乐。";
     const voiceInstruction = voiceEnabled
-      ? `\n生成原生音轨；配音语言：${String(rawVoiceover.language || "普通话").slice(0, 30)}；人声风格：${String(rawVoiceover.style || "自然对白").slice(0, 100)}；${rawVoiceover.script ? `准确台词：${String(rawVoiceover.script).slice(0, 500)}` : "严格按照提示词中的角色台词配音"}；人物口型与声音同步；同一角色跨镜头保持相同音色、年龄感、语速和口音。${musicInstruction}保留合理的环境音和动作音效。`
-      : `\n不要生成人物对白或旁白。${musicInstruction}保留合理的环境音和动作音效，视频不得完全静音。`;
+      ? voiceMode === "inner_monologue" || voiceMode === "voice_over"
+        ? `\n生成原生画外音；说话者：${String(rawVoiceover.speaker || "旁白").slice(0, 80)}；准确台词：${String(rawVoiceover.script || "").slice(0, 500)}；声音来自画外，不创建说话者形象，画面人物保持自然闭嘴，不做口型同步。${musicInstruction}保留环境音和动作音效。`
+        : `\n生成原生对白音轨；说话者：${String(rawVoiceover.speaker || "角色").slice(0, 80)}；准确台词：${String(rawVoiceover.script || "").slice(0, 500)}；仅说话角色进行自然口型同步；同一角色跨镜头保持相同音色、年龄感、语速和口音。${musicInstruction}保留环境音和动作音效。`
+      : `\n不要生成人物对白或旁白。${musicInstruction}保留环境音和动作音效，视频不得完全静音。`;
     const content = [{ type: "text", text: `${prompt}${voiceInstruction}${negativePrompt ? `\n避免：${negativePrompt}` : ""}` }];
     const rawReferences = Array.isArray(input?.references) ? input.references : [];
     const counts = { image: 0, video: 0, audio: 0 };
