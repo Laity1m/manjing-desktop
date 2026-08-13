@@ -1129,6 +1129,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [assetAnalysisState, setAssetAnalysisState] = useState<AssetAnalysisState>("idle");
   const [assetAction, setAssetAction] = useState("");
   const [assetImagePreview, setAssetImagePreview] = useState<{ url: string; name: string } | null>(null);
+  const [assetPairingSummary, setAssetPairingSummary] = useState("尚未执行生成前资产配对");
+  const [videoReviewPreview, setVideoReviewPreview] = useState<{ url: string; name: string } | null>(null);
   const [musicPrompt, setMusicPrompt] = useState("");
   const [musicUrl, setMusicUrl] = useState("");
   const [musicReviewDecision, setMusicReviewDecision] = useState<UserReviewDecision>("approved");
@@ -1222,6 +1224,52 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (!loaded?.url) return null;
     await markLibraryAssetUsed(match.id);
     return loaded;
+  }
+
+  async function pairExistingBlueprintAssets(characterItems = characters, propItems = propAssets, sceneItems = sceneAssets) {
+    setStatusText("正在生成前配对资产库：先找已有图片，再确定真正缺失项");
+    const projectId = activeAssetProjectId();
+    const library = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.mediaType === "image" && asset.reusable !== false && asset.assetState !== "placeholder");
+    const characterMatches = new Map<string, LibraryAsset>();
+    const propMatches = new Map<string, LibraryAsset>();
+    const sceneMatches = new Map<string, LibraryAsset>();
+    for (const character of characterItems.filter(isVisualCharacterAsset)) {
+      if (character.imageUrl) continue;
+      const naming = characterAssetNaming(character);
+      const match = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true });
+      if (match) characterMatches.set(character.id, match);
+    }
+    for (const prop of propItems) {
+      if (prop.imageUrl) continue;
+      const match = findReusableLibraryAsset(library, { category: "prop", identityKey: prop.name, projectId, mediaType: "image", allowCrossProject: true });
+      if (match) propMatches.set(prop.id, match);
+    }
+    for (const sceneAsset of sceneItems) {
+      if (sceneAsset.imageUrl) continue;
+      const match = findReusableLibraryAsset(library, { category: "scene", identityKey: sceneAsset.environmentKey || sceneAsset.name, projectId, mediaType: "image", allowCrossProject: true });
+      if (match) sceneMatches.set(sceneAsset.id, match);
+    }
+    const matchedIds = [...new Set([...characterMatches.values(), ...propMatches.values(), ...sceneMatches.values()].map((asset) => asset.id))];
+    const loaded = await loadLibraryAssets(matchedIds);
+    const byId = new Map(loaded.map((asset) => [asset.id, asset]));
+    const nextCharacters = deduplicateCharacterAssets(characterItems.map((character) => {
+      const match = characterMatches.get(character.id);
+      const asset = match ? byId.get(match.id) : undefined;
+      return !character.imageUrl && asset?.url ? { ...character, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : character.remoteUrl, arkAssetId: asset.arkAssetId, portraitAuthorizationStatus: asset.portraitAuthorizationStatus, sheetVersion: 2 as const, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : character;
+    }));
+    const nextProps = propItems.map((prop) => { const match = propMatches.get(prop.id); const asset = match ? byId.get(match.id) : undefined; return !prop.imageUrl && asset?.url ? { ...prop, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : prop.remoteUrl, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : prop; });
+    const nextScenes = sceneItems.map((sceneAsset) => { const match = sceneMatches.get(sceneAsset.id); const asset = match ? byId.get(match.id) : undefined; return !sceneAsset.imageUrl && asset?.url ? { ...sceneAsset, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : sceneAsset.remoteUrl, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : sceneAsset; });
+    setCharacters(nextCharacters);
+    setPropAssets(nextProps);
+    setSceneAssets(nextScenes);
+    await Promise.all(matchedIds.map((id) => markLibraryAssetUsed(id)));
+    const paired = matchedIds.length;
+    const missing = nextCharacters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl).length + nextProps.filter((item) => !item.imageUrl).length + nextScenes.filter((item) => !item.imageUrl).length;
+    const summary = `配对完成：复用 ${paired} 项已有资产，确认 ${missing} 项确实缺失`;
+    setAssetPairingSummary(summary);
+    setImportMessage(`${summary}；只有缺失项才允许进入生图 Agent`);
+    recordActivity("image", summary, paired ? "done" : "warning");
+    return { characters: nextCharacters, props: nextProps, scenes: nextScenes, paired, missing };
   }
 
   function persistScriptMemory(memory: Omit<ScriptNarrativeMemory, "updatedAt">) {
@@ -5320,15 +5368,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generateAllMissingBlueprints() {
     if (assetAction) return;
-    const missingCharacters = characters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl);
-    const missingProps = propAssets.filter((item) => !item.imageUrl);
-    const missingScenes = sceneAssets.filter((item) => !item.imageUrl);
+    setAssetAction("pair-assets");
+    setError("");
+    let paired;
+    try {
+      paired = await pairExistingBlueprintAssets();
+    } catch (reason) {
+      setAssetAction("");
+      setError(reason instanceof Error ? reason.message : "生成前资产配对失败");
+      return;
+    }
+    const missingCharacters = paired.characters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl);
+    const missingProps = paired.props.filter((item) => !item.imageUrl);
+    const missingScenes = paired.scenes.filter((item) => !item.imageUrl);
     if (!missingCharacters.length && !missingProps.length && !missingScenes.length) {
-      setStatusText("人物、场景和道具图片已经齐全，无需批量生成");
+      setAssetAction("");
+      setStatusText("资产配对后图片已经齐全，未调用生图模型");
       return;
     }
     setAssetAction("batch-generate");
-    setError("");
     recordActivity("image", `开始补齐 ${missingCharacters.length} 套人物造型、${missingScenes.length} 个场景和 ${missingProps.length} 个道具；每一项都会在调用生图模型前再次检索全资产库，只有确实缺失的才生成`);
     try {
       let completed = 0;
@@ -5350,6 +5408,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       setStatusText(`一键补齐完成：已处理 ${completed} 项；命中已有资产的项目未调用生图模型`);
       setImportMessage(`已保留并复用资产库已有图片，只为二次检索后仍缺失的人物、场景和道具调用 AI`);
+    } finally {
+      setAssetAction("");
+    }
+  }
+
+  async function runAssetPairingOnly() {
+    if (assetAction) return;
+    setAssetAction("pair-assets");
+    setError("");
+    try {
+      const result = await pairExistingBlueprintAssets();
+      setStatusText(result.missing ? `资产配对完成，还有 ${result.missing} 项可选择上传或交给 AI 生成` : "资产配对完成，全部使用已有资产，无需生图");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "资产配对失败");
     } finally {
       setAssetAction("");
     }
@@ -5979,7 +6051,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <header><div><span>SCRIPT ASSET BREAKDOWN</span><h3>剧本资产框架 · 人物造型、场景与道具</h3><p>AI 先区分简介、背景故事、实际人物、对白和重要道具，同时提取可复用场景；场景图是无人物的 Canonical 空场景参考，不是分镜图，即使不用首尾帧也会供全能参考引用。</p></div><div><b>{characters.length + sceneAssets.length + propAssets.length}</b><small>项视觉资产候选</small><button onClick={() => void analyzeScriptAssetBlueprint(story, "当前剧本")} disabled={assetAnalysisState === "analyzing" || Boolean(assetAction)}>{assetAnalysisState === "analyzing" ? "正在分析…" : "重新分析"}</button></div></header>
           {assetAnalysisState === "analyzing" ? <div className="asset-blueprint-loading"><i /><b>AI 正在通读剧本</b><span>识别人物身份、换装/状态、可复用场景和剧情关键道具；此步骤不会请求生图模型。</span></div> : assetAnalysisState === "idle" ? <div className="asset-blueprint-loading"><b>尚未建立资产框架</b><button onClick={() => void analyzeScriptAssetBlueprint(story, "当前剧本")}>开始分析</button></div> : <>
             <div className="script-memory-panel"><label><span>剧本简介</span><textarea value={scriptMemory.synopsis} placeholder="AI 将提取或概括故事主线" onChange={(event) => persistScriptMemory({ synopsis: event.target.value, background: scriptMemory.background })} /></label><label><span>背景故事与世界记忆</span><textarea value={scriptMemory.background} placeholder="时代、地点、世界规则、关系与前史会持续用于后续分镜和剧集" onChange={(event) => persistScriptMemory({ synopsis: scriptMemory.synopsis, background: event.target.value })} /></label></div>
-            <div className="asset-blueprint-summary"><span>人物 {new Set(characters.map(characterIdentity)).size}</span><span>本集人物造型 {characters.length}</span><span>Canonical 场景 {sceneAssets.length}</span><span>有对白人物音色 {new Set(characters.filter((item) => Boolean(item.firstDialogue || firstDialogueForCharacter(story, characterIdentity(item)))).map(characterIdentity)).size}</span><span>重要道具 {propAssets.length}</span><em>{characters.filter((item) => item.imageUrl && item.reviewDecision !== "pending").length + sceneAssets.filter((item) => item.imageUrl && item.reviewDecision !== "pending").length + propAssets.filter((item) => item.imageUrl && item.reviewDecision !== "pending").length}/{characters.length + sceneAssets.length + propAssets.length} 已准备</em><button type="button" onClick={() => void generateAllMissingBlueprints()} disabled={Boolean(assetAction) || (!characters.some((item) => !item.imageUrl) && !sceneAssets.some((item) => !item.imageUrl) && !propAssets.some((item) => !item.imageUrl))}>{assetAction === "batch-generate" || assetAction.includes("-generate:") ? "正在批量生成…" : `一键生成全部缺失图片（${characters.filter((item) => !item.imageUrl).length + sceneAssets.filter((item) => !item.imageUrl).length + propAssets.filter((item) => !item.imageUrl).length}）`}</button></div>
+            <div className="asset-blueprint-summary"><span>人物 {new Set(characters.map(characterIdentity)).size}</span><span>本集人物造型 {characters.length}</span><span>Canonical 场景 {sceneAssets.length}</span><span>有对白人物音色 {new Set(characters.filter((item) => Boolean(item.firstDialogue || firstDialogueForCharacter(story, characterIdentity(item)))).map(characterIdentity)).size}</span><span>重要道具 {propAssets.length}</span><strong>{assetPairingSummary}</strong><em>{characters.filter((item) => item.imageUrl && item.reviewDecision !== "pending").length + sceneAssets.filter((item) => item.imageUrl && item.reviewDecision !== "pending").length + propAssets.filter((item) => item.imageUrl && item.reviewDecision !== "pending").length}/{characters.length + sceneAssets.length + propAssets.length} 已准备</em><button type="button" className="asset-pair-button" onClick={() => void runAssetPairingOnly()} disabled={Boolean(assetAction)}>{assetAction === "pair-assets" ? "正在配对…" : "先配对已有资产"}</button><button type="button" onClick={() => void generateAllMissingBlueprints()} disabled={Boolean(assetAction) || (!characters.some((item) => !item.imageUrl) && !sceneAssets.some((item) => !item.imageUrl) && !propAssets.some((item) => !item.imageUrl))}>{assetAction === "batch-generate" || assetAction.includes("-generate:") ? "正在批量生成…" : `配对后生成真正缺失项（${characters.filter((item) => !item.imageUrl).length + sceneAssets.filter((item) => !item.imageUrl).length + propAssets.filter((item) => !item.imageUrl).length}）`}</button></div>
             <div className="asset-blueprint-grid">
               {characters.map((character) => <article key={character.id} className={`asset-blueprint-card ${character.status}`}>
                 <div className="asset-blueprint-preview">{character.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: character.imageUrl as string, name: characterAssetNaming(character).displayName })} aria-label={`预览${characterAssetNaming(character).displayName}大图`}><img src={character.imageUrl} alt={characterAssetNaming(character).displayName} /><i>点击预览</i></button> : <span><i>人</i><small>仅框架<br />尚无图片</small></span>}</div>
@@ -6163,7 +6235,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         {pendingReviewCount > 0 && <section className="incremental-review" aria-live="polite"><header><div><span>LIVE REVIEW</span><h3>逐镜生成与审核</h3><p>当前分镜一生成就立即暂停；可批准、按评分原因修改或删除，确认可用后才会生成下一镜。</p></div><b>{pendingReviewCount}<small> 项待审</small></b></header><div className="incremental-review-grid">
           {pendingCharacterReviews.map((character) => <article key={`character-${character.id}`}><div className="review-media">{character.imageUrl && <img src={character.imageUrl} alt={character.name} />}</div><div><small>角色设定</small><b>{character.name}</b><p>{character.appearance}</p></div><footer><button onClick={() => approveCharacterAsset(character)}>批准入库</button><button className="danger" onClick={() => rejectCharacterAsset(character)}>删除</button></footer></article>)}
           {pendingImageReviews.map((scene) => <article key={`image-${scene.id}`}><div className="review-media">{scene.imageUrl && <img src={scene.imageUrl} alt={scene.title} />}</div><div><small>镜头画面</small><b>{scene.title}</b><p>{scene.consistencyReport?.findings[0] || scene.visual}</p></div><footer><button onClick={() => approveSceneAsset(scene, "image")}>批准画面</button><button className="danger" onClick={() => rejectSceneAsset(scene, "image")}>删除</button></footer></article>)}
-          {pendingVideoReviews.map((scene) => <article key={`video-${scene.id}`}><div className="review-media">{scene.candidateVideoUrl && <video src={scene.candidateVideoUrl} muted controls preload="metadata" />}</div><div><small>{scene.consistencyDecision === "pass" ? "视频 · AI质检通过" : "视频 · 需修改"}</small><b>{scene.title}</b><p>{scene.consistencyReport?.findings.join("；") || "动态镜头已生成，等待你的审核。"}</p></div><footer><button onClick={() => void approveCandidateVideo(scene)}>合格，批准入片</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(scene)}>不合格，按原因修改</button><button className="danger" onClick={() => discardCandidateVideo(scene)}>删除</button></footer></article>)}
+          {pendingVideoReviews.map((scene) => <article key={`video-${scene.id}`}><button type="button" className="review-media review-video-open" onClick={() => scene.candidateVideoUrl && setVideoReviewPreview({ url: scene.candidateVideoUrl, name: scene.title })} aria-label={`大窗预览${scene.title}`}><video src={scene.candidateVideoUrl} muted preload="metadata" /><i>点击大窗预览</i></button><div><small>{scene.consistencyDecision === "pass" ? "视频 · AI质检通过" : "视频 · 需修改"}</small><b>{scene.title}</b><p>{scene.consistencyReport?.findings.join("；") || "动态镜头已生成，等待你的审核。"}</p></div><footer><button onClick={() => scene.candidateVideoUrl && setVideoReviewPreview({ url: scene.candidateVideoUrl, name: scene.title })}>预览视频</button><button onClick={() => void approveCandidateVideo(scene)}>合格，批准入片</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(scene)}>不合格，按原因修改</button><button className="danger" onClick={() => discardCandidateVideo(scene)}>删除</button></footer></article>)}
           {pendingAudioReviews.map((scene) => <article key={`audio-${scene.id}`}><div className="review-media audio">声音</div><div><small>角色配音</small><b>{scene.title} · {scene.speaker}</b><p>{scene.dialogue}</p><audio src={scene.audioUrl} controls preload="metadata" /></div><footer><button onClick={() => approveSceneAsset(scene, "audio")}>批准入库</button><button className="danger" onClick={() => rejectSceneAsset(scene, "audio")}>删除</button></footer></article>)}
           {pendingMusicReviews > 0 && <article><div className="review-media audio">BGM</div><div><small>剧情配乐</small><b>{projectTitle}</b><p>{musicPrompt}</p><audio src={musicUrl} controls preload="metadata" /></div><footer><button onClick={approveMusicAsset}>批准入库</button><button className="danger" onClick={rejectMusicAsset}>删除</button></footer></article>}
         </div></section>}
@@ -6208,7 +6280,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             {!showFilm && current?.candidateVideoUrl && !current.videoUrl && <div className="candidate-review-panel">
               <div><span>LIVE REVIEW</span><b>{current.consistencyDecision === "pass" ? "视频已生成，等待你逐项批准" : "这个镜头需要你的判断"}</b><p>{current.consistencyReport?.findings.slice(0, 2).join("；") || "人物、服装、画风或镜头连续性需要人工复核。"}</p></div>
               <strong>{current.consistencyReport?.overall ?? "--"}<small>/100</small></strong>
-              <div className="candidate-review-actions"><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(current)} disabled={busy || Boolean(sceneAction)}>不合格，按评分原因修改</button><button onClick={() => void approveCandidateVideo(current)} disabled={Boolean(sceneAction)}>合格，批准并生成下一镜</button><button className="candidate-delete" onClick={() => discardCandidateVideo(current)} disabled={Boolean(sceneAction)}>删除候选</button></div>
+              <div className="candidate-review-actions"><button onClick={() => current.candidateVideoUrl && setVideoReviewPreview({ url: current.candidateVideoUrl, name: current.title })}>大窗预览视频</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(current)} disabled={busy || Boolean(sceneAction)}>不合格，按评分原因修改</button><button onClick={() => void approveCandidateVideo(current)} disabled={Boolean(sceneAction)}>合格，批准并生成下一镜</button><button className="candidate-delete" onClick={() => discardCandidateVideo(current)} disabled={Boolean(sceneAction)}>删除候选</button></div>
             </div>}
             {!showFilm && nativeVideoEnabled && current?.imageUrl && !current.videoUrl && !current.candidateVideoUrl && current.consistencyDecision === "reject" && <div className="candidate-review-panel preflight-review-panel">
               <div><span>PREFLIGHT REVIEW</span><b>首帧等待你的决定</b><p>{[...(current.consistencyReport?.findings.slice(0, 2) || []), ...(current.consistencyReport ? consistencyGateWarnings(current.consistencyReport, current.characters.length > 0).slice(0, 2) : [])].join("；") || "当前总分低于自动通过线，你可以自行决定是否进入视频生成。"}</p></div>
@@ -6289,6 +6361,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       </section>
 
       {assetImagePreview && <div className="asset-image-lightbox" role="dialog" aria-modal="true" aria-label={`${assetImagePreview.name}图片预览`} onClick={() => setAssetImagePreview(null)}><button type="button" onClick={() => setAssetImagePreview(null)} aria-label="关闭图片预览">×</button><figure onClick={(event) => event.stopPropagation()}><img src={assetImagePreview.url} alt={assetImagePreview.name} /><figcaption>{assetImagePreview.name}</figcaption></figure></div>}
+      {videoReviewPreview && <div className="video-review-lightbox" role="dialog" aria-modal="true" aria-label={`${videoReviewPreview.name}视频预览`} onClick={() => setVideoReviewPreview(null)}><button type="button" onClick={() => setVideoReviewPreview(null)} aria-label="关闭视频预览">×</button><figure onClick={(event) => event.stopPropagation()}><video src={videoReviewPreview.url} controls autoPlay playsInline preload="auto" /><figcaption><b>{videoReviewPreview.name}</b><span>请完整播放并检查人物、动作、运镜、声音和镜头衔接后再批准。</span></figcaption></figure></div>}
 
       <footer><div className="brand"><span>漫</span><strong>漫镜</strong></div><p>让每一个好故事，都真正被看见。</p><small>生成服务可能排队或限流，失败会如实提示。</small></footer>
     </main>

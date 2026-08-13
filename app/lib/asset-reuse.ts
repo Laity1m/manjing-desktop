@@ -45,7 +45,7 @@ export function normalizeAssetLook(value?: string) {
     .replace(/^(?:造型|状态|服装|look|costume|variant)[:：]?/iu, "")
     .replace(/[\s_\-—·•:：/\\()[\]{}]+/gu, "")
     .replace(/(?:版本|version)$/iu, "");
-  if (!normalized || /^(?:基础|基础版|基础造型|默认|默认版|默认造型|base|baselook|default|defaultlook)$/iu.test(normalized)) return "base";
+  if (!normalized || /^(?:基础|基础版|基础造型|默认|默认版|默认造型|当前|当前版|当前造型|本集|本集版|本集造型|标准|标准版|标准造型|原始|原始版|常规|常规版|普通|普通版|base|baselook|default|defaultlook|current|currentlook|currentepisodelook|episodelook|standard|standardlook|original|originallook|regular|regularlook|canonical|canonicallook)$/iu.test(normalized)) return "base";
   return normalized.replace(/版$/u, "");
 }
 

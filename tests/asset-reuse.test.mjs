@@ -24,6 +24,7 @@ test("treats base look labels as the same look but never mixes real variants", a
   const { findReusableLibraryAsset } = await loadReuseModule();
   assert.equal(findReusableLibraryAsset([asset()], { category: "character", identityKey: "ADRIAN", lookName: "基础版", mediaType: "image", allowCrossProject: true })?.id, "asset-1");
   assert.equal(findReusableLibraryAsset([asset({ lookName: "白衣版" })], { category: "character", identityKey: "ADRIAN", lookName: "黑衣版", mediaType: "image", allowCrossProject: true }), undefined);
+  assert.equal(findReusableLibraryAsset([asset()], { category: "character", identityKey: "ADRIAN", lookName: "Current Episode Look", mediaType: "image", allowCrossProject: true })?.id, "asset-1");
 });
 
 test("prefers the current project and ignores similarly named people", async () => {

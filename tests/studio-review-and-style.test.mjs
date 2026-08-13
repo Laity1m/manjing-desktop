@@ -27,12 +27,20 @@ test("imported scripts create editable asset skeletons before any image generati
   assert.match(source, /await analyzeScriptAssetBlueprint\(content\.slice\(0, 50000\), file\.name\)/);
   assert.match(source, /上传已有图片/);
   assert.match(source, /让 AI 生成/);
-  assert.match(source, /一键生成全部缺失图片/);
+  assert.match(source, /配对后生成真正缺失项/);
   assert.match(source, /asset-image-lightbox/);
   assert.match(source, /manjing-script-memory-v1/);
   assert.match(source, /persistScriptAssetBlueprint/);
   assert.match(source, /saveLibraryPlaceholder/);
   assert.match(source, /资产准备尚未完成：\$\{unresolvedCharacters\.length\} 个人物、\$\{unresolvedProps\.length\} 个道具仍需上传图片，或让 AI 生成后采用/);
+});
+
+test("pairs existing assets before image generation and opens review videos in a large preview", () => {
+  assert.match(source, /pairExistingBlueprintAssets/);
+  assert.match(source, /只有缺失项才允许进入生图 Agent/);
+  assert.match(source, /先配对已有资产/);
+  assert.match(source, /video-review-lightbox/);
+  assert.match(source, /大窗预览视频/);
 });
 
 test("splits episode character looks and binds exactly one look to each shot", () => {
