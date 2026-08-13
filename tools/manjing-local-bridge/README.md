@@ -38,7 +38,8 @@ MoneyPrinterTurbo 自身仍需要 FFmpeg，并可能使用其配置的 TTS、字
 - `GET /health`：并行检查五个本地节点、可选 ASR 节点和两个 ComfyUI 工作流。
 - `POST /v1/image`：运行 `workflows/image.json`。
 - `POST /v1/video`：运行 `workflows/video.json`。
-- `POST /v1/audio`：调用 CosyVoice。
+- `POST /v1/audio`：调用 CosyVoice；带 `reference_audio + referenceText` 时自动走 zero-shot 人物音色克隆，检测到 FFmpeg 时输出 MP3。
+- `POST /v1/voice-profiles/extract`：从用户指定的单人物对白视频片段提取、降噪并响度标准化为 MP3；多人混音需先做说话人分离。
 - `POST /v1/vibevoice/audio`：调用 VibeVoice Realtime WebSocket 并输出 WAV。
 - `POST /v1/lipsync`：上传画面与音频并调用 MuseTalk。
 - `POST /v1/moneyprinter/materials`：向 MoneyPrinterTurbo 上传一个剪辑素材。

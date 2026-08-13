@@ -1,3 +1,5 @@
+import { characterAssetDisplayName } from "./character-asset-naming";
+
 export type LibraryAssetCategory = "character" | "scene" | "prop" | "video" | "audio" | "other";
 export type LibraryMediaType = "image" | "video" | "audio";
 export type AssetReferencePurpose = "identity" | "face" | "hair" | "costume" | "body" | "scene-layout" | "lighting" | "style" | "prop-geometry" | "prop-material" | "spatial-anchor" | "voice" | "shot-continuity";
@@ -29,12 +31,34 @@ export type LibraryAsset = {
   parentAssetId?: string;
   arkAssetId?: string;
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
+  referenceText?: string;
+  voiceSource?: "generated-dialogue" | "video-extracted" | "user-uploaded";
+  voiceConsent?: "pending" | "confirmed" | "revoked";
+  assetState?: "placeholder" | "generating" | "review" | "ready";
+  sourceChoice?: "unselected" | "upload" | "ai";
+  blueprintKey?: string;
+  generationPrompt?: string;
   projectId?: string;
   episodeId?: string;
   scope?: "project" | "global";
   usageCount: number;
   lastUsedAt?: string;
   url?: string;
+};
+
+export type LibraryPlaceholderInput = {
+  name: string;
+  category: "character" | "scene" | "prop" | "audio";
+  identityKey: string;
+  lookName?: string;
+  semanticDescription: string;
+  generationPrompt?: string;
+  referenceText?: string;
+  tags?: string[];
+  projectId?: string;
+  episodeId?: string;
+  scope?: "project" | "global";
+  blueprintKey?: string;
 };
 
 const DATABASE_NAME = "manjing-media-v1";
@@ -90,16 +114,29 @@ function defaultSemanticRegions(category: LibraryAssetCategory, mediaType: Libra
 
 function normalizedAssetMetadata(asset: LibraryAsset): LibraryAsset {
   const generated = asset.tags?.some((item) => item === "自动生成" || item.startsWith("generated:"));
-  if (!generated) return asset;
   const extension = asset.name.match(/\.[a-z0-9]{2,8}$/i)?.[0] || "";
   const stem = asset.name.slice(0, extension ? -extension.length : undefined);
   const semantic = stem.match(/(?:^|-)([^-]+)-(角色设定|人物设定|角色资产|场景|分镜|视频|道具设定|配音|口型视频)$/);
-  const inferredIdentity = asset.identityKey || (["character", "prop"].includes(asset.category) ? semantic?.[1] : undefined);
+  const legacyCharacter = asset.category === "character" ? stem.match(/(?:^|-)([^-]+)-(?:角色设定|人物设定|角色资产)(?:-([^-]+))?(?:-角色)?$/) : null;
+  const storedIdentityIsOpaque = /^character:[a-z0-9_-]+$/i.test(asset.identityKey || "");
+  const inferredIdentity = (!storedIdentityIsOpaque ? asset.identityKey : undefined) || (asset.category === "character" ? legacyCharacter?.[1] : undefined) || (["character", "prop"].includes(asset.category) ? semantic?.[1] : undefined);
+  const inferredLook = asset.lookName || legacyCharacter?.[2] || (asset.category === "character" ? "基础版" : undefined);
+  if (asset.category === "character" && inferredIdentity && (generated || legacyCharacter || storedIdentityIsOpaque)) {
+    return {
+      ...asset,
+      name: characterAssetDisplayName(inferredIdentity, inferredLook),
+      identityKey: inferredIdentity,
+      entityId: asset.entityId || inferredIdentity,
+      lookName: inferredLook,
+      variantName: asset.variantName || inferredLook,
+    };
+  }
+  if (!generated) return asset;
   return {
     ...asset,
     name: semantic ? `${semantic[1]}-${semantic[2]}${extension}` : asset.name,
     identityKey: inferredIdentity,
-    lookName: asset.lookName || (asset.category === "character" ? "基础造型" : undefined),
+    lookName: inferredLook,
   };
 }
 
@@ -111,7 +148,7 @@ function transactionDone(transaction: IDBTransaction, message: string) {
   });
 }
 
-export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; entityId?: string; variantName?: string; purposes?: AssetReferencePurpose[]; semanticDescription?: string; semanticRegions?: AssetSemanticRegion[]; recognitionStatus?: "pending" | "recognized" | "confirmed" | "rejected"; recognitionConfidence?: number; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global" } = {}) {
+export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; entityId?: string; variantName?: string; purposes?: AssetReferencePurpose[]; semanticDescription?: string; semanticRegions?: AssetSemanticRegion[]; recognitionStatus?: "pending" | "recognized" | "confirmed" | "rejected"; recognitionConfidence?: number; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global"; referenceText?: string; voiceSource?: "generated-dialogue" | "video-extracted" | "user-uploaded"; voiceConsent?: "pending" | "confirmed" | "revoked" } = {}) {
   if (file.size > MAX_ASSET_BYTES) throw new Error("单个资产不能超过 512MB");
   const mediaType = assetMediaType(file);
   if (!mediaType) throw new Error(`“${file.name}”不是支持的图片、视频或音频`);
@@ -128,7 +165,7 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
   const generatedName = scriptName ? `${scriptName}${options.category === "character" && inferredLook ? `-${inferredLook}` : ""}-${categoryName}${extension}` : file.name;
   let activeContext: { projectId?: string; episodeId?: string } = {};
   try { activeContext = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}"); } catch { activeContext = {}; }
-  const projectId = options.projectId?.trim() || activeContext.projectId?.trim() || undefined;
+  const projectId = options.scope === "global" ? undefined : options.projectId?.trim() || activeContext.projectId?.trim() || undefined;
   const category = options.category || (mediaType === "video" ? "video" : mediaType === "audio" ? "audio" : "other");
   const entityId = options.entityId?.trim() || inferredIdentity?.trim() || scriptName?.trim() || undefined;
   const purposes = (options.purposes?.length ? options.purposes : defaultAssetPurposes(category, mediaType)).slice(0, 12);
@@ -137,7 +174,7 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
   const asset: LibraryAsset = {
     id: uid("asset"),
     mediaId: uid("media"),
-    name: (generated ? generatedName : options.name?.trim() || file.name).slice(0, 180),
+    name: (options.name?.trim() || (generated ? generatedName : file.name)).slice(0, 180),
     mediaType,
     category,
     size: file.size,
@@ -158,6 +195,11 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
     recognitionConfidence: Math.max(0, Math.min(1, Number(options.recognitionConfidence ?? (generated ? 0.98 : 0)))),
     recognizedAt: generated || options.recognitionStatus === "recognized" || options.recognitionStatus === "confirmed" ? new Date().toISOString() : undefined,
     parentAssetId: options.parentAssetId?.trim() || undefined,
+    referenceText: options.referenceText?.trim().slice(0, 500) || undefined,
+    voiceSource: category === "audio" ? options.voiceSource || (generated ? "generated-dialogue" : "user-uploaded") : undefined,
+    voiceConsent: category === "audio" ? options.voiceConsent || (generated ? "confirmed" : "pending") : undefined,
+    assetState: "ready",
+    sourceChoice: generated ? "ai" : "upload",
     projectId,
     episodeId: options.episodeId?.trim() || activeContext.episodeId?.trim() || undefined,
     scope: options.scope || (projectId ? "project" : "global"),
@@ -169,6 +211,120 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
     transaction.objectStore(ASSET_STORE_NAME).put(asset, asset.id);
     await transactionDone(transaction, "资产保存失败，本机存储空间可能不足");
     return { ...asset, url: URL.createObjectURL(file) };
+  } finally {
+    database.close();
+  }
+}
+
+export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
+  const name = input.name.trim().slice(0, 180);
+  const identityKey = input.identityKey.trim().slice(0, 120) || name;
+  if (!name || !identityKey) throw new Error("资产框架缺少名称");
+  let activeContext: { projectId?: string; episodeId?: string } = {};
+  try { activeContext = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}"); } catch { activeContext = {}; }
+  const projectId = input.projectId?.trim() || activeContext.projectId?.trim() || undefined;
+  const episodeId = input.episodeId?.trim() || activeContext.episodeId?.trim() || undefined;
+  const blueprintKey = (input.blueprintKey?.trim() || `${input.category}:${identityKey}:${input.lookName || "基础版"}`).toLocaleLowerCase("zh-CN").slice(0, 240);
+  const existing = (await listLibraryAssets({ allProjects: true })).find((asset) => asset.blueprintKey === blueprintKey && (asset.projectId || "") === (projectId || ""));
+  const mediaType: LibraryMediaType = input.category === "audio" ? "audio" : "image";
+  const tags = [...new Set([...(input.tags || []), input.category === "audio" ? "剧本音色框架" : "剧本资产框架", `entity:${identityKey}`, ...defaultAssetPurposes(input.category, mediaType).map((purpose) => `purpose:${purpose}`)])].slice(0, 24);
+  if (existing) {
+    return updateLibraryAsset(existing.id, {
+      name,
+      identityKey,
+      entityId: identityKey,
+      lookName: input.lookName || existing.lookName,
+      variantName: input.lookName || existing.variantName,
+      semanticDescription: input.semanticDescription,
+      generationPrompt: input.generationPrompt,
+      referenceText: input.referenceText,
+      tags,
+      projectId,
+      episodeId,
+      scope: input.scope || (projectId ? "project" : "global"),
+    });
+  }
+  const id = uid("asset");
+  const asset: LibraryAsset = {
+    id,
+    mediaId: `placeholder:${id}`,
+    name,
+    mediaType,
+    category: input.category,
+    size: 0,
+    duration: 5,
+    tags,
+    createdAt: new Date().toISOString(),
+    reusable: false,
+    locked: true,
+    canonical: false,
+    identityKey,
+    entityId: identityKey,
+    lookName: input.lookName?.trim().slice(0, 120) || (input.category === "character" ? "基础版" : undefined),
+    variantName: input.lookName?.trim().slice(0, 120) || (input.category === "character" ? "基础版" : undefined),
+    purposes: defaultAssetPurposes(input.category, mediaType),
+    semanticDescription: input.semanticDescription.trim().slice(0, 1000),
+    recognitionStatus: "recognized",
+    recognitionConfidence: 1,
+    recognizedAt: new Date().toISOString(),
+    assetState: "placeholder",
+    sourceChoice: "unselected",
+    blueprintKey,
+    generationPrompt: input.generationPrompt?.trim().slice(0, 1800),
+    referenceText: input.referenceText?.trim().slice(0, 500),
+    voiceSource: input.category === "audio" ? "user-uploaded" : undefined,
+    voiceConsent: input.category === "audio" ? "pending" : undefined,
+    projectId,
+    episodeId,
+    scope: input.scope || (projectId ? "project" : "global"),
+    usageCount: 0,
+  };
+  const database = await openLibraryDatabase();
+  try {
+    const transaction = database.transaction(ASSET_STORE_NAME, "readwrite");
+    transaction.objectStore(ASSET_STORE_NAME).put(asset, asset.id);
+    await transactionDone(transaction, "资产框架保存失败");
+    return asset;
+  } finally {
+    database.close();
+  }
+}
+
+export async function attachLibraryFileToPlaceholder(id: string, file: File, sourceChoice: "upload" | "ai" = "upload") {
+  if (file.size > MAX_ASSET_BYTES) throw new Error("单个资产不能超过 512MB");
+  const mediaType = assetMediaType(file);
+  const database = await openLibraryDatabase();
+  try {
+    const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
+      const request = database.transaction(ASSET_STORE_NAME, "readonly").objectStore(ASSET_STORE_NAME).get(id);
+      request.onsuccess = () => resolve(request.result as LibraryAsset | undefined);
+      request.onerror = () => reject(request.error || new Error("读取资产框架失败"));
+    });
+    if (!current) throw new Error("资产框架不存在或已删除");
+    const expectedMediaType: LibraryMediaType = current.category === "audio" ? "audio" : "image";
+    if (mediaType !== expectedMediaType) throw new Error(current.category === "audio" ? "音色框架只能绑定音频文件" : "人物、场景或道具框架只能绑定图片");
+    const mediaId = uid("media");
+    const next: LibraryAsset = {
+      ...current,
+      mediaId,
+      mediaType,
+      size: file.size,
+      duration: 5,
+      reusable: true,
+      locked: true,
+      assetState: sourceChoice === "ai" ? "review" : "ready",
+      sourceChoice,
+      recognitionStatus: sourceChoice === "ai" ? "recognized" : "confirmed",
+      recognitionConfidence: sourceChoice === "ai" ? 0.98 : 1,
+      voiceSource: current.category === "audio" ? (sourceChoice === "ai" ? "generated-dialogue" : "user-uploaded") : current.voiceSource,
+      voiceConsent: current.category === "audio" ? "pending" : current.voiceConsent,
+      tags: [...new Set([...current.tags, sourceChoice === "ai" ? "AI生成" : "用户上传"])].slice(0, 24),
+    };
+    const transaction = database.transaction([MEDIA_STORE_NAME, ASSET_STORE_NAME], "readwrite");
+    transaction.objectStore(MEDIA_STORE_NAME).put(file, mediaId);
+    transaction.objectStore(ASSET_STORE_NAME).put(next, id);
+    await transactionDone(transaction, "资产图片绑定失败");
+    return { ...next, url: URL.createObjectURL(file) };
   } finally {
     database.close();
   }
@@ -204,7 +360,8 @@ export async function loadLibraryAsset(id: string) {
       request.onsuccess = () => resolve(request.result as Blob | undefined);
       request.onerror = () => reject(request.error || new Error("读取资产文件失败"));
     });
-    return blob ? { ...normalizedAssetMetadata(asset), url: URL.createObjectURL(blob) } : null;
+    if (blob) return { ...normalizedAssetMetadata(asset), url: URL.createObjectURL(blob) };
+    return asset.assetState === "placeholder" || asset.mediaId.startsWith("placeholder:") ? normalizedAssetMetadata(asset) : null;
   } finally {
     database.close();
   }
@@ -220,7 +377,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "referenceText" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -250,6 +407,13 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...(typeof patch.parentAssetId === "string" ? { parentAssetId: patch.parentAssetId.trim() || undefined } : {}),
       ...(typeof patch.arkAssetId === "string" ? { arkAssetId: patch.arkAssetId.trim().replace(/^asset:\/\//i, "").slice(0, 180) || undefined } : {}),
       ...(patch.portraitAuthorizationStatus ? { portraitAuthorizationStatus: patch.portraitAuthorizationStatus } : {}),
+      ...(typeof patch.referenceText === "string" ? { referenceText: patch.referenceText.trim().slice(0, 500) || undefined } : {}),
+      ...(patch.voiceSource ? { voiceSource: patch.voiceSource } : {}),
+      ...(patch.voiceConsent ? { voiceConsent: patch.voiceConsent } : {}),
+      ...(patch.assetState ? { assetState: patch.assetState } : {}),
+      ...(patch.sourceChoice ? { sourceChoice: patch.sourceChoice } : {}),
+      ...(typeof patch.blueprintKey === "string" ? { blueprintKey: patch.blueprintKey.trim().slice(0, 240) || undefined } : {}),
+      ...(typeof patch.generationPrompt === "string" ? { generationPrompt: patch.generationPrompt.trim().slice(0, 1800) || undefined } : {}),
       ...(typeof patch.projectId === "string" ? { projectId: patch.projectId.trim() || undefined } : {}),
       ...(typeof patch.episodeId === "string" ? { episodeId: patch.episodeId.trim() || undefined } : {}),
       ...(patch.scope ? { scope: patch.scope } : {}),

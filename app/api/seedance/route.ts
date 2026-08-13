@@ -70,14 +70,16 @@ export async function POST(request: Request) {
       const resolution = ["480p", "720p", "1080p"].includes(String(body.resolution)) ? String(body.resolution) : "720p";
       const rawVoiceover = body.voiceover && typeof body.voiceover === "object" ? body.voiceover as Record<string, unknown> : {};
       const voiceEnabled = rawVoiceover.enabled === true;
+      const audioEnabled = rawVoiceover.audioEnabled !== false;
+      const backgroundMusic = rawVoiceover.backgroundMusic === true;
       const voiceInstruction = voiceEnabled
         ? `\n生成原生音轨；配音语言：${String(rawVoiceover.language || "普通话").slice(0, 30)}；人声风格：${String(rawVoiceover.style || "自然对白").slice(0, 60)}；${rawVoiceover.script ? `准确台词：${String(rawVoiceover.script).slice(0, 500)}` : "根据画面生成一句简短自然的对白或旁白"}；人物口型与声音同步。`
-        : "\n输出静音视频，不生成对白、旁白、音乐或环境音。";
-      const text = `${prompt}${voiceInstruction}${negativePrompt ? `\n避免：${negativePrompt}` : ""}`;
+        : audioEnabled ? `\n不生成人物对白或旁白；保留动作音效和环境声。${backgroundMusic ? "生成符合剧情节奏的无歌词背景音乐。" : "不要生成背景音乐。"}` : "\n输出静音视频，不生成对白、旁白、音乐或环境音。";
+      let text = `${prompt}${voiceInstruction}${negativePrompt ? `\n避免：${negativePrompt}` : ""}`;
       const content: Array<Record<string, unknown>> = [{ type: "text", text }];
       const rawReferences = Array.isArray(body.references) ? body.references as OmniReference[] : [];
       const counts = { image: 0, video: 0, audio: 0 };
-      const accepted: Array<{ kind: string; role: string; name: string }> = [];
+      const accepted: Array<{ kind: string; role: string; token?: string; name: string }> = [];
       const referenceUrl = (value: unknown) => {
         const raw = String(value || "").trim();
         return /^(?:https:\/\/|data:(?:image|video|audio)\/|asset:\/\/)/i.test(raw) ? raw : "";
@@ -87,14 +89,14 @@ export async function POST(request: Request) {
           const kind = ["image", "video", "audio"].includes(String(reference.kind)) ? String(reference.kind) as "image" | "video" | "audio" : "image";
           const limit = kind === "image" ? 9 : 3;
           const url = referenceUrl(reference.url);
-          if (!url || counts[kind] >= limit) continue;
+          if (!url || accepted.length >= 12 || counts[kind] >= limit) continue;
           counts[kind] += 1;
-          const requestedRole = String(reference.role || "");
-          const role = kind === "image"
-            ? requestedRole === "first_frame" ? "first_frame" : requestedRole === "last_frame" ? "last_frame" : "reference_image"
-            : kind === "video" ? "reference_video" : "reference_audio";
+          // Seedance 2.0 first/last-frame control is mutually exclusive with
+          // omni-reference media. Manjing uses omni-reference mode exclusively:
+          // continuity frames are ordinary @Image references too.
+          const role = kind === "image" ? "reference_image" : kind === "video" ? "reference_video" : "reference_audio";
           content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
-          accepted.push({ kind, role, name: String(reference.name || `${kind}-${counts[kind]}`).slice(0, 120) });
+          accepted.push({ kind, role, token: `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`, name: String(reference.name || `${kind}-${counts[kind]}`).slice(0, 120) });
         }
       } else {
         const imageUrl = referenceUrl(body.imageUrl) || referenceUrl(rawReferences.find((item) => item.kind === "image")?.url);
@@ -103,10 +105,18 @@ export async function POST(request: Request) {
           accepted.push({ kind: "image", role: "first_frame", name: "首帧" });
         }
       }
+      if (accepted.length) {
+        const bindings = accepted.map((reference) => {
+          const purpose = reference.role === "first_frame" ? "严格作为本镜起始画面并继承人物、道具、构图和空间状态" : reference.role === "reference_video" ? "参考动作、镜头速度和上一镜时间连续性，不复制原剧情" : reference.role === "reference_audio" ? "锁定对应人物音色、年龄感、语速和口音" : "锁定对应人物身份与造型、场景、道具或全片风格";
+          return `${reference.token || "@Image1"} = ${reference.name}；用途：${purpose}`;
+        }).join("\n");
+        text += `\n\n多模态资产绑定清单（必须逐项使用）：\n${bindings}\n引用优先级：上一镜尾帧/首帧连续状态 > Canonical 人物身份与服装 > 场景和关键道具 > 全片风格 > 动作参考。不得重新设计已绑定资产。`;
+        content[0] = { type: "text", text };
+      }
       const requestId = String(body.requestId || "").trim();
       const cached = requestId && /^[a-z0-9-]{8,80}$/i.test(requestId) ? createCache.get(requestId) : undefined;
       if (cached && cached.expiresAt > Date.now()) return json(cached.payload, 202);
-      const upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: true, generate_audio: voiceEnabled }) }, "create");
+      const upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: true, generate_audio: audioEnabled }) }, "create");
       const payload = await upstream.json().catch(() => ({ message: `Seedance 方舟接口返回了无法解析的内容（${upstream.status}）` })) as { id?: string; error?: { message?: unknown }; message?: unknown };
       if (!upstream.ok || !payload.id) return json({ error: safeError(payload) }, upstream.status || 502);
       const result = { id: payload.id, status: "queued", acceptedReferences: accepted, ignoredReferences: Math.max(0, rawReferences.length - accepted.length) };

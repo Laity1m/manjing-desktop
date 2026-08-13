@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { href: "/canvas", label: "画布", id: "canvas" },
   { href: "/editor", label: "编辑器", id: "editor" },
   { href: "/assets", label: "资产库", id: "assets" },
+  { href: "/voices", label: "音色库", id: "voices" },
   { href: "/models", label: "模型中心", id: "models" },
   { href: "/projects", label: "项目", id: "projects" },
 ];

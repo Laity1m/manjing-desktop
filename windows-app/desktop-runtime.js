@@ -856,12 +856,11 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         const kind = ["image", "video", "audio"].includes(String(reference?.kind)) ? String(reference.kind) : "image";
         const limit = kind === "image" ? 9 : 3;
         const url = seedanceReferenceUrl(reference?.url);
-        if (!url || counts[kind] >= limit) continue;
+        if (!url || acceptedReferences.length >= 12 || counts[kind] >= limit) continue;
         counts[kind] += 1;
-        const requestedRole = String(reference?.role || "");
-        const role = kind === "image"
-          ? requestedRole === "first_frame" ? "first_frame" : requestedRole === "last_frame" ? "last_frame" : "reference_image"
-          : kind === "video" ? "reference_video" : "reference_audio";
+        // Seedance 2.0 cannot mix first/last-frame control with omni reference
+        // media. The desktop runtime therefore submits every image as @Image.
+        const role = kind === "image" ? "reference_image" : kind === "video" ? "reference_video" : "reference_audio";
         const token = `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`;
         content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
         acceptedReferences.push({ kind, role, token, name: String(reference?.name || `${kind}-${counts[kind]}`).slice(0, 120) });

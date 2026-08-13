@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import io
 import json
@@ -20,7 +21,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 import httpx
 from websockets.asyncio.client import connect as websocket_connect
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -445,11 +446,32 @@ async def audio(request: Request, authorization: str | None = Header(default=Non
         raise HTTPException(status_code=400, detail="配音文本不能为空")
     form = {"tts_text": text, "spk_id": COSYVOICE_SPK_ID}
     endpoint = "/inference_sft"
-    if COSYVOICE_MODE == "instruct":
-        endpoint = "/inference_instruct"
-        form["instruct_text"] = str(payload.get("emotion") or payload.get("model") or "自然、清晰地说")
+    references = payload.get("references") if isinstance(payload.get("references"), list) else []
+    audio_reference = next((item for item in references if isinstance(item, dict) and item.get("role") == "reference_audio" and item.get("url")), None)
+    prompt_text = str(payload.get("referenceText") or (audio_reference or {}).get("referenceText") or "").strip()
+    files: dict[str, tuple[str, bytes, str]] | None = None
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, read=600.0)) as client:
-        response = await client.post(f"{COSYVOICE_URL}{endpoint}", data=form)
+        if audio_reference and prompt_text:
+            reference_url = str(audio_reference.get("url") or "")
+            reference_type = "audio/mpeg"
+            reference_bytes = b""
+            if reference_url.startswith("data:audio/") and "," in reference_url:
+                header, encoded = reference_url.split(",", 1)
+                reference_type = header[5:].split(";", 1)[0] or reference_type
+                reference_bytes = base64.b64decode(encoded)
+            elif reference_url.startswith(("http://", "https://")):
+                downloaded = await client.get(reference_url, follow_redirects=True)
+                downloaded.raise_for_status()
+                reference_type = downloaded.headers.get("content-type", reference_type).split(";", 1)[0]
+                reference_bytes = downloaded.content
+            if reference_bytes:
+                endpoint = "/inference_zero_shot"
+                form = {"tts_text": text, "prompt_text": prompt_text}
+                files = {"prompt_wav": (f"reference{mimetypes.guess_extension(reference_type) or '.mp3'}", reference_bytes, reference_type)}
+        if endpoint != "/inference_zero_shot" and COSYVOICE_MODE == "instruct":
+            endpoint = "/inference_instruct"
+            form["instruct_text"] = str(payload.get("emotion") or payload.get("model") or "自然、清晰地说")
+        response = await client.post(f"{COSYVOICE_URL}{endpoint}", data=form, files=files)
         response.raise_for_status()
     wav_bytes = io.BytesIO()
     with wave.open(wav_bytes, "wb") as wav:
@@ -458,8 +480,53 @@ async def audio(request: Request, authorization: str | None = Header(default=Non
         wav.setframerate(COSYVOICE_SAMPLE_RATE)
         wav.writeframes(response.content)
     filename = f"voice-{secrets.token_hex(10)}.wav"
-    (OUTPUT_DIR / filename).write_bytes(wav_bytes.getvalue())
+    output_bytes = wav_bytes.getvalue()
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        with tempfile.TemporaryDirectory(prefix="manjing-voice-") as folder:
+            source_path = Path(folder) / "voice.wav"
+            mp3_path = Path(folder) / "voice.mp3"
+            source_path.write_bytes(output_bytes)
+            converted = subprocess.run([ffmpeg, "-y", "-i", str(source_path), "-vn", "-ac", "1", "-ar", "44100", "-b:a", "128k", str(mp3_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if converted.returncode == 0 and mp3_path.exists():
+                filename = f"voice-{secrets.token_hex(10)}.mp3"
+                output_bytes = mp3_path.read_bytes()
+    (OUTPUT_DIR / filename).write_bytes(output_bytes)
     return {"url": public_url(request, filename), "kind": "audio", "provider": "CosyVoice"}
+
+
+@app.post("/v1/voice-profiles/extract")
+async def extract_voice_profile(
+    request: Request,
+    video: UploadFile = File(...),
+    speaker: str = Form(default="人物"),
+    start: float = Form(default=0),
+    duration: float = Form(default=12),
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """从用户指定的单人物对白镜头中抽取干净的 MP3 参考；多人混音应先做说话人分离。"""
+    authorize(authorization)
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=503, detail="提取 MP3 音色需要先安装 FFmpeg")
+    content = await video.read()
+    if not content or len(content) > 512 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="视频为空或超过 512MB")
+    safe_start = max(0.0, min(3600.0, float(start)))
+    safe_duration = max(2.0, min(30.0, float(duration)))
+    with tempfile.TemporaryDirectory(prefix="manjing-voice-extract-") as folder:
+        source_path = Path(folder) / (video.filename or "scene.mp4")
+        output_path = Path(folder) / "voice.mp3"
+        source_path.write_bytes(content)
+        result = subprocess.run([
+            ffmpeg, "-y", "-ss", str(safe_start), "-t", str(safe_duration), "-i", str(source_path),
+            "-vn", "-ac", "1", "-ar", "44100", "-af", "highpass=f=80,lowpass=f=12000,afftdn=nf=-25,loudnorm=I=-18:TP=-2:LRA=7", "-b:a", "128k", str(output_path),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1024:
+            raise HTTPException(status_code=502, detail="视频中没有可提取的有效人物声音")
+        filename = f"voice-profile-{secrets.token_hex(10)}.mp3"
+        (OUTPUT_DIR / filename).write_bytes(output_path.read_bytes())
+    return {"url": public_url(request, filename), "kind": "audio", "provider": "FFmpeg", "speaker": speaker[:80]}
 
 
 @app.post("/v1/vibevoice/audio")

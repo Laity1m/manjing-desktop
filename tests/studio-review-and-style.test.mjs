@@ -1,0 +1,58 @@
+import assert from "node:assert/strict";
+import { access, readFile } from "node:fs/promises";
+import test from "node:test";
+
+const sourcePath = new URL("../app/studio-client.tsx", import.meta.url);
+const source = await readFile(sourcePath, "utf8");
+
+test("Western 3D anime preset is CGI animation rather than a graphic-novel preset", async () => {
+  assert.match(source, /name: "欧美3D动漫"/);
+  assert.match(source, /preview: "\/styles\/western-3d-anime\.webp"/);
+  assert.match(source, /toon and PBR hybrid materials/);
+  assert.doesNotMatch(source, /name: "欧美3D图像小说"/);
+  await access(new URL("../public/styles/western-3d-anime.webp", import.meta.url));
+});
+
+test("generated assets enter a non-blocking incremental review queue", () => {
+  assert.doesNotMatch(source, /window\.confirm\(/);
+  assert.match(source, /逐项审核队列/);
+  assert.match(source, /videoReviewDecision: "pending"/);
+  assert.match(source, /audioReviewDecision: "pending"/);
+  assert.match(source, /还有 \$\{pendingReviewCount\} 项素材等待逐项审核/);
+});
+
+test("imported scripts create editable asset skeletons before any image generation", () => {
+  assert.match(source, /剧本资产框架/);
+  assert.match(source, /AI 先区分简介、背景故事、实际人物、对白和重要道具/);
+  assert.match(source, /await analyzeScriptAssetBlueprint\(content\.slice\(0, 50000\), file\.name\)/);
+  assert.match(source, /上传已有图片/);
+  assert.match(source, /让 AI 生成/);
+  assert.match(source, /一键生成全部缺失图片/);
+  assert.match(source, /asset-image-lightbox/);
+  assert.match(source, /manjing-script-memory-v1/);
+  assert.match(source, /persistScriptAssetBlueprint/);
+  assert.match(source, /saveLibraryPlaceholder/);
+  assert.match(source, /资产准备尚未完成：\$\{unresolvedCharacters\.length\} 个人物、\$\{unresolvedProps\.length\} 个道具仍需上传图片，或让 AI 生成后采用/);
+});
+
+test("splits episode character looks and binds exactly one look to each shot", () => {
+  assert.match(source, /identityName\?: string/);
+  assert.match(source, /lookName\?: string/);
+  assert.match(source, /characterLooks\?: Record<string, string>/);
+  assert.match(source, /function charactersForScene/);
+  assert.match(source, /人物身份与人物造型必须分层/);
+  assert.match(source, /每镜必须用 characterLooks 显式指定/);
+  assert.match(source, /人物造型资产 · \{character\.episodeScope/);
+  assert.match(source, /Canonical 人物造型：\$\{characterAssetNaming\(character\)\.displayName\}/);
+});
+
+test("creates user-selectable canonical scene images for omni-reference-only video", () => {
+  assert.match(source, /type SceneAsset =/);
+  assert.match(source, /Canonical 空场景/);
+  assert.match(source, /uploadSceneBlueprint/);
+  assert.match(source, /generateSceneBlueprint/);
+  assert.match(source, /approveSceneBlueprint/);
+  assert.match(source, /category: "scene"/);
+  assert.match(source, /Canonical 空场景：\$\{canonicalSceneAsset\.name\}/);
+  assert.match(source, /不用首尾帧时仍用场景 @Image 全能参考/);
+});

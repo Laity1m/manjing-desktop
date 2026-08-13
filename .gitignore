@@ -53,3 +53,5 @@ next-env.d.ts
 .vendor-review/
 **/__pycache__/
 *.pyc
+/windows-app/release-openai-fix/
+/upload-result.json

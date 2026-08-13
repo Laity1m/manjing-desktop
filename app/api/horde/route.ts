@@ -52,7 +52,36 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Record<string, unknown>;
     const action = body.action;
-    const story = String(body.story || "").trim().slice(0, 1200);
+    const story = String(body.story || "").trim().slice(0, action === "assets" ? 12000 : 1200);
+
+    if (action === "assets") {
+      if (story.length < 8) return json({ error: "剧本至少需要 8 个字" }, 400);
+      const prompt = [
+        "You are a film production script-breakdown assistant.",
+        "Analyze the screenplay without rewriting it. Extract every visually present named character and every important prop that drives the plot, changes state, is held/worn, or recurs across shots.",
+        "Exclude narrators, voice-over-only speakers, generic crowds, ordinary furniture, and incidental decoration unless the script gives them visual story importance.",
+        "Do not generate images. Return ONLY one minified JSON object, no markdown.",
+        'Use compact schema: {"c":[{"n":"name","r":"role","a":"fixed visible age, face, hair, clothing and state","why":"asset reason"}],"p":[{"n":"name","d":"fixed shape, material, color, scale and state","level":"hero|recurring|story","why":"asset reason"}]}',
+        `Screenplay:\n${story}`,
+      ].join("\n");
+      const requestedModel = String(body.model || "").trim().slice(0, 160);
+      const selectedModel = requestedModel && !/自动调度|Stable Horde/i.test(requestedModel) ? requestedModel : await chooseChineseTextModel("writer");
+      const upstream = await fetch(`${HORDE_API}/generate/text/async`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: "0000000000", "Client-Agent": CLIENT_AGENT },
+        body: JSON.stringify({
+          prompt,
+          params: { n: 1, max_context_length: 16384, max_length: 500, temperature: 0.25, top_p: 0.9, rep_pen: 1.08 },
+          ...(selectedModel ? { models: [selectedModel] } : {}),
+          trusted_workers: false,
+          validated_backends: true,
+          slow_workers: true,
+        }),
+      });
+      const data = await upstream.json();
+      if (!upstream.ok || !data?.id) return json({ error: safeMessage(data) }, upstream.status || 502);
+      return json({ id: data.id, kind: "text" }, 202);
+    }
 
     if (action === "story") {
       if (story.length < 8) return json({ error: "故事至少需要 8 个字" }, 400);
