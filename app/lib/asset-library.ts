@@ -1,4 +1,5 @@
 import { characterAssetDisplayName } from "./character-asset-naming";
+import { findReusableLibraryAsset } from "./asset-reuse";
 
 export type LibraryAssetCategory = "character" | "scene" | "prop" | "video" | "audio" | "other";
 export type LibraryMediaType = "image" | "video" | "audio";
@@ -225,7 +226,16 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
   const projectId = input.projectId?.trim() || activeContext.projectId?.trim() || undefined;
   const episodeId = input.episodeId?.trim() || activeContext.episodeId?.trim() || undefined;
   const blueprintKey = (input.blueprintKey?.trim() || `${input.category}:${identityKey}:${input.lookName || "基础版"}`).toLocaleLowerCase("zh-CN").slice(0, 240);
-  const existing = (await listLibraryAssets({ allProjects: true })).find((asset) => asset.blueprintKey === blueprintKey && (asset.projectId || "") === (projectId || ""));
+  const library = await listLibraryAssets({ allProjects: true });
+  const existing = library.find((asset) => asset.blueprintKey === blueprintKey && (asset.projectId || "") === (projectId || ""));
+  const reusableExisting = existing || findReusableLibraryAsset(library, {
+    category: input.category,
+    identityKey,
+    lookName: input.lookName,
+    projectId,
+    mediaType: input.category === "audio" ? "audio" : "image",
+    allowCrossProject: true,
+  });
   const mediaType: LibraryMediaType = input.category === "audio" ? "audio" : "image";
   const tags = [...new Set([...(input.tags || []), input.category === "audio" ? "剧本音色框架" : "剧本资产框架", `entity:${identityKey}`, ...defaultAssetPurposes(input.category, mediaType).map((purpose) => `purpose:${purpose}`)])].slice(0, 24);
   if (existing) {
@@ -244,6 +254,7 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
       scope: input.scope || (projectId ? "project" : "global"),
     });
   }
+  if (reusableExisting) return reusableExisting;
   const id = uid("asset");
   const asset: LibraryAsset = {
     id,

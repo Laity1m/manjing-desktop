@@ -16,6 +16,7 @@ import { loadEditorProjectById, persistEditorProject, type EditorProjectClip } f
 import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/custom-models";
 import { createCanvasFromStudio } from "./lib/production-canvas";
 import { attachLibraryFileToPlaceholder, deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, saveLibraryPlaceholder, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
+import { findReusableLibraryAsset, normalizeAssetIdentity, normalizeAssetLook } from "./lib/asset-reuse";
 import { consistencyGateWarnings, videoConsistencyAccepted, videoPreflightAccepted } from "./lib/consistency-gate";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
 import { fallbackScriptAssetManifest, parseScriptAssetManifest } from "./lib/script-asset-manifest";
@@ -203,11 +204,40 @@ function characterLook(character: CharacterAsset) {
 }
 
 function normalizedCharacterLook(value: string) {
-  return value.trim().toLocaleLowerCase("zh-CN").replace(/(?:造型|状态|服装)[:：]?/gu, "").replace(/(?:版本|版|\s+look|\s+version)$/iu, "").replace(/[\s_\-—]+/g, "");
+  return normalizeAssetLook(value);
 }
 
 function characterAssetKey(character: CharacterAsset) {
-  return `${characterIdentity(character).toLocaleLowerCase("zh-CN")}::${normalizedCharacterLook(characterLook(character))}`;
+  return `${normalizeAssetIdentity(characterIdentity(character))}::${normalizedCharacterLook(characterLook(character))}`;
+}
+
+function deduplicateCharacterAssets(items: CharacterAsset[]) {
+  const unique = new Map<string, CharacterAsset>();
+  for (const item of items) {
+    const key = characterAssetKey(item);
+    const existing = unique.get(key);
+    if (!existing) {
+      unique.set(key, item);
+      continue;
+    }
+    const preferred = existing.imageUrl ? existing : item.imageUrl ? item : existing;
+    const secondary = preferred === existing ? item : existing;
+    unique.set(key, {
+      ...secondary,
+      ...preferred,
+      id: preferred.id || secondary.id,
+      libraryAssetId: preferred.libraryAssetId || secondary.libraryAssetId,
+      imageUrl: preferred.imageUrl || secondary.imageUrl,
+      remoteUrl: preferred.remoteUrl || secondary.remoteUrl,
+      arkAssetId: preferred.arkAssetId || secondary.arkAssetId,
+      portraitAuthorizationStatus: preferred.portraitAuthorizationStatus || secondary.portraitAuthorizationStatus,
+      sceneHints: [...new Set([...(existing.sceneHints || []), ...(item.sceneHints || [])])].slice(0, 20),
+      needsVoice: existing.needsVoice !== false || item.needsVoice !== false,
+      firstDialogue: existing.firstDialogue || item.firstDialogue,
+      status: preferred.imageUrl || secondary.imageUrl ? "ready" : preferred.status,
+    });
+  }
+  return [...unique.values()];
 }
 
 function charactersForScene(allCharacters: CharacterAsset[], scene: Scene) {
@@ -805,7 +835,7 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, 
   const normalizedDurations = normalizeSceneDurations(picked, targetSeconds);
   const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
   const rawCharacters = characterSource.slice(0, 16) as Array<Record<string, unknown>>;
-  const characters: CharacterAsset[] = rawCharacters.map((item, index) => ({
+  const characters: CharacterAsset[] = deduplicateCharacterAssets(rawCharacters.map((item, index) => ({
     id: uid(),
     name: String(item.identityName || item.identity || item.name || item.n || `角色 ${index + 1}`).slice(0, 24),
     identityName: String(item.identityName || item.identity || item.name || item.n || `角色 ${index + 1}`).slice(0, 24),
@@ -816,7 +846,7 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, 
     appearance: String(item.appearance || item.a || "具有鲜明辨识度的年轻角色，固定发型、五官与服装").slice(0, 260),
     voice: ["nova", "coral", "onyx", "echo"].includes(String(item.voice || item.v)) ? String(item.voice || item.v) : VOICES[index % VOICES.length].value,
     status: "queued" as const,
-  }));
+  })));
   if (!characters.length) characters.push({ id: uid(), name: "主角", role: "故事主角", appearance: "与剧情匹配、具有鲜明辨识度的年轻角色，固定五官、发型和服装", voice: "nova", status: "queued" });
   return {
     title: String(parsed.title || parsed.t || "未命名漫剧").slice(0, 32),
@@ -1183,6 +1213,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     } catch { return editorProjectIdRef.current; }
   }
 
+  async function loadReusableBlueprintAsset(category: "character" | "scene" | "prop", identityKey: string, lookName?: string) {
+    const projectId = activeAssetProjectId();
+    const library = await listLibraryAssets({ allProjects: true });
+    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: true });
+    if (!match) return null;
+    const [loaded] = await loadLibraryAssets([match.id]);
+    if (!loaded?.url) return null;
+    await markLibraryAssetUsed(match.id);
+    return loaded;
+  }
+
   function persistScriptMemory(memory: Omit<ScriptNarrativeMemory, "updatedAt">) {
     const next = { ...memory, updatedAt: new Date().toISOString() };
     setScriptMemory(next);
@@ -1501,34 +1542,39 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const reuseKey = `${characters.map((item) => `${item.id}:${item.name}:${Boolean(item.imageUrl)}`).join("|")}::${scenes.map((item) => `${item.id}:${item.title}:${item.environmentKey || ""}:${Boolean(item.imageUrl)}`).join("|")}`;
     if (assetReuseKeyRef.current === reuseKey) return;
     assetReuseKeyRef.current = reuseKey;
-    void listLibraryAssets().then(async (library) => {
+    void listLibraryAssets({ allProjects: true }).then(async (library) => {
       const reusable = library.filter((asset) => asset.reusable !== false && asset.mediaType === "image").sort((a, b) => Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || (b.usageCount || 0) - (a.usageCount || 0));
+      const projectId = activeAssetProjectId();
       const selectedIds = new Set<string>();
       const characterMatches = new Map<string, LibraryAsset>();
       const sceneMatches = new Map<string, LibraryAsset>();
       for (const character of characters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl)) {
-        const name = character.name.trim().toLocaleLowerCase("zh-CN");
         const naming = characterAssetNaming(character);
-        const exactTag = `asset:character:${stableReuseToken(`${character.name}|${character.appearance}`)}`;
-        const match = reusable.find((asset) => asset.category === "character" && (asset.tags.includes(exactTag) || (asset.identityKey === naming.identityKey && (asset.lookName || "基础版") === naming.lookName)))
-          || (naming.lookName === "基础版" ? reusable.find((asset) => asset.category === "character" && `${asset.name} ${asset.identityKey || ""}`.toLocaleLowerCase("zh-CN").includes(name)) : undefined);
+        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true });
         if (match) { characterMatches.set(character.id, match); selectedIds.add(match.id); }
       }
       for (const scene of scenes.filter((item) => !item.imageUrl)) {
-        const terms = [scene.environmentKey, scene.title].map((item) => String(item || "").trim().toLocaleLowerCase("zh-CN")).filter((item) => item.length >= 2);
-        const match = reusable.find((asset) => asset.category === "scene" && terms.some((term) => `${asset.name} ${asset.tags.join(" ")}`.toLocaleLowerCase("zh-CN").includes(term)));
+        const match = findReusableLibraryAsset(reusable, { category: "scene", identityKey: scene.environmentKey || scene.title, projectId, mediaType: "image", allowCrossProject: true });
         if (match) { sceneMatches.set(scene.id, match); selectedIds.add(match.id); }
       }
       if (!selectedIds.size) return;
       const loaded = await loadLibraryAssets([...selectedIds]);
       const byId = new Map(loaded.map((asset) => [asset.id, asset]));
-      setCharacters((items) => items.map((item) => { const match = characterMatches.get(item.id); const loadedAsset = match ? byId.get(match.id) : null; return !item.imageUrl && loadedAsset?.url ? { ...item, imageUrl: loadedAsset.url, arkAssetId: loadedAsset.arkAssetId, portraitAuthorizationStatus: loadedAsset.portraitAuthorizationStatus, status: "ready" } : item; }));
+      setCharacters((items) => items.map((item) => { const match = characterMatches.get(item.id); const loadedAsset = match ? byId.get(match.id) : null; return !item.imageUrl && loadedAsset?.url ? { ...item, libraryAssetId: loadedAsset.id, imageUrl: loadedAsset.url, arkAssetId: loadedAsset.arkAssetId, portraitAuthorizationStatus: loadedAsset.portraitAuthorizationStatus, reviewDecision: loadedAsset.assetState === "review" ? "pending" : "approved", status: "ready" } : item; }));
       setScenes((items) => items.map((item) => { const match = sceneMatches.get(item.id); const loadedAsset = match ? byId.get(match.id) : null; return !item.imageUrl && loadedAsset?.url ? { ...item, imageUrl: loadedAsset.url, status: "ready", model: "Agent 资产复用" } : item; }));
       await Promise.all([...selectedIds].map((id) => markLibraryAssetUsed(id)));
       setImportMessage(`Agent 已自动匹配并复用 ${selectedIds.size} 项人物或场景资产，缺少部分才会继续生成`);
       recordActivity("director", `已从资产库自动检索并复用 ${selectedIds.size} 项资产`, "done");
     }).catch((reason) => console.warn("[manjing asset reuse]", reason));
   }, [agentTeamLoaded, characters, scenes]);
+
+  useEffect(() => {
+    if (!characters.length) return;
+    const unique = deduplicateCharacterAssets(characters);
+    if (unique.length === characters.length) return;
+    setCharacters(unique);
+    setImportMessage(`已合并 ${characters.length - unique.length} 张同人物同造型的重复工作台卡片；已有图片优先保留，不再重复生图`);
+  }, [characters]);
 
   useEffect(() => {
     if (!agentTeamLoaded) return;
@@ -3717,6 +3763,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       const storyboardLooks = new Set(cast.map(characterAssetKey));
       cast.push(...characters.filter((item) => !storyboardLooks.has(characterAssetKey(item))).map((item) => ({ ...item })));
+      cast = deduplicateCharacterAssets(cast);
       let work: Scene[] = storyboard.scenes.map((scene, index, all) => ({ ...scene, startState: index === 0 ? (scene.startState || "首镜：按角色、场景和道具 Canonical 资产建立初始状态") : (all[index - 1].endState || scene.startState || "继承上一镜结束状态") }));
       publishCharacters(cast);
       publishScenes(work);
@@ -3726,7 +3773,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       activeRole = "image";
       recordActivity("image", `${agentName("image")}开始生成角色设定与一致性参考`);
       let generatedCharacters = 0;
-      const reusableProductionAssets = (await listLibraryAssets()).filter((asset) => asset.reusable !== false);
+      const reusableProductionAssets = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.reusable !== false);
+      const productionProjectId = activeAssetProjectId();
       for (let index = 0; index < cast.length; index += 1) {
         const character = cast[index];
         if (!isVisualCharacterAsset(character)) {
@@ -3736,9 +3784,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }
         if (!character.imageUrl) {
           const identity = `character:${stableReuseToken(`${character.name}|${character.appearance}`)}`;
-          const name = character.name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
           const naming = characterAssetNaming(character);
-          const existing = reusableProductionAssets.filter((asset) => asset.category === "character" && asset.mediaType === "image" && (asset.tags.includes(`asset:${identity}`) || (asset.identityKey === naming.identityKey && (asset.lookName || "基础版") === naming.lookName) || (naming.lookName === "基础版" && asset.name.toLocaleLowerCase("zh-CN").replace(/\s+/g, "").includes(name)))).sort((a, b) => Number(b.tags.includes(`asset:${identity}`)) - Number(a.tags.includes(`asset:${identity}`)) || Number(Boolean(b.canonical || b.locked)) - Number(Boolean(a.canonical || a.locked)) || b.createdAt.localeCompare(a.createdAt))[0];
+          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: true })
+            || reusableProductionAssets.find((asset) => asset.category === "character" && asset.mediaType === "image" && asset.tags.includes(`asset:${identity}`) && asset.assetState !== "placeholder");
           if (existing) {
             const [loaded] = await loadLibraryAssets([existing.id]);
             if (loaded?.url) {
@@ -4924,7 +4972,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         projectId,
         episodeId,
       });
-      return { ...character, libraryAssetId: saved.id };
+      const [loaded] = saved.assetState !== "placeholder" ? await loadLibraryAssets([saved.id]) : [];
+      return loaded?.url ? { ...character, libraryAssetId: saved.id, imageUrl: loaded.url, remoteUrl: loaded.url.startsWith("https://") ? loaded.url : character.remoteUrl, arkAssetId: loaded.arkAssetId, portraitAuthorizationStatus: loaded.portraitAuthorizationStatus, reviewDecision: loaded.assetState === "review" ? "pending" as const : "approved" as const, sheetVersion: 2 as const, status: "ready" as const } : { ...character, libraryAssetId: saved.id };
     }));
     const savedProps = await Promise.all(propItems.map(async (prop) => {
       const saved = await saveLibraryPlaceholder({
@@ -4938,7 +4987,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         projectId,
         episodeId,
       });
-      return { ...prop, libraryAssetId: saved.id };
+      const [loaded] = saved.assetState !== "placeholder" ? await loadLibraryAssets([saved.id]) : [];
+      return loaded?.url ? { ...prop, libraryAssetId: saved.id, imageUrl: loaded.url, remoteUrl: loaded.url.startsWith("https://") ? loaded.url : prop.remoteUrl, reviewDecision: loaded.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : { ...prop, libraryAssetId: saved.id };
     }));
     const savedScenes = await Promise.all(sceneItems.map(async (sceneAsset) => {
       const saved = await saveLibraryPlaceholder({
@@ -4953,7 +5003,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         projectId,
         episodeId,
       });
-      return { ...sceneAsset, libraryAssetId: saved.id };
+      const [loaded] = saved.assetState !== "placeholder" ? await loadLibraryAssets([saved.id]) : [];
+      return loaded?.url ? { ...sceneAsset, libraryAssetId: saved.id, imageUrl: loaded.url, remoteUrl: loaded.url.startsWith("https://") ? loaded.url : sceneAsset.remoteUrl, reviewDecision: loaded.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : { ...sceneAsset, libraryAssetId: saved.id };
     }));
     const speakingCharacters = [...new Map(characterItems.map((character) => {
       const identity = characterIdentity(character);
@@ -5014,7 +5065,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const previousProps = new Map(propAssets.map((item) => [item.name.toLocaleLowerCase(), item]));
       const previousScenes = new Map(sceneAssets.map((item) => [item.environmentKey.toLocaleLowerCase("zh-CN"), item]));
       const nextCharacters = manifest.characters.map((item) => {
-        const previous = previousCharacters.get(`${item.identityName.toLocaleLowerCase("zh-CN")}::${normalizedCharacterLook(item.lookName)}`);
+        const previous = previousCharacters.get(`${normalizeAssetIdentity(item.identityName)}::${normalizedCharacterLook(item.lookName)}`);
         return { id: previous?.id || uid(), libraryAssetId: previous?.libraryAssetId, name: item.identityName, identityName: item.identityName, lookName: item.lookName, episodeScope: item.episodeScope, sceneHints: item.sceneHints, role: item.role, appearance: item.appearance, voice: previous?.voice || voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, imageUrl: previous?.imageUrl, remoteUrl: previous?.remoteUrl, reviewDecision: previous?.reviewDecision, sheetVersion: previous?.sheetVersion, status: previous?.imageUrl ? "ready" as const : "queued" as const };
       });
       const nextProps = manifest.props.map((item) => {
@@ -5091,6 +5142,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setAssetAction(actionId);
     updateCharacterAsset(character.id, { status: "generating" });
     try {
+      if (!character.imageUrl) {
+        const naming = characterAssetNaming(character);
+        const reused = await loadReusableBlueprintAsset("character", naming.identityKey, naming.lookName);
+        if (reused?.url) {
+          updateCharacterAsset(character.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : character.remoteUrl, arkAssetId: reused.arkAssetId, portraitAuthorizationStatus: reused.portraitAuthorizationStatus, sheetVersion: 2, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
+          recordActivity("image", `生图前二次检索命中“${naming.displayName}”，已复用资产库图片并取消重复生图`, "done");
+          return;
+        }
+      }
       const prompt = characterSheetPrompt(style, character);
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
@@ -5150,6 +5210,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setAssetAction(actionId);
     updatePropAsset(prop.id, { status: "generating" });
     try {
+      if (!prop.imageUrl) {
+        const reused = await loadReusableBlueprintAsset("prop", prop.name);
+        if (reused?.url) {
+          updatePropAsset(prop.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : prop.remoteUrl, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
+          recordActivity("image", `生图前二次检索命中道具“${prop.name}”，已复用资产库图片并取消重复生图`, "done");
+          return;
+        }
+      }
       const prompt = `${frameVisualPrompt(style)}, production prop identity sheet for ${prop.name}, ${prop.description}, exact shape, material, color, scale and story state, front side and three-quarter reference views, neutral background, no person, no redesign, no text`;
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
@@ -5208,6 +5276,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setAssetAction(actionId);
     updateSceneAsset(sceneAsset.id, { status: "generating" });
     try {
+      if (!sceneAsset.imageUrl) {
+        const reused = await loadReusableBlueprintAsset("scene", sceneAsset.environmentKey || sceneAsset.name);
+        if (reused?.url) {
+          updateSceneAsset(sceneAsset.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : sceneAsset.remoteUrl, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
+          recordActivity("image", `生图前二次检索命中场景“${sceneAsset.name}”，已复用资产库图片并取消重复生图`, "done");
+          return;
+        }
+      }
       const prompt = `${frameVisualPrompt(style)}, canonical empty environment reference for ${sceneAsset.name}, environment identity ${sceneAsset.environmentKey}, ${sceneAsset.description}, ${sceneAsset.timeWeather}. Lock the exact architecture, room proportions, doors, windows, pathways, fixed furniture, spatial layout, palette, weather, time of day and light direction. No people, silhouettes, crowds, animals, movable story props, text, labels, storyboard panels or camera collage. One clean cinematic establishing reference image for repeated multimodal @Image use.`;
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
@@ -5253,7 +5329,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     setAssetAction("batch-generate");
     setError("");
-    recordActivity("image", `开始一键生成 ${missingCharacters.length} 套人物造型、${missingScenes.length} 个场景和 ${missingProps.length} 个缺失道具；用户已上传的图片保持不变`);
+    recordActivity("image", `开始补齐 ${missingCharacters.length} 套人物造型、${missingScenes.length} 个场景和 ${missingProps.length} 个道具；每一项都会在调用生图模型前再次检索全资产库，只有确实缺失的才生成`);
     try {
       let completed = 0;
       const total = missingCharacters.length + missingScenes.length + missingProps.length;
@@ -5272,8 +5348,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         await generateSceneBlueprint(sceneAsset, sceneAssets.findIndex((item) => item.id === sceneAsset.id), true);
         completed += 1;
       }
-      setStatusText(`一键生成完成：已补齐 ${completed} 项缺失图片；不满意可在对应卡片直接上传替换`);
-      setImportMessage(`已保留用户上传资产，并一键补齐 ${completed} 项缺失人物/场景/道具图片`);
+      setStatusText(`一键补齐完成：已处理 ${completed} 项；命中已有资产的项目未调用生图模型`);
+      setImportMessage(`已保留并复用资产库已有图片，只为二次检索后仍缺失的人物、场景和道具调用 AI`);
     } finally {
       setAssetAction("");
     }
