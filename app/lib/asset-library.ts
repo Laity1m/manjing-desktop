@@ -228,17 +228,21 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
   const blueprintKey = (input.blueprintKey?.trim() || `${input.category}:${identityKey}:${input.lookName || "基础版"}`).toLocaleLowerCase("zh-CN").slice(0, 240);
   const library = await listLibraryAssets({ allProjects: true });
   const existing = library.find((asset) => asset.blueprintKey === blueprintKey && (asset.projectId || "") === (projectId || ""));
-  const reusableExisting = existing || findReusableLibraryAsset(library, {
+  const reusableExisting = findReusableLibraryAsset(library, {
     category: input.category,
     identityKey,
     lookName: input.lookName,
     projectId,
     mediaType: input.category === "audio" ? "audio" : "image",
     allowCrossProject: true,
+    allowLookFallback: input.category === "character",
   });
   const mediaType: LibraryMediaType = input.category === "audio" ? "audio" : "image";
   const tags = [...new Set([...(input.tags || []), input.category === "audio" ? "剧本音色框架" : "剧本资产框架", `entity:${identityKey}`, ...defaultAssetPurposes(input.category, mediaType).map((purpose) => `purpose:${purpose}`)])].slice(0, 24);
-  if (existing) {
+  // A stale placeholder for this episode must not hide a real reusable asset
+  // from another episode/project. Prefer real media before refreshing a frame.
+  if (reusableExisting) return reusableExisting;
+  if (existing && existing.assetState === "placeholder") {
     return updateLibraryAsset(existing.id, {
       name,
       identityKey,
@@ -254,7 +258,6 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
       scope: input.scope || (projectId ? "project" : "global"),
     });
   }
-  if (reusableExisting) return reusableExisting;
   const id = uid("asset");
   const asset: LibraryAsset = {
     id,

@@ -1218,7 +1218,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function loadReusableBlueprintAsset(category: "character" | "scene" | "prop", identityKey: string, lookName?: string) {
     const projectId = activeAssetProjectId();
     const library = await listLibraryAssets({ allProjects: true });
-    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: true });
+    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: category === "character" });
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
     if (!loaded?.url) return null;
@@ -1236,7 +1236,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     for (const character of characterItems.filter(isVisualCharacterAsset)) {
       if (character.imageUrl) continue;
       const naming = characterAssetNaming(character);
-      const match = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true });
+      const match = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true });
       if (match) characterMatches.set(character.id, match);
     }
     for (const prop of propItems) {
@@ -1598,7 +1598,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const sceneMatches = new Map<string, LibraryAsset>();
       for (const character of characters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl)) {
         const naming = characterAssetNaming(character);
-        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true });
+        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true });
         if (match) { characterMatches.set(character.id, match); selectedIds.add(match.id); }
       }
       for (const scene of scenes.filter((item) => !item.imageUrl)) {
@@ -3833,7 +3833,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (!character.imageUrl) {
           const identity = `character:${stableReuseToken(`${character.name}|${character.appearance}`)}`;
           const naming = characterAssetNaming(character);
-          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: true })
+          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true })
             || reusableProductionAssets.find((asset) => asset.category === "character" && asset.mediaType === "image" && asset.tags.includes(`asset:${identity}`) && asset.assetState !== "placeholder");
           if (existing) {
             const [loaded] = await loadLibraryAssets([existing.id]);
@@ -4425,7 +4425,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setPhase("images");
         let cast = characters.map((character) => ({ ...character }));
         let work = scenes.map((scene) => ({ ...scene }));
-        const missingCharacters = cast.filter((character) => isVisualCharacterAsset(character) && (!character.imageUrl || character.status === "error" || character.sheetVersion !== 2));
+        // Any visible user/library image is already an accepted character asset.
+        // Legacy assets may not carry sheetVersion; metadata age must never trigger
+        // a paid regeneration when the actual image is present.
+        const missingCharacters = cast.filter((character) => isVisualCharacterAsset(character) && !character.imageUrl);
         for (let targetIndex = 0; targetIndex < missingCharacters.length; targetIndex += 1) {
           const character = missingCharacters[targetIndex];
           setStatusText(`生图 AI 正在补跑角色资产 ${targetIndex + 1}/${missingCharacters.length}：${character.name}`);

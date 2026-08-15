@@ -139,7 +139,8 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /右侧依次排列人物正面全身、侧面全身、背面全身三视图/);
   assert.match(page, /imageAspect: "16:9"/);
   assert.match(page, /16:9 横版，纯浅灰色无缝影棚背景/);
-  assert.match(page, /character\.sheetVersion !== 2/);
+  assert.match(page, /missingCharacters = cast\.filter\(\(character\) => isVisualCharacterAsset\(character\) && !character\.imageUrl\)/);
+  assert.doesNotMatch(page, /character\.sheetVersion !== 2/);
   assert.match(page, /sheetVersion: 2 as const/);
   assert.match(page, /人物本身不会产生走路、口型等新动作/);
   assert.match(page, /function drawMovingShot/);
