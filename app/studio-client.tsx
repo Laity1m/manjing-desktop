@@ -19,7 +19,7 @@ import { attachLibraryFileToPlaceholder, deleteLibraryAsset, listLibraryAssets, 
 import { findReusableLibraryAsset, normalizeAssetIdentity, normalizeAssetLook } from "./lib/asset-reuse";
 import { consistencyGateWarnings, videoConsistencyAccepted, videoPreflightAccepted } from "./lib/consistency-gate";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
-import { fallbackScriptAssetManifest, parseScriptAssetManifest } from "./lib/script-asset-manifest";
+import { fallbackScriptAssetManifest, localizedSceneDisplayName, parseScriptAssetManifest } from "./lib/script-asset-manifest";
 
 type GeneratedAssetMetadata = { displayName?: string; identityKey?: string; lookName?: string; entityId?: string; variantName?: string };
 
@@ -1446,7 +1446,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           if (snapshot.aspect === "9:16" || snapshot.aspect === "16:9") setAspect(snapshot.aspect);
           if (Array.isArray(snapshot.characters)) setCharacters(snapshot.characters as CharacterAsset[]);
           if (Array.isArray(snapshot.propAssets)) { setPropAssets(snapshot.propAssets as PropAsset[]); setAssetAnalysisState("ready"); }
-          if (Array.isArray(snapshot.sceneAssets)) { setSceneAssets(snapshot.sceneAssets as SceneAsset[]); setAssetAnalysisState("ready"); }
+          if (Array.isArray(snapshot.sceneAssets)) {
+            const storedScenes = snapshot.sceneAssets as SceneAsset[];
+            const localizedScenes = storedScenes.map((item, index) => ({ ...item, name: localizedSceneDisplayName(item, index) }));
+            setSceneAssets(localizedScenes);
+            setAssetAnalysisState("ready");
+            void Promise.all(localizedScenes.map((item, index) => item.libraryAssetId && item.name !== storedScenes[index].name
+              ? updateLibraryAsset(item.libraryAssetId, { name: item.name })
+              : Promise.resolve())).catch(() => undefined);
+          }
           if (restoredScenes.length) setScenes(restoredScenes);
           if (typeof snapshot.selected === "number") setSelected(Math.max(0, Math.min(restoredScenes.length - 1, snapshot.selected)));
           if (snapshot.phase) setPhase(snapshot.phase as Phase);
@@ -1564,7 +1572,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           await generatePropBlueprint(prop, propAssets.length);
         } else if (asset.category === "scene") {
           const environmentKey = String(asset.entityId || asset.identityKey || asset.name).replace(/^scene:/i, "").trim();
-          const sceneAsset: SceneAsset = { id: uid(), libraryAssetId: asset.id, name: asset.name, environmentKey, description: asset.semanticDescription || "等待补充场景建筑、空间布局、固定陈设和光线", timeWeather: asset.variantName || "按剧本确定", episodeScope: "当前集", sceneHints: [], reason: "剧本场景资产框架", status: "queued" };
+          const description = asset.semanticDescription || "等待补充场景建筑、空间布局、固定陈设和光线";
+          const timeWeather = asset.variantName || "按剧本确定";
+          const sceneAsset: SceneAsset = { id: uid(), libraryAssetId: asset.id, name: localizedSceneDisplayName({ name: asset.name, environmentKey, description, timeWeather }), environmentKey, description, timeWeather, episodeScope: "当前集", sceneHints: [], reason: "剧本场景资产框架", status: "queued" };
           setSceneAssets((items) => items.some((item) => item.libraryAssetId === asset.id) ? items : [...items, sceneAsset]);
           setImportMessage(`已从资产库选择“${asset.name}”，正在调用场景生图 AI；生成后仍需用户采用。`);
           await generateSceneBlueprint(sceneAsset, sceneAssets.length);
@@ -5086,7 +5096,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setStatusText("AI 正在区分简介、背景设定、人物造型、场景、对白与重要道具");
     setImportMessage(`正在分析“${filename}”：此阶段不会生成任何图片或消耗生图额度`);
     recordActivity("writer", "开始分析导入剧本中的人物、服装状态、可复用场景与重要道具");
-    const system = `你是影视制片的剧本拆解师。只分析，不改写剧本，不生成图片。先区分元数据、剧本简介、背景故事/世界观、人物表、场景标题、动作和真正的角色对白。完整提取所有实际需要视觉出镜的具名人物、每个需要稳定复用的拍摄场景，以及推动剧情、被人物持有或穿戴、发生状态变化、跨镜重复出现的重要道具。场景资产不是分镜图：每个不同地点/布景/时代状态建立一张没有人物、没有可移动剧情道具的 Canonical 空场景参考图，用于无首尾帧、无分镜图时仍能通过全能参考锁定建筑、门窗、固定陈设、空间布局、天气、时段、色调和光线方向；同一场景只建一次，可跨镜复用，发生实质改造/灾后/季节变化时才拆成独立 environmentKey。人物身份与人物造型必须分层：同一人物仍使用同一个 identityName，但本集每一种实际出镜的服装、妆发或剧情状态都要分别输出一条人物造型资产，例如男主平时黑衣、本集先穿白衣后受伤，就输出男主/白衣版和男主/白衣战损版；禁止把多个互斥造型揉在一张图里。lookName 必须短而明确，使用“白衣版、黑衣常服版、西装版、颓废版、战损版”等可直接显示和引用的名字；sceneHints 写明使用该造型或场景的标题、镜号或可检索剧情短语。没有明确变化时只输出基础版。系列项目、当前制作、剧本简介、背景故事、项目长期记忆、角色圣经、上一集结束状态等栏目标题绝对不是人物或场景；纯旁白、画外音、无名群演、普通桌椅和无剧情意义装饰也不是人物资产。只有实际说过台词的人物才需要建立音色框架；同一人物无论多少造型只共用一个音色。只返回 JSON：{"synopsis":"剧本简介或根据剧情提炼的简明故事梗概","background":"背景故事、时代地点、世界规则、主要关系与前史；没有明确内容就如实概括","characters":[{"name":"实际人物名（与 identityName 相同）","identityName":"人物固定身份名","lookName":"当前服装/状态造型名","episodeScope":"第几集或当前集","sceneHints":["使用该造型的镜号、场景标题或剧情短语"],"role":"身份/关系","appearance":"该人物不变的身份特征 + 仅当前造型的服装、妆发和状态；没有依据就写待补充，不得擅自编造","reason":"该造型在何处出镜的依据","needsVoice":true或false,"firstDialogue":"该人物第一句真实台词；没说话则为空"}],"scenes":[{"name":"便于用户识别的场景名","environmentKey":"稳定且唯一的场景身份","description":"建筑、空间布局、门窗方向、固定陈设、主色调与光线方向","timeWeather":"时间、季节、天气和环境状态","episodeScope":"第几集或当前集","sceneHints":["使用该场景的镜号或剧情短语"],"reason":"需要建立并复用场景图的原因"}],"props":[{"name":"道具名","description":"剧本明确的形状、材质、颜色、尺寸和状态；没有依据就写待补充","importance":"hero|recurring|story","reason":"需要道具资产的原因"}]}。`;
+    const system = `你是影视制片的剧本拆解师。只分析，不改写剧本，不生成图片。先区分元数据、剧本简介、背景故事/世界观、人物表、场景标题、动作和真正的角色对白。完整提取所有实际需要视觉出镜的具名人物、每个需要稳定复用的拍摄场景，以及推动剧情、被人物持有或穿戴、发生状态变化、跨镜重复出现的重要道具。场景资产不是分镜图：每个不同地点/布景/时代状态建立一张没有人物、没有可移动剧情道具的 Canonical 空场景参考图，用于无首尾帧、无分镜图时仍能通过全能参考锁定建筑、门窗、固定陈设、空间布局、天气、时段、色调和光线方向；同一场景只建一次，可跨镜复用，发生实质改造/灾后/季节变化时才拆成独立 environmentKey。中文剧本中的场景 name 必须使用简短自然的中文，例如“苏梨破院”“户部公廨大厅”，严禁把 EP01_ENV_... 一类英文机器编码填进 name；environmentKey 是内部稳定复用键，可保持已有值，但新建时也优先使用简短中文。人物身份与人物造型必须分层：同一人物仍使用同一个 identityName，但本集每一种实际出镜的服装、妆发或剧情状态都要分别输出一条人物造型资产，例如男主平时黑衣、本集先穿白衣后受伤，就输出男主/白衣版和男主/白衣战损版；禁止把多个互斥造型揉在一张图里。lookName 必须短而明确，使用“白衣版、黑衣常服版、西装版、颓废版、战损版”等可直接显示和引用的名字；sceneHints 写明使用该造型或场景的标题、镜号或可检索剧情短语。没有明确变化时只输出基础版。系列项目、当前制作、剧本简介、背景故事、项目长期记忆、角色圣经、上一集结束状态等栏目标题绝对不是人物或场景；纯旁白、画外音、无名群演、普通桌椅和无剧情意义装饰也不是人物资产。只有实际说过台词的人物才需要建立音色框架；同一人物无论多少造型只共用一个音色。只返回 JSON：{"synopsis":"剧本简介或根据剧情提炼的简明故事梗概","background":"背景故事、时代地点、世界规则、主要关系与前史；没有明确内容就如实概括","characters":[{"name":"实际人物名（与 identityName 相同）","identityName":"人物固定身份名","lookName":"当前服装/状态造型名","episodeScope":"第几集或当前集","sceneHints":["使用该造型的镜号、场景标题或剧情短语"],"role":"身份/关系","appearance":"该人物不变的身份特征 + 仅当前造型的服装、妆发和状态；没有依据就写待补充，不得擅自编造","reason":"该造型在何处出镜的依据","needsVoice":true或false,"firstDialogue":"该人物第一句真实台词；没说话则为空"}],"scenes":[{"name":"便于用户识别的中文场景名（中文剧本严禁使用英文机器编码）","environmentKey":"稳定且唯一的场景身份，新建中文剧本优先使用短中文","description":"建筑、空间布局、门窗方向、固定陈设、主色调与光线方向","timeWeather":"时间、季节、天气和环境状态","episodeScope":"第几集或当前集","sceneHints":["使用该场景的镜号或剧情短语"],"reason":"需要建立并复用场景图的原因"}],"props":[{"name":"道具名","description":"剧本明确的形状、材质、颜色、尺寸和状态；没有依据就写待补充","importance":"hero|recurring|story","reason":"需要道具资产的原因"}]}。`;
     const prompt = `请为以下完整剧本建立资产候选清单。保持原文人物名和语言；同一人物的称谓要合并为同一 identityName，但必须把本集实际出现的不同服装/妆发/受伤或贫富等状态拆成独立 lookName 资产。还要提取所有实际需要的 Canonical 空场景图并建立唯一 environmentKey；即使后续完全不用首尾帧和分镜图，视频模型也必须能只靠人物、场景、道具、音色的全能参考生成。所有人物造型和场景都给出 sceneHints。\n\n${content.slice(0, 30000)}`;
     let usedFallback = false;
     try {
@@ -5679,7 +5689,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setCharacters(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
       const importedProps = Array.isArray(payload.propAssets) ? (payload.propAssets as PropAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : [];
       setPropAssets(importedProps);
-      const importedSceneAssets = Array.isArray(payload.sceneAssets) ? (payload.sceneAssets as SceneAsset[]).slice(0, 30).map((item) => ({ ...item, id: uid() })) : [];
+      const importedSceneAssets = Array.isArray(payload.sceneAssets) ? (payload.sceneAssets as SceneAsset[]).slice(0, 30).map((item, index) => ({ ...item, id: uid(), name: localizedSceneDisplayName(item, index) })) : [];
       setSceneAssets(importedSceneAssets);
       setAssetAnalysisState(importedProps.length || importedSceneAssets.length || (Array.isArray(payload.characters) && payload.characters.length > 0) ? "ready" : "idle");
       setMusicPrompt(String(payload.musicPrompt || ""));
@@ -6064,7 +6074,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               </article>)}
               {sceneAssets.map((sceneAsset, index) => <article key={sceneAsset.id} className={`asset-blueprint-card scene ${sceneAsset.status}`}>
                 <div className="asset-blueprint-preview">{sceneAsset.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: sceneAsset.imageUrl as string, name: sceneAsset.name })} aria-label={`预览${sceneAsset.name}场景大图`}><img src={sceneAsset.imageUrl} alt={sceneAsset.name} /><i>点击预览</i></button> : <span><i>景</i><small>仅框架<br />尚无图片</small></span>}</div>
-                <div className="asset-blueprint-fields"><em>Canonical 空场景 · {sceneAsset.episodeScope || "当前集"}</em><input value={sceneAsset.name} aria-label="场景名称" placeholder="例如：摄政王府书房" onChange={(event) => updateSceneAsset(sceneAsset.id, { name: event.target.value })} /><input value={sceneAsset.environmentKey} aria-label="场景身份键" placeholder="同一场景跨镜保持一致" onChange={(event) => updateSceneAsset(sceneAsset.id, { environmentKey: event.target.value })} /><textarea value={sceneAsset.description} aria-label="场景视觉描述" placeholder="建筑、空间布局、门窗、固定陈设、色调与光线" onChange={(event) => updateSceneAsset(sceneAsset.id, { description: event.target.value })} /><input value={sceneAsset.timeWeather} aria-label="时间天气" placeholder="时间、季节、天气与环境状态" onChange={(event) => updateSceneAsset(sceneAsset.id, { timeWeather: event.target.value })} /><small>{sceneAsset.sceneHints?.length ? `使用镜头：${sceneAsset.sceneHints.join("、")}` : sceneAsset.reason}</small></div>
+                <div className="asset-blueprint-fields"><em>Canonical 空场景 · {sceneAsset.episodeScope || "当前集"}</em><input value={sceneAsset.name} aria-label="场景中文名称" placeholder="例如：摄政王府书房" onChange={(event) => updateSceneAsset(sceneAsset.id, { name: event.target.value })} /><details className="scene-identity-key"><summary>内部复用键（通常无需修改）</summary><input value={sceneAsset.environmentKey} aria-label="场景内部复用键" placeholder="同一场景跨镜保持一致" onChange={(event) => updateSceneAsset(sceneAsset.id, { environmentKey: event.target.value })} /></details><textarea value={sceneAsset.description} aria-label="场景视觉描述" placeholder="建筑、空间布局、门窗、固定陈设、色调与光线" onChange={(event) => updateSceneAsset(sceneAsset.id, { description: event.target.value })} /><input value={sceneAsset.timeWeather} aria-label="时间天气" placeholder="时间、季节、天气与环境状态" onChange={(event) => updateSceneAsset(sceneAsset.id, { timeWeather: event.target.value })} /><small>{sceneAsset.sceneHints?.length ? `使用镜头：${sceneAsset.sceneHints.join("、")}` : sceneAsset.reason}</small></div>
                 <p>{sceneAsset.imageUrl ? sceneAsset.reviewDecision === "pending" ? "AI 场景图待采用" : "已有可用场景资产，将按 environmentKey 引用" : "等待用户上传或让 AI 生成空场景图"}</p>
                 <footer>{sceneAsset.reviewDecision === "pending" && sceneAsset.imageUrl ? <><button onClick={() => void approveSceneBlueprint(sceneAsset)}>采用并入库</button><label className={assetAction ? "disabled" : ""}>上传图片替换<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadSceneBlueprint(sceneAsset, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="danger" onClick={() => rejectSceneBlueprint(sceneAsset)}>删除图片</button></> : <><label className={assetAction ? "disabled" : ""}>上传已有场景图<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadSceneBlueprint(sceneAsset, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => void generateSceneBlueprint(sceneAsset, index)} disabled={Boolean(assetAction)}>{assetAction === `scene-generate:${sceneAsset.id}` ? "生成中…" : sceneAsset.imageUrl ? "让 AI 重做" : "让 AI 生成"}</button></>}<button className="plain-danger" onClick={() => setSceneAssets((items) => items.filter((item) => item.id !== sceneAsset.id))} disabled={Boolean(assetAction)}>删除框架</button></footer>
               </article>)}

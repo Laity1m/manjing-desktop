@@ -42,6 +42,80 @@ function clean(value: unknown, limit = 240) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
+function containsChinese(value: string) {
+  return /[\u3400-\u9fff]/.test(value);
+}
+
+function isMachineSceneName(value: string) {
+  const normalized = clean(value, 120);
+  return !containsChinese(normalized) && (
+    /^(?:EP\d+_)?(?:ENV|SCENE|LOCATION)_[A-Z0-9_]+$/i.test(normalized)
+    || /^[A-Z0-9]+(?:_[A-Z0-9]+){2,}$/.test(normalized)
+  );
+}
+
+function chineseLocationFromDescription(description: string) {
+  const locationNoun = "(?:院落|庭院|天井|大厅|正厅|偏厅|书房|卧房|客厅|房间|屋内|办公室|公廨|走廊|厨房|街道|巷口|城门|宫殿|府邸|王府|宅院|码头|客栈|酒楼|茶馆|山林|树林|河岸|船舱|甲板|广场|寺庙|牢房|营帐|作坊|仓库|店铺|车站|站台|学校|教室|医院|病房)";
+  for (const clause of clean(description, 400).split(/[，,。；;：:]/)) {
+    if (!containsChinese(clause) || !new RegExp(locationNoun).test(clause)) continue;
+    const afterParticle = clause.includes("的") ? clause.slice(clause.lastIndexOf("的") + 1) : clause;
+    const normalized = afterParticle
+      .replace(/^(?:场景|地点|空间|画面|位于|是在|是一个|是一处|为一座|为一处|为一个)/, "")
+      .replace(/(?:之中|内部|内景|外景)$/, "")
+      .trim();
+    const match = normalized.match(new RegExp(`([\\u3400-\\u9fff]{0,12}${locationNoun})`));
+    if (match?.[1]) return match[1].slice(-16);
+  }
+  return "";
+}
+
+function chineseLocationFromMachineKey(environmentKey: string) {
+  const source = clean(environmentKey, 120)
+    .replace(/^EP\d+_/, "")
+    .replace(/^(?:ENV|SCENE|LOCATION)_/, "");
+  const replacements: Array<[RegExp, string]> = [
+    [/MINISTRY_REVENUE/g, "户部"],
+    [/OFFICE_HALL/g, "公廨大厅"],
+    [/DILAPIDATED_COURTYARD/g, "破败庭院"],
+    [/COURTYARD/g, "庭院"],
+    [/SU_LI/g, "苏梨"],
+    [/STUDY_ROOM/g, "书房"],
+    [/BED_ROOM|BEDROOM/g, "卧房"],
+    [/LIVING_ROOM/g, "客厅"],
+    [/OFFICE/g, "办公室"],
+    [/HALL/g, "大厅"],
+    [/STREET/g, "街道"],
+    [/ALLEY/g, "巷口"],
+    [/PALACE/g, "宫殿"],
+    [/MANSION/g, "府邸"],
+    [/FOREST/g, "山林"],
+    [/RIVER_BANK/g, "河岸"],
+    [/DAY/g, "日"],
+    [/NIGHT/g, "夜"],
+    [/RAIN(?:Y)?/g, "雨"],
+    [/SUNNY/g, "晴"],
+  ];
+  let translated = source;
+  for (const [pattern, replacement] of replacements) translated = translated.replace(pattern, replacement);
+  const parts = translated.split(/_+/).filter((part) => containsChinese(part));
+  if (!parts.length) return "";
+  const time = parts.filter((part) => /^(?:日|夜|雨|晴)$/.test(part)).join("");
+  const location = parts.filter((part) => !/^(?:日|夜|雨|晴)$/.test(part)).join("");
+  return location ? `${location}${time ? `·${time}` : ""}` : "";
+}
+
+/** Keep environmentKey stable for reuse, but never expose a machine identifier as the scene title. */
+export function localizedSceneDisplayName(scene: Pick<ScriptSceneCandidate, "name" | "environmentKey" | "description" | "timeWeather">, index = 0) {
+  const current = clean(scene.name, 80);
+  if (current && !isMachineSceneName(current)) return current;
+  const fromDescription = chineseLocationFromDescription(scene.description);
+  if (fromDescription) return fromDescription;
+  const fromKey = chineseLocationFromMachineKey(scene.environmentKey || current);
+  if (fromKey) return fromKey;
+  const timeWeather = clean(scene.timeWeather, 20);
+  return `场景${String(index + 1).padStart(2, "0")}${containsChinese(timeWeather) && !/按剧本|待补充/.test(timeWeather) ? `·${timeWeather}` : ""}`;
+}
+
 function isNarrativeLabel(value: string) {
   return /^(?:系列项目|当前制作|当前剧集|剧本简介|故事简介|剧情简介|内容简介|项目简介|全剧背景故事|背景故事|故事背景|世界观|世界背景|项目长期记忆|本集相关角色圣经|上一集结束状态|本集完整剧本|人物关系与隐藏信息|世界规则与连续性约束|分集时间线|series project|current production|current episode|synopsis|logline|summary|background|backstory|worldbuilding|world bible|project memory|previous episode end state|full script)$/i.test(value.trim()) || /(?:简介|背景故事|长期记忆|结束状态|完整剧本|角色圣经|时间线)$/.test(value.trim());
 }
@@ -139,11 +213,11 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
       reason: clean(value.reason || value.why, 180) || "推动剧情或跨镜头重复出现",
     };
   }).filter((item) => item.name);
-  const scenes = rawScenes.map((item) => {
+  const scenes = rawScenes.map((item, index) => {
     const value = item as Record<string, unknown>;
     const name = clean(value.name || value.environmentKey || value.location || value.n, 80);
     const rawSceneHints = Array.isArray(value.sceneHints) ? value.sceneHints : Array.isArray(value.shots) ? value.shots : [];
-    return {
+    const scene = {
       name,
       environmentKey: clean(value.environmentKey || value.key || name, 80) || name,
       description: clean(value.description || value.environmentBible || value.appearance || value.d, 600) || "等待补充场景空间布局、建筑、固定陈设和光线",
@@ -152,6 +226,7 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
       sceneHints: rawSceneHints.map((hint) => clean(hint, 80)).filter(Boolean).slice(0, 20),
       reason: clean(value.reason || value.why, 180) || "本集分镜需要稳定复用该场景",
     };
+    return { ...scene, name: localizedSceneDisplayName(scene, index) };
   }).filter((item) => item.name && !isNarrativeLabel(item.name));
   const fallback = fallbackScriptAssetManifest(script);
   // A successful language-agent result is authoritative. Local regex extraction

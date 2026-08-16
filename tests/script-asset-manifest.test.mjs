@@ -85,3 +85,22 @@ test("extracts canonical scene skeletons separately from storyboard frames", asy
   assert.equal(manifest.scenes[0].environmentKey, "王府书房-夜");
   assert.match(manifest.scenes[0].description, /东墙长窗/);
 });
+
+test("turns machine scene identifiers into Chinese display names without changing reuse keys", async () => {
+  const { parseScriptAssetManifest } = await loadManifestModule();
+  const firstKey = "EP01_ENV_SU_LI_DILAPIDATED_COURTYARD_NIGHT";
+  const secondKey = "EP01_ENV_MINISTRY_REVENUE_OFFICE_HALL_DAY";
+  const thirdKey = "EP02_ENV_SU_LI_DILAPIDATED_COURTYARD_NIGHT";
+  const manifest = parseScriptAssetManifest(JSON.stringify({
+    scenes: [
+      { name: firstKey, environmentKey: firstKey, description: "大景朝晚春雨夜的破旧小型民居院落，地面湿润。", timeWeather: "雨夜" },
+      { name: secondKey, environmentKey: secondKey, description: "大景朝晚春晴日上午的户部公廨大厅，官吏来往。", timeWeather: "晴日上午" },
+      { name: thirdKey, environmentKey: thirdKey, description: "No localized description", timeWeather: "night" },
+    ],
+  }), "第一集，苏梨夜归院落，次日上午前往户部公廨。\n");
+  assert.equal(manifest.scenes[0].name, "破旧小型民居院落");
+  assert.equal(manifest.scenes[0].environmentKey, firstKey);
+  assert.equal(manifest.scenes[1].name, "户部公廨大厅");
+  assert.equal(manifest.scenes[1].environmentKey, secondKey);
+  assert.equal(manifest.scenes[2].name, "苏梨破败庭院·夜");
+});
