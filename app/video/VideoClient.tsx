@@ -560,7 +560,9 @@ export default function VideoClient() {
       duration,
       resolution: /seedance-2-0-fast/i.test(config.model) && resolution === "1080p" ? "720p" : resolution,
       apiKey: config.apiKey,
-      references: items,
+      referenceMode: "omni",
+      imageUrl: "",
+      references: items.map(({ sourceUrl, ...item }) => ({ ...item, url: sourceUrl })),
       voiceover: {
         enabled: voiceEnabled,
         language: voiceLanguage,

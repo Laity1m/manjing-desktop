@@ -30,3 +30,50 @@ test("desktop Seedance converts continuity frames to omni image references", asy
   assert.equal(mediaRoles.includes("first_frame"), false);
   assert.equal(mediaRoles.includes("last_frame"), false);
 });
+
+test("endpoint IDs stay in explicit omni mode and never become first-frame video", async () => {
+  let createBody = null;
+  const result = await invokeSeedance({
+    action: "create",
+    requestId: "endpoint-omni-reference-test",
+    apiKey: "test-seedance-key",
+    model: "ep-20260817000000-abcde",
+    referenceMode: "omni",
+    imageUrl: "https://media.volces.com/forbidden-first-frame.jpg",
+    prompt: "直接根据人物场景和道具资产生成连续动态镜头",
+    references: [
+      { kind: "image", role: "first_frame", url: "https://media.volces.com/character.jpg", name: "人物资产" },
+      { kind: "image", role: "reference_image", url: "https://media.volces.com/environment.jpg", name: "场景资产" },
+    ],
+  }, async (_url, init) => {
+    createBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ id: "cgt-endpointomni1" }), { status: 200 });
+  });
+
+  assert.equal(result.id, "cgt-endpointomni1");
+  const media = createBody.content.filter((item) => item.type !== "text");
+  assert.deepEqual(media.map((item) => item.role), ["reference_image", "reference_image"]);
+  assert.equal(media.some((item) => item.image_url?.url.includes("forbidden-first-frame")), false);
+  assert.match(createBody.content[0].text, /绝不作为首帧控制/);
+});
+
+test("legacy model requests never silently promote an image to first frame", async () => {
+  let createBody = null;
+  const result = await invokeSeedance({
+    action: "create",
+    requestId: "legacy-no-first-frame-test",
+    apiKey: "test-seedance-key",
+    model: "doubao-seedance-1-5-pro-251215",
+    imageUrl: "https://media.volces.com/forbidden-first-frame.jpg",
+    prompt: "只根据文字直接生成视频，不使用首帧控制",
+    references: [{ kind: "image", url: "https://media.volces.com/also-not-first-frame.jpg", name: "普通参考" }],
+  }, async (_url, init) => {
+    createBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ id: "cgt-legacytextonly1" }), { status: 200 });
+  });
+
+  assert.equal(result.id, "cgt-legacytextonly1");
+  assert.deepEqual(createBody.content.map((item) => item.type), ["text"]);
+  assert.equal(result.acceptedReferences.length, 0);
+  assert.equal(result.ignoredReferences, 1);
+});

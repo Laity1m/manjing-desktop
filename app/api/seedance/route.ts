@@ -65,7 +65,7 @@ export async function POST(request: Request) {
       if (prompt.length < 8) return json({ error: "视频提示词至少需要 8 个字" }, 400);
       if (!MODEL_PATTERN.test(model)) return json({ error: "Seedance 模型 ID 或 Endpoint ID 格式不正确" }, 400);
       const ratio = body.ratio === "16:9" ? "16:9" : "9:16";
-      const isOmniModel = /seedance-2/i.test(model);
+      const isOmniModel = String(body.referenceMode || "").toLowerCase() === "omni" || /seedance-2/i.test(model);
       const duration = isOmniModel ? Math.max(4, Math.min(15, Math.round(Number(body.duration) || 8))) : Number(body.duration) >= 8 ? 10 : 5;
       const resolution = ["480p", "720p", "1080p"].includes(String(body.resolution)) ? String(body.resolution) : "720p";
       const rawVoiceover = body.voiceover && typeof body.voiceover === "object" ? body.voiceover as Record<string, unknown> : {};
@@ -98,19 +98,13 @@ export async function POST(request: Request) {
           content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
           accepted.push({ kind, role, token: `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`, name: String(reference.name || `${kind}-${counts[kind]}`).slice(0, 120) });
         }
-      } else {
-        const imageUrl = referenceUrl(body.imageUrl) || referenceUrl(rawReferences.find((item) => item.kind === "image")?.url);
-        if (imageUrl) {
-          content.push({ type: "image_url", image_url: { url: imageUrl }, role: "first_frame" });
-          accepted.push({ kind: "image", role: "first_frame", name: "首帧" });
-        }
       }
       if (accepted.length) {
         const bindings = accepted.map((reference) => {
-          const purpose = reference.role === "first_frame" ? "严格作为本镜起始画面并继承人物、道具、构图和空间状态" : reference.role === "reference_video" ? "参考动作、镜头速度和上一镜时间连续性，不复制原剧情" : reference.role === "reference_audio" ? "锁定对应人物音色、年龄感、语速和口音" : "锁定对应人物身份与造型、场景、道具或全片风格";
+          const purpose = reference.role === "reference_video" ? "参考动作、镜头速度和上一镜时间连续性，不复制原剧情" : reference.role === "reference_audio" ? "锁定对应人物音色、年龄感、语速和口音" : "锁定对应人物身份与造型、场景、道具或全片风格";
           return `${reference.token || "@Image1"} = ${reference.name}；用途：${purpose}`;
         }).join("\n");
-        text += `\n\n多模态资产绑定清单（必须逐项使用）：\n${bindings}\n引用优先级：上一镜尾帧/首帧连续状态 > Canonical 人物身份与服装 > 场景和关键道具 > 全片风格 > 动作参考。不得重新设计已绑定资产。`;
+        text += `\n\n多模态资产绑定清单（必须逐项使用）：\n${bindings}\n所有图片都只作为 @Image 全能参考，绝不作为首帧控制。引用优先级：Canonical 人物身份与服装 > 场景和关键道具 > 全片风格 > 连续状态与动作参考。不得重新设计已绑定资产。`;
         content[0] = { type: "text", text };
       }
       const requestId = String(body.requestId || "").trim();

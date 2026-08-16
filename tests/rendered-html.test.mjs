@@ -191,7 +191,7 @@ test("connects official LibTV orchestration and Volcengine Seedance jobs", async
   assert.match(libtv, /events/);
   assert.match(seedance, /contents\/generations\/tasks/);
   assert.match(seedance, /return_last_frame: true/);
-  assert.match(seedance, /role: "first_frame"/);
+  assert.match(page, /referenceMode: "omni"/);
   assert.match(seedance, /TRANSIENT_STATUSES/);
   assert.match(seedance, /为避免重复创建和扣费/);
   assert.match(seedance, /resolution, ratio, duration, watermark: false/);
