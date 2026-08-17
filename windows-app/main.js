@@ -7,6 +7,7 @@ const { createDesktopRuntime, invokeImageModel, volcengineSdkStatus } = require(
 
 const APP_SCHEME = "manjing";
 const APP_URL = "manjing://app/";
+const MEDIA_DATABASE_VERSION = 3;
 let companionWindow = null;
 const isSmokeTest = process.argv.includes("--smoke-test");
 const isDirectorModelSmokeTest = process.argv.includes("--smoke-director-model");
@@ -500,7 +501,7 @@ function createWindow() {
         try {
           const seeded = await mainWindow.webContents.executeJavaScript(`(async () => {
             const database = await new Promise((resolve, reject) => {
-              const request = indexedDB.open("manjing-media-v1", 2);
+              const request = indexedDB.open("manjing-media-v1", ${MEDIA_DATABASE_VERSION});
               request.onupgradeneeded = () => {
                 if (!request.result.objectStoreNames.contains("media")) request.result.createObjectStore("media");
                 if (!request.result.objectStoreNames.contains("projects")) request.result.createObjectStore("projects");
@@ -539,6 +540,7 @@ function createWindow() {
             setTimeout(async () => {
               try {
                 const result = await mainWindow.webContents.executeJavaScript(`(async () => {
+                  try {
                   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
                   for (let attempt = 0; attempt < 50 && document.querySelector(".editor-project-loading"); attempt += 1) await wait(120);
                   const initialClips = document.querySelectorAll(".timeline-editor-clip");
@@ -570,7 +572,7 @@ function createWindow() {
                     await wait(100);
                   }
                   const database = await new Promise((resolve, reject) => {
-                    const request = indexedDB.open("manjing-media-v1", 2);
+                    const request = indexedDB.open("manjing-media-v1", ${MEDIA_DATABASE_VERSION});
                     request.onsuccess = () => resolve(request.result);
                     request.onerror = () => reject(request.error);
                   });
@@ -592,6 +594,9 @@ function createWindow() {
                   const saveReady = Boolean(currentSaveButton && !currentSaveButton.disabled && !currentSaveButton.textContent.includes("正在保存"));
                   const storedClipCount = Array.isArray(storedProject?.clips) ? storedProject.clips.length : 0;
                   return { ok: location.protocol === "manjing:" && loadingDone && hasHandoff && initialClips.length === 8 && placeholders.length === 8 && decoderCount === 0 && afterSplit === 9 && afterUndo === 8 && afterRedo === 9 && saveReady && mediaCount === 8 && storedClipCount === 9, clips: initialClips.length, placeholders: placeholders.length, afterSplit, afterUndo, afterRedo, mediaCount, storedClipCount, loadingDone, hasHandoff, decoderCount, saveReady, saveText: currentSaveButton && currentSaveButton.textContent, saveDisabled: currentSaveButton && currentSaveButton.disabled, toast: document.querySelector(".editor-toast")?.textContent || "", protocol: location.protocol };
+                  } catch (error) {
+                    return { ok: false, step: "exception", error: String(error), stack: error?.stack || "" };
+                  }
                 })()`);
                 if (!result?.ok) throw new Error(`剪辑导入交互测试失败：${JSON.stringify(result)}`);
                 if (smokeTimer) clearTimeout(smokeTimer);
