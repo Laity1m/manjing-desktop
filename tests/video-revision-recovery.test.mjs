@@ -26,3 +26,11 @@ test("native video reruns do not require a storyboard image and remain cancellab
 test("character blueprint reuse remains exact for costume and state", () => {
   assert.match(library, /allowLookFallback: false/);
 });
+
+test("manual pairing offers same-person look candidates without auto-approving them", () => {
+  assert.match(studio, /allowCharacterLookCandidates: true/);
+  assert.match(studio, /assetMatchKind: lookCandidate \? "look-candidate"/);
+  assert.match(studio, /lookCandidate \|\| asset\.assetState === "review" \? "pending"/);
+  assert.match(studio, /确认造型并配对/);
+  assert.match(studio, /不匹配，移除候选/);
+});

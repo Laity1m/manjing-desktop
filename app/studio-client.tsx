@@ -92,6 +92,7 @@ type CharacterAsset = {
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
   sheetVersion?: 2;
   reviewDecision?: UserReviewDecision;
+  assetMatchKind?: "exact" | "look-candidate";
   status: "queued" | "generating" | "ready" | "error";
 };
 type PropAsset = {
@@ -1234,18 +1235,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return loaded;
   }
 
-  async function pairExistingBlueprintAssets(characterItems = characters, propItems = propAssets, sceneItems = sceneAssets) {
+  async function pairExistingBlueprintAssets(characterItems = characters, propItems = propAssets, sceneItems = sceneAssets, options: { allowCharacterLookCandidates?: boolean } = {}) {
     setStatusText("正在生成前配对资产库：先找已有图片，再确定真正缺失项");
     const projectId = activeAssetProjectId();
     const library = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.mediaType === "image" && asset.reusable !== false && asset.assetState !== "placeholder");
     const characterMatches = new Map<string, LibraryAsset>();
+    const characterLookCandidates = new Set<string>();
     const propMatches = new Map<string, LibraryAsset>();
     const sceneMatches = new Map<string, LibraryAsset>();
     for (const character of characterItems.filter(isVisualCharacterAsset)) {
       if (character.imageUrl) continue;
       const naming = characterAssetNaming(character);
-      const match = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
-      if (match) characterMatches.set(character.id, match);
+      const exact = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
+      const candidate = exact || (options.allowCharacterLookCandidates
+        ? findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true })
+        : undefined);
+      if (candidate) {
+        characterMatches.set(character.id, candidate);
+        if (!exact) characterLookCandidates.add(character.id);
+      }
     }
     for (const prop of propItems) {
       if (prop.imageUrl) continue;
@@ -1263,7 +1271,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const nextCharacters = deduplicateCharacterAssets(characterItems.map((character) => {
       const match = characterMatches.get(character.id);
       const asset = match ? byId.get(match.id) : undefined;
-      return !character.imageUrl && asset?.url ? { ...character, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : character.remoteUrl, arkAssetId: asset.arkAssetId, portraitAuthorizationStatus: asset.portraitAuthorizationStatus, sheetVersion: 2 as const, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : character;
+      const lookCandidate = characterLookCandidates.has(character.id);
+      return !character.imageUrl && asset?.url ? { ...character, libraryAssetId: lookCandidate ? character.libraryAssetId : asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : character.remoteUrl, arkAssetId: asset.arkAssetId, portraitAuthorizationStatus: asset.portraitAuthorizationStatus, sheetVersion: 2 as const, assetMatchKind: lookCandidate ? "look-candidate" as const : "exact" as const, reviewDecision: lookCandidate || asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : character;
     }));
     const nextProps = propItems.map((prop) => { const match = propMatches.get(prop.id); const asset = match ? byId.get(match.id) : undefined; return !prop.imageUrl && asset?.url ? { ...prop, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : prop.remoteUrl, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : prop; });
     const nextScenes = sceneItems.map((sceneAsset) => { const match = sceneMatches.get(sceneAsset.id); const asset = match ? byId.get(match.id) : undefined; return !sceneAsset.imageUrl && asset?.url ? { ...sceneAsset, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : sceneAsset.remoteUrl, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : sceneAsset; });
@@ -1271,13 +1280,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setPropAssets(nextProps);
     setSceneAssets(nextScenes);
     await Promise.all(matchedIds.map((id) => markLibraryAssetUsed(id)));
-    const paired = matchedIds.length;
+    const paired = characterMatches.size + propMatches.size + sceneMatches.size;
+    const lookCandidateCount = characterLookCandidates.size;
     const missing = nextCharacters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl).length + nextProps.filter((item) => !item.imageUrl).length + nextScenes.filter((item) => !item.imageUrl).length;
-    const summary = `配对完成：复用 ${paired} 项已有资产，确认 ${missing} 项确实缺失`;
+    const summary = `配对完成：复用 ${paired - lookCandidateCount} 项精确资产${lookCandidateCount ? `，找到 ${lookCandidateCount} 项同人物造型候选待确认` : ""}，确认 ${missing} 项确实缺失`;
     setAssetPairingSummary(summary);
     setImportMessage(`${summary}；只有缺失项才允许进入生图 Agent`);
     recordActivity("image", summary, paired ? "done" : "warning");
-    return { characters: nextCharacters, props: nextProps, scenes: nextScenes, paired, missing };
+    return { characters: nextCharacters, props: nextProps, scenes: nextScenes, paired, lookCandidateCount, missing };
   }
 
   function persistScriptMemory(memory: Omit<ScriptNarrativeMemory, "updatedAt">) {
@@ -1825,14 +1835,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function approveCharacterAsset(character: CharacterAsset) {
     if (!character.imageUrl) return;
     const naming = characterAssetNaming(character);
-    patchCharacterReview(character.id, { reviewDecision: "approved", status: "ready" });
+    patchCharacterReview(character.id, { reviewDecision: "approved", assetMatchKind: character.assetMatchKind === "look-candidate" ? "exact" : character.assetMatchKind, status: "ready" });
     if (character.libraryAssetId) {
       try {
         const response = await fetch(character.imageUrl);
         if (!response.ok) throw new Error("无法读取待采用的人物图片");
         const blob = await response.blob();
-        await attachLibraryFileToPlaceholder(character.libraryAssetId, new File([blob], `${naming.displayName}.png`, { type: blob.type || "image/png" }), "ai");
-        await updateLibraryAsset(character.libraryAssetId, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice: "ai" });
+        const sourceChoice = character.assetMatchKind === "look-candidate" ? "upload" : "ai";
+        await attachLibraryFileToPlaceholder(character.libraryAssetId, new File([blob], `${naming.displayName}.png`, { type: blob.type || "image/png" }), sourceChoice);
+        await updateLibraryAsset(character.libraryAssetId, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice });
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : "人物资产入库失败");
         return;
@@ -1845,7 +1856,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   function rejectCharacterAsset(character: CharacterAsset) {
     if (character.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(character.imageUrl);
-    patchCharacterReview(character.id, { imageUrl: undefined, remoteUrl: undefined, reviewDecision: "rejected", status: "error" });
+    patchCharacterReview(character.id, { imageUrl: undefined, remoteUrl: undefined, assetMatchKind: undefined, reviewDecision: "rejected", status: "error" });
     recordActivity("director", `角色“${character.name}”已被用户删除，未进入资产库`, "warning");
   }
 
@@ -5402,8 +5413,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setAssetAction("pair-assets");
     setError("");
     try {
-      const result = await pairExistingBlueprintAssets();
-      setStatusText(result.missing ? `资产配对完成，还有 ${result.missing} 项可选择上传或交给 AI 生成` : "资产配对完成，全部使用已有资产，无需生图");
+      const result = await pairExistingBlueprintAssets(characters, propAssets, sceneAssets, { allowCharacterLookCandidates: true });
+      setStatusText(result.lookCandidateCount ? `已找到 ${result.lookCandidateCount} 项同人物候选，请逐项预览并确认造型；不合适可删除后再上传或生成` : result.missing ? `资产配对完成，还有 ${result.missing} 项可选择上传或交给 AI 生成` : "资产配对完成，全部使用已有资产，无需生图");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "资产配对失败");
     } finally {
@@ -6040,8 +6051,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               {characters.map((character) => <article key={character.id} className={`asset-blueprint-card ${character.status}`}>
                 <div className="asset-blueprint-preview">{character.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: character.imageUrl as string, name: characterAssetNaming(character).displayName })} aria-label={`预览${characterAssetNaming(character).displayName}大图`}><img src={character.imageUrl} alt={characterAssetNaming(character).displayName} /><i>点击预览</i></button> : <span><i>人</i><small>仅框架<br />尚无图片</small></span>}</div>
                 <div className="asset-blueprint-fields"><em>人物造型资产 · {character.episodeScope || "当前集"}</em><input value={characterIdentity(character)} aria-label="人物身份名" placeholder="例如：男主" onChange={(event) => updateCharacterAsset(character.id, { name: event.target.value, identityName: event.target.value })} /><input value={characterLook(character)} aria-label="服装或状态造型名" placeholder="例如：白衣版" onChange={(event) => updateCharacterAsset(character.id, { lookName: event.target.value })} /><input value={character.role} aria-label="人物身份" placeholder="身份或人物关系" onChange={(event) => updateCharacterAsset(character.id, { role: event.target.value })} /><textarea value={character.appearance} aria-label="人物视觉描述" placeholder="不变的身份特征 + 当前造型的服装、妆发和状态" onChange={(event) => updateCharacterAsset(character.id, { appearance: event.target.value })} /><small>{character.sceneHints?.length ? `使用镜头：${character.sceneHints.join("、")}` : "未指定镜头时，将按分镜文字匹配此造型"}</small></div>
-                <p>{character.imageUrl ? character.reviewDecision === "pending" ? "AI 图片待采用" : "已有可用人物资产" : "等待用户选择资产来源"}</p>
-                <footer>{character.reviewDecision === "pending" && character.imageUrl ? <><button onClick={() => approveCharacterAsset(character)}>采用并入库</button><label className={assetAction ? "disabled" : ""}>上传图片替换<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="danger" onClick={() => rejectCharacterAsset(character)}>删除图片</button></> : <><label className={assetAction ? "disabled" : ""}>上传已有图片<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => void generateCharacterBlueprint(character)} disabled={Boolean(assetAction)}>{assetAction === `character-generate:${character.id}` ? "生成中…" : character.imageUrl ? "让 AI 重做" : "让 AI 生成"}</button></>}<button className="plain-danger" onClick={() => setCharacters((items) => items.filter((item) => item.id !== character.id))} disabled={Boolean(assetAction)}>删除框架</button></footer>
+                <p>{character.imageUrl ? character.assetMatchKind === "look-candidate" ? `资产库中找到同一人物候选；请确认是否符合“${characterLook(character)}”` : character.reviewDecision === "pending" ? "AI 图片待采用" : "已有可用人物资产" : "等待用户选择资产来源"}</p>
+                <footer>{character.reviewDecision === "pending" && character.imageUrl ? <><button onClick={() => approveCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "确认造型并配对" : "采用并入库"}</button><label className={assetAction ? "disabled" : ""}>上传图片替换<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="danger" onClick={() => rejectCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "不匹配，移除候选" : "删除图片"}</button></> : <><label className={assetAction ? "disabled" : ""}>上传已有图片<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => void generateCharacterBlueprint(character)} disabled={Boolean(assetAction)}>{assetAction === `character-generate:${character.id}` ? "生成中…" : character.imageUrl ? "让 AI 重做" : "让 AI 生成"}</button></>}<button className="plain-danger" onClick={() => setCharacters((items) => items.filter((item) => item.id !== character.id))} disabled={Boolean(assetAction)}>删除框架</button></footer>
               </article>)}
               {sceneAssets.map((sceneAsset, index) => <article key={sceneAsset.id} className={`asset-blueprint-card scene ${sceneAsset.status}`}>
                 <div className="asset-blueprint-preview">{sceneAsset.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: sceneAsset.imageUrl as string, name: sceneAsset.name })} aria-label={`预览${sceneAsset.name}场景大图`}><img src={sceneAsset.imageUrl} alt={sceneAsset.name} /><i>点击预览</i></button> : <span><i>景</i><small>仅框架<br />尚无图片</small></span>}</div>
