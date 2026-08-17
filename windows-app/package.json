@@ -24,7 +24,7 @@
   "build": {
     "appId": "com.manjing.desktop",
     "productName": "漫镜",
-    "artifactName": "漫镜-${version}-场景资产-全能参考-${arch}.${ext}",
+    "artifactName": "漫镜-${version}-逐镜修改-重生成修复-${arch}.${ext}",
     "asar": true,
     "compression": "maximum",
     "directories": {

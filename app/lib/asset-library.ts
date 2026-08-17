@@ -235,7 +235,9 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
     projectId,
     mediaType: input.category === "audio" ? "audio" : "image",
     allowCrossProject: true,
-    allowLookFallback: input.category === "character",
+    // A base portrait may lock identity, but it must never silently satisfy a
+    // different costume/state blueprint (for example 白衣版 vs 黑衣版).
+    allowLookFallback: false,
   });
   const mediaType: LibraryMediaType = input.category === "audio" ? "audio" : "image";
   const tags = [...new Set([...(input.tags || []), input.category === "audio" ? "剧本音色框架" : "剧本资产框架", `entity:${identityKey}`, ...defaultAssetPurposes(input.category, mediaType).map((purpose) => `purpose:${purpose}`)])].slice(0, 24);

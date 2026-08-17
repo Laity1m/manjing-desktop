@@ -161,6 +161,7 @@ type Scene = {
   tailFrameAssetId?: string;
   continuityReferenceDecision?: "tail-frame" | "asset-only" | "cross-episode-tail";
   candidateVideoUrl?: string;
+  videoRevisionRequest?: string;
   status: SceneStatus;
   errorMessage?: string;
   model?: string;
@@ -311,7 +312,7 @@ function spatialContinuityContract(scene: Scene) {
 type Storyboard = { title: string; characters: CharacterAsset[]; music: string; scenes: Scene[] };
 type LibTvResult = { kind: "image" | "video"; url: string };
 type LibTvMessage = { id: string; seq: number; role: "user" | "assistant"; content: string };
-type SeedancePendingTask = { id: string; model: string; createdAt: number };
+type SeedancePendingTask = { id: string; model: string; createdAt: number; promptSignature?: string };
 
 const SAMPLE_STORY = "雨夜，女孩在即将关门的旧书店前，遇见了消失三年的恋人。他带着一封从未寄出的信，藏着两人错过彼此的真相。";
 const STUDIO_SESSION_KEY = "manjing-studio-session-v2";
@@ -1204,6 +1205,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const quickModelSaveRef = useRef(false);
   const roleModelWriteRef = useRef<AgentRole | null>(null);
   const sceneActionRef = useRef("");
+  const seedanceRequestControllerRef = useRef<AbortController | null>(null);
   const editorProjectIdRef = useRef(`studio-${Date.now().toString(36)}`);
   const libtvPauseRef = useRef(false);
   const runtimeShotReuseRef = useRef(new Map<string, string>());
@@ -1224,7 +1226,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function loadReusableBlueprintAsset(category: "character" | "scene" | "prop", identityKey: string, lookName?: string) {
     const projectId = activeAssetProjectId();
     const library = await listLibraryAssets({ allProjects: true });
-    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: category === "character" });
+    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
     if (!loaded?.url) return null;
@@ -1242,7 +1244,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     for (const character of characterItems.filter(isVisualCharacterAsset)) {
       if (character.imageUrl) continue;
       const naming = characterAssetNaming(character);
-      const match = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true });
+      const match = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
       if (match) characterMatches.set(character.id, match);
     }
     for (const prop of propItems) {
@@ -1616,7 +1618,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const sceneMatches = new Map<string, LibraryAsset>();
       for (const character of characters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl)) {
         const naming = characterAssetNaming(character);
-        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true });
+        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
         if (match) { characterMatches.set(character.id, match); selectedIds.add(match.id); }
       }
       for (const scene of scenes.filter((item) => !item.imageUrl)) {
@@ -2495,6 +2497,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const isCreateRequest = typeof init.body === "string" && /"action"\s*:\s*"create"/.test(init.body);
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const controller = new AbortController();
+      seedanceRequestControllerRef.current = controller;
       const timeoutMs = path.includes("?url=") ? 380000 : isCreateRequest ? 205000 : 160000;
       const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
       try {
@@ -2523,6 +2526,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (!transient || shouldStop || attempt === maxAttempts - 1) return response;
         setStatusText(`${label}遇到网络波动，正在自动重连 ${attempt + 1}/${maxAttempts - 1}`);
       } catch (reason) {
+        const cancelledByUser = controller.signal.aborted && seedanceRequestControllerRef.current !== controller;
+        if (cancelledByUser) throw new Error("任务已取消");
         if (attempt === maxAttempts - 1) {
           const detail = reason instanceof DOMException && reason.name === "AbortError" ? `连接等待超过 ${Math.round(timeoutMs / 1000)} 秒` : "桌面端与内置 Seedance 通道的连接被中断";
           throw new Error(`${label}失败：${detail}。无需安装火山引擎 SDK；请检查网络或代理后再次点击“重新运行视频 AI”`);
@@ -2530,6 +2535,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setStatusText(`${label}连接中断，正在自动重连 ${attempt + 1}/${maxAttempts - 1}`);
       } finally {
         window.clearTimeout(timeout);
+        if (seedanceRequestControllerRef.current === controller) seedanceRequestControllerRef.current = null;
       }
       await wait(900 * (attempt + 1));
     }
@@ -2546,17 +2552,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     video.muted = true;
     video.src = objectUrl;
     try {
-      await new Promise<void>((resolve, reject) => {
+      await withStageTimeout(new Promise<void>((resolve, reject) => {
         video.onloadedmetadata = () => resolve();
         video.onerror = () => reject(new Error("视频关键帧解码失败"));
-      });
+      }), 30000, "视频关键帧解码等待超过 30 秒");
       const duration = Number.isFinite(video.duration) ? video.duration : Math.max(1, scene.duration);
       const capture = async (time: number) => {
-        await new Promise<void>((resolve, reject) => {
+        await withStageTimeout(new Promise<void>((resolve, reject) => {
           video.onseeked = () => resolve();
           video.onerror = () => reject(new Error("视频关键帧定位失败"));
           video.currentTime = Math.max(0, Math.min(Math.max(0, duration - 0.05), time));
-        });
+        }), 15000, "视频关键帧定位等待超过 15 秒");
         const canvas = document.createElement("canvas");
         canvas.width = video.videoWidth || 1280;
         canvas.height = video.videoHeight || 720;
@@ -2578,10 +2584,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       for (let index = 0; index < samples.length; index += 1) {
         const image = new Image();
         image.src = samples[index];
-        await new Promise<void>((resolve, reject) => {
+        await withStageTimeout(new Promise<void>((resolve, reject) => {
           image.onload = () => resolve();
           image.onerror = () => reject(new Error("视频一致性样本解码失败"));
-        });
+        }), 15000, "视频一致性样本解码等待超过 15 秒");
         const column = index % 3;
         const row = Math.floor(index / 3);
         auditContext.drawImage(image, column * 480, row * 270, 480, 270);
@@ -2645,10 +2651,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const chunks: Blob[] = [];
     const recorder = new MediaRecorder(destination.stream, mimeType ? { mimeType, audioBitsPerSecond: 128000 } : undefined);
     try {
-      await new Promise<void>((resolve, reject) => {
+      await withStageTimeout(new Promise<void>((resolve, reject) => {
         video.onloadedmetadata = () => resolve();
         video.onerror = () => reject(new Error("无法读取分镜视频音轨"));
-      });
+      }), 30000, "分镜视频音轨读取等待超过 30 秒");
       const seconds = Math.max(2, Math.min(14, maxSeconds, Number.isFinite(video.duration) ? video.duration : maxSeconds));
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
       const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
@@ -3148,8 +3154,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const config = agentConfigs.video;
     if (config.apiKey.trim().length < 8) throw new Error("即梦 Seedance 需要火山方舟 API Key");
     const resumeKey = options.resumeKey || `${config.model}:${prompt.slice(0, 120)}`;
+    const promptSignature = stableReuseToken(JSON.stringify({
+      model: config.model,
+      prompt,
+      duration: options.duration,
+      references: (options.references || []).map((reference) => ({ kind: reference.kind, role: reference.role, name: reference.name, url: reference.url.slice(0, 160) })),
+      voiceover: options.voiceover,
+    }));
     const pending = seedancePendingTasks()[resumeKey];
-    const canResume = Boolean(pending?.id && pending.model === config.model && Date.now() - pending.createdAt < 6 * 24 * 60 * 60 * 1000);
+    const canResume = Boolean(pending?.id && pending.model === config.model && (!pending.promptSignature || pending.promptSignature === promptSignature) && Date.now() - pending.createdAt < 6 * 24 * 60 * 60 * 1000);
+    if (pending?.id && !canResume) saveSeedancePendingTask(resumeKey);
     let taskId = canResume ? pending.id : "";
     if (taskId) {
       setStatusText(`正在恢复上次中断的 Seedance 任务 ${taskId.slice(-8)}`);
@@ -3186,7 +3200,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       taskId = task.id;
       window.localStorage.setItem("manjing-seedance-last-request-v146", JSON.stringify({ requestId: task.requestId || requestId, taskId, model: config.model, scene: options.resumeKey || "", createdAt: Date.now(), status: "created" }));
-      saveSeedancePendingTask(resumeKey, { id: taskId, model: config.model, createdAt: Date.now() });
+      saveSeedancePendingTask(resumeKey, { id: taskId, model: config.model, createdAt: Date.now(), promptSignature });
     }
     const activeRun = runRef.current;
     for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -3846,7 +3860,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (!character.imageUrl) {
           const identity = `character:${stableReuseToken(`${character.name}|${character.appearance}`)}`;
           const naming = characterAssetNaming(character);
-          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true })
+          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false })
             || reusableProductionAssets.find((asset) => asset.category === "character" && asset.mediaType === "image" && asset.tags.includes(`asset:${identity}`) && asset.assetState !== "placeholder");
           if (existing) {
             const [loaded] = await loadLibraryAssets([existing.id]);
@@ -4171,7 +4185,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             if (voiceEnabled && sceneVoiceover(scene).mode === "onscreen_dialogue" && !canonicalVoiceAudioRef.current.has(sceneVoiceover(scene).speaker)) {
               await extractGeneratedVideoVoice(scene, clip.url).catch((reason) => { recordActivity("voice", `“${scene.title}”的首次对白音色截取失败：${reason instanceof Error ? reason.message : "音轨不可读"}`, "warning"); return null; });
             }
-            const inspection = await inspectGeneratedVideo(scene, clip.url, visibleCast, previousScene);
+            const inspection = await withStageTimeout(inspectGeneratedVideo(scene, clip.url, visibleCast, previousScene), 120000, "视频已生成，但一致性检查等待超过 120 秒；请重试该镜头");
             if (!inspection.accepted) {
               const message = `五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，已拒绝进入资产库和成片`;
 	              sceneReviewPatchesRef.current.set(scene.id, { ...(sceneReviewPatchesRef.current.get(scene.id) || {}), videoReviewDecision: "pending" });
@@ -4338,6 +4352,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   function cancelGeneration() {
     runRef.current = Date.now();
+    seedanceRequestControllerRef.current?.abort();
+    seedanceRequestControllerRef.current = null;
+    sceneActionRef.current = "";
+    setSceneAction(null);
     setLibtvRunning(false);
     setRetryingRole(null);
     setPhase(scenes.length ? "ready" : "idle");
@@ -4355,7 +4373,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   function canRerunRole(role: AgentRole) {
     if (role === "writer") return story.trim().length >= 8;
     if (role === "director" || role === "image" || role === "voice") return scenes.length > 0;
-    if (role === "video") return scenes.some((scene) => scene.imageUrl);
+    if (role === "video") return scenes.length > 0 && (agentConfigs.video.adapter !== "browser" || scenes.some((scene) => scene.imageUrl));
     return scenes.some((scene) => scene.imageUrl || scene.videoUrl);
   }
 
@@ -4517,7 +4535,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const prompt = await compileShotMotionPrompt(scene, sceneIndex, previousScene);
           const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene, previousScene), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
           if (voiceEnabled && sceneVoiceover(scene).mode === "onscreen_dialogue" && !canonicalVoiceAudioRef.current.has(sceneVoiceover(scene).speaker)) await extractGeneratedVideoVoice(scene, clip.url).catch((reason) => { recordActivity("voice", `音色自动提取跳过：${reason instanceof Error ? reason.message : "音轨不可读"}`, "warning"); return null; });
-          const inspection = await inspectGeneratedVideo(scene, clip.url, visibleCast, previousScene);
+          const inspection = await withStageTimeout(inspectGeneratedVideo(scene, clip.url, visibleCast, previousScene), 120000, "视频已生成，但一致性检查等待超过 120 秒；请重试该镜头");
           if (!inspection.accepted) {
             const message = `五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，补跑结果已拒绝`;
 	            sceneReviewPatchesRef.current.set(scene.id, { ...(sceneReviewPatchesRef.current.get(scene.id) || {}), videoReviewDecision: "pending" });
@@ -4701,11 +4719,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       return;
     }
     const actionId = `video:${scene.id}`;
+    const actionRun = runRef.current;
+    const previousCandidateUrl = scene.candidateVideoUrl;
     sceneActionRef.current = actionId;
     setSceneAction({ id: scene.id, type: "video" });
     setError("");
-    if (scene.candidateVideoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.candidateVideoUrl);
-    updateScene(scene.id, { status: "animating", candidateVideoUrl: undefined });
+    // Keep the last candidate playable until its replacement succeeds.
+    updateScene(scene.id, { status: "animating" });
     recordActivity("video", `${agentName("video")}正在重做“${scene.title}”的动态表演`);
     try {
       await preflightReusableVideoAssets(scenes.length ? scenes : [scene], characters);
@@ -4714,9 +4734,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const visibleCast = charactersForScene(characters, scene).filter(isVisualCharacterAsset);
       const prompt = await compileShotMotionPrompt(scene, Math.max(0, sceneIndex), previousScene);
       const clip = await pollinationsMedia("video", prompt, Math.max(0, sceneIndex), { references: await videoReferences(scene, previousScene), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
-      const inspection = await inspectGeneratedVideo(scene, clip.url, visibleCast, previousScene);
+      const inspection = await withStageTimeout(inspectGeneratedVideo(scene, clip.url, visibleCast, previousScene), 120000, "新视频已返回，但一致性检查等待超过 120 秒；旧候选仍已保留，请再次重做");
       if (!inspection.accepted) {
         patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: undefined, candidateVideoUrl: clip.url, videoReviewDecision: "pending", consistencyReport: inspection.report, consistencyDecision: "reject", status: "error" });
+        if (previousCandidateUrl?.startsWith("blob:") && previousCandidateUrl !== clip.url) URL.revokeObjectURL(previousCandidateUrl);
         throw new Error(`五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，结果未进入资产库和成片`);
       }
       if (scene.videoUrl) URL.revokeObjectURL(scene.videoUrl);
@@ -4725,9 +4746,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const episodeFinal = sceneIndex === scenes.length - 1 && Boolean(activeSeriesContext().projectId);
       const storedTail = tailNeeded || episodeFinal ? await persistTailFrameAsset(scene, inspection.frames.end, Math.max(0, sceneIndex), episodeFinal) : null;
       patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: clip.url, videoReviewDecision: "pending", videoPosterUrl: inspection.frames.middle || scene.videoPosterUrl, remoteImageUrl: tailNeeded || episodeFinal ? storedTail?.url || inspection.frames.end : undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: storedTail?.id, continuityReferenceDecision: tailNeeded || episodeFinal ? "tail-frame" : "asset-only", consistencyReport: inspection.report, consistencyDecision: "pass", status: "ready", duration: Math.max(4, Math.min(15, scene.duration)) });
+      if (previousCandidateUrl?.startsWith("blob:") && previousCandidateUrl !== clip.url) URL.revokeObjectURL(previousCandidateUrl);
       if (voiceEnabled && sceneVoiceover(scene).mode === "onscreen_dialogue" && !canonicalVoiceAudioRef.current.has(sceneVoiceover(scene).speaker)) await extractGeneratedVideoVoice(scene, clip.url).catch((reason) => { recordActivity("voice", `音色自动提取跳过：${reason instanceof Error ? reason.message : "音轨不可读"}`, "warning"); return null; });
       recordActivity("video", `“${scene.title}”的原生动态镜头已生成，正在等待你的逐项批准`, "done");
     } catch (reason) {
+      if (runRef.current !== actionRun) return;
       updateScene(scene.id, { status: "error" });
       setError(reason instanceof Error ? reason.message : "动态镜头生成失败");
       recordActivity("video", `“${scene.title}”视频生成失败`, "error");
@@ -4931,13 +4954,18 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function reviseCandidateVideo(scene: Scene) {
     if (!scene.candidateVideoUrl || sceneActionRef.current) return;
     const findings = scene.consistencyReport?.findings?.filter(Boolean) || [];
-    const repairFindings = findings.length ? findings : ["用户判定当前候选不合格，需要保持剧本与资产不变并修正人物、动作、运镜和镜头衔接"];
+    const userRequest = String(scene.videoRevisionRequest || "").trim().slice(0, 600);
+    const repairFindings = [
+      ...(userRequest ? [`用户明确修改要求：${userRequest}`] : []),
+      ...(findings.length ? findings : ["用户判定当前候选不合格，需要保持剧本与资产不变并修正人物、动作、运镜和镜头衔接"]),
+    ];
     const repairReport: ConsistencyReport = scene.consistencyReport
       ? { ...scene.consistencyReport, decision: "reject", findings: repairFindings }
       : { scores: { characterIdentity: null, castIntegrity: null, costume: null, visualStyle: null, scene: null, props: null, spatialContinuity: null, shotContinuity: null, lighting: null }, overall: 0, decision: "reject", mode: "structural", findings: repairFindings, checkedAt: new Date().toISOString(), attempts: 1 };
-    const repairScene: Scene = { ...scene, consistencyDecision: "reject", consistencyReport: repairReport, videoReviewDecision: "rejected", errorMessage: `按审核原因修改：${repairFindings.join("；")}` };
+    const repairScene: Scene = { ...scene, videoRevisionRequest: userRequest, consistencyDecision: "reject", consistencyReport: repairReport, videoReviewDecision: "rejected", errorMessage: `按用户与审核原因修改：${repairFindings.join("；")}` };
     patchSceneReview(scene.id, repairScene);
-    recordActivity("director", `“${scene.title}”被标记为不合格，视频 Agent 将只针对评分原因修改：${repairFindings.join("；").slice(0, 180)}`, "warning");
+    saveSeedancePendingTask(scene.id);
+    recordActivity("director", `“${scene.title}”被标记为不合格，视频 Agent 将按用户要求和评分原因修改：${repairFindings.join("；").slice(0, 220)}`, "warning");
     await generateVideo(repairScene);
   }
 
@@ -5915,7 +5943,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     anchor.click();
   }
 
-  const busy = Boolean(retryingRole) || libtvRunning || !["idle", "ready", "error"].includes(phase);
+  const busy = Boolean(retryingRole) || Boolean(sceneAction) || libtvRunning || !["idle", "ready", "error"].includes(phase);
   const visibleProgress = phase === "exporting" ? exportProgress : progress;
   const failedRole = AGENT_ROLES.find((role) => activityByRole[role.id]?.state === "error")?.id;
   const selectedScene = scenes[selected];
@@ -6191,7 +6219,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         {pendingReviewCount > 0 && <section className="incremental-review" aria-live="polite"><header><div><span>LIVE REVIEW</span><h3>逐镜生成与审核</h3><p>当前分镜一生成就立即暂停；可批准、按评分原因修改或删除，确认可用后才会生成下一镜。</p></div><b>{pendingReviewCount}<small> 项待审</small></b></header><div className="incremental-review-grid">
           {pendingCharacterReviews.map((character) => <article key={`character-${character.id}`}><div className="review-media">{character.imageUrl && <img src={character.imageUrl} alt={character.name} />}</div><div><small>角色设定</small><b>{character.name}</b><p>{character.appearance}</p></div><footer><button onClick={() => approveCharacterAsset(character)}>批准入库</button><button className="danger" onClick={() => rejectCharacterAsset(character)}>删除</button></footer></article>)}
           {pendingImageReviews.map((scene) => <article key={`image-${scene.id}`}><div className="review-media">{scene.imageUrl && <img src={scene.imageUrl} alt={scene.title} />}</div><div><small>镜头画面</small><b>{scene.title}</b><p>{scene.consistencyReport?.findings[0] || scene.visual}</p></div><footer><button onClick={() => approveSceneAsset(scene, "image")}>批准画面</button><button className="danger" onClick={() => rejectSceneAsset(scene, "image")}>删除</button></footer></article>)}
-          {pendingVideoReviews.map((scene) => <article key={`video-${scene.id}`}><button type="button" className="review-media review-video-open" onClick={() => scene.candidateVideoUrl && setVideoReviewPreview({ url: scene.candidateVideoUrl, name: scene.title })} aria-label={`大窗预览${scene.title}`}><video src={scene.candidateVideoUrl} muted preload="metadata" /><i>点击大窗预览</i></button><div><small>{scene.consistencyDecision === "pass" ? "视频 · AI质检通过" : "视频 · 需修改"}</small><b>{scene.title}</b><p>{scene.consistencyReport?.findings.join("；") || "动态镜头已生成，等待你的审核。"}</p></div><footer><button onClick={() => scene.candidateVideoUrl && setVideoReviewPreview({ url: scene.candidateVideoUrl, name: scene.title })}>预览视频</button><button onClick={() => void approveCandidateVideo(scene)}>合格，批准入片</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(scene)}>不合格，按原因修改</button><button className="danger" onClick={() => discardCandidateVideo(scene)}>删除</button></footer></article>)}
+          {pendingVideoReviews.map((scene) => <article key={`video-${scene.id}`}><button type="button" className="review-media review-video-open" onClick={() => scene.candidateVideoUrl && setVideoReviewPreview({ url: scene.candidateVideoUrl, name: scene.title })} aria-label={`大窗预览${scene.title}`}><video src={scene.candidateVideoUrl} muted preload="metadata" /><i>点击大窗预览</i></button><div><small>{scene.consistencyDecision === "pass" ? "视频 · AI质检通过" : "视频 · 需修改"}</small><b>{scene.title}</b><p>{scene.consistencyReport?.findings.join("；") || "动态镜头已生成，等待你的审核。"}</p><textarea className="video-revision-input" value={scene.videoRevisionRequest || ""} onChange={(event) => updateScene(scene.id, { videoRevisionRequest: event.target.value })} placeholder="输入你的修改要求，例如：人物不要回头，镜头改为缓慢横向跟拍，道具始终拿在右手。" aria-label={`${scene.title}的视频修改要求`} /></div><footer><button onClick={() => scene.candidateVideoUrl && setVideoReviewPreview({ url: scene.candidateVideoUrl, name: scene.title })}>预览视频</button><button onClick={() => void approveCandidateVideo(scene)}>合格，批准入片</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(scene)} disabled={Boolean(sceneAction)}>不合格，按评分原因修改（可填写要求）</button><button className="danger" onClick={() => discardCandidateVideo(scene)}>删除</button></footer></article>)}
           {pendingAudioReviews.map((scene) => <article key={`audio-${scene.id}`}><div className="review-media audio">声音</div><div><small>角色配音</small><b>{scene.title} · {scene.speaker}</b><p>{scene.dialogue}</p><audio src={scene.audioUrl} controls preload="metadata" /></div><footer><button onClick={() => approveSceneAsset(scene, "audio")}>批准入库</button><button className="danger" onClick={() => rejectSceneAsset(scene, "audio")}>删除</button></footer></article>)}
           {pendingMusicReviews > 0 && <article><div className="review-media audio">BGM</div><div><small>剧情配乐</small><b>{projectTitle}</b><p>{musicPrompt}</p><audio src={musicUrl} controls preload="metadata" /></div><footer><button onClick={approveMusicAsset}>批准入库</button><button className="danger" onClick={rejectMusicAsset}>删除</button></footer></article>}
         </div></section>}
@@ -6236,7 +6264,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             {!showFilm && current?.candidateVideoUrl && !current.videoUrl && <div className="candidate-review-panel">
               <div><span>LIVE REVIEW</span><b>{current.consistencyDecision === "pass" ? "视频已生成，等待你逐项批准" : "这个镜头需要你的判断"}</b><p>{current.consistencyReport?.findings.slice(0, 2).join("；") || "人物、服装、画风或镜头连续性需要人工复核。"}</p></div>
               <strong>{current.consistencyReport?.overall ?? "--"}<small>/100</small></strong>
-              <div className="candidate-review-actions"><button onClick={() => current.candidateVideoUrl && setVideoReviewPreview({ url: current.candidateVideoUrl, name: current.title })}>大窗预览视频</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(current)} disabled={busy || Boolean(sceneAction)}>不合格，按评分原因修改</button><button onClick={() => void approveCandidateVideo(current)} disabled={Boolean(sceneAction)}>合格，批准并生成下一镜</button><button className="candidate-delete" onClick={() => discardCandidateVideo(current)} disabled={Boolean(sceneAction)}>删除候选</button></div>
+              <label className="candidate-revision-field"><b>你的修改要求（可与 AI 评分原因一起提交）</b><textarea value={current.videoRevisionRequest || ""} onChange={(event) => updateScene(current.id, { videoRevisionRequest: event.target.value })} placeholder="例如：人物不要回头；改为缓慢横向跟拍；右手道具保持不变；台词语速慢一点。" /></label>
+              <div className="candidate-review-actions"><button onClick={() => current.candidateVideoUrl && setVideoReviewPreview({ url: current.candidateVideoUrl, name: current.title })}>大窗预览视频</button><button className="candidate-rebuild" onClick={() => void reviseCandidateVideo(current)} disabled={busy || Boolean(sceneAction)}>不合格，按评分原因修改（可填写要求）</button><button onClick={() => void approveCandidateVideo(current)} disabled={Boolean(sceneAction)}>合格，批准并生成下一镜</button><button className="candidate-delete" onClick={() => discardCandidateVideo(current)} disabled={Boolean(sceneAction)}>删除候选</button></div>
             </div>}
             {showFilm && exportUrl ? <div className="film-toolbar"><div><b>{nativeVideoEnabled ? "AI 漫剧成片已生成" : "低动态流程样片已生成"}</b><span>{nativeVideoEnabled ? `六岗位协作生成，动态镜头、字幕${generatedVoiceEnabled ? "、分角色配音" : ""}${musicUrl ? "与剧情配乐" : ""}已经合成` : "这是图片运镜预览，不是人物原生动画；可用于确认剧本、分镜与节奏"}</span></div><button className="secondary" onClick={() => setShowFilm(false)}>编辑分镜</button><button onClick={() => void openInProfessionalEditor()} disabled={editorSyncState === "saving"}>{editorSyncState === "saving" ? `整理素材 ${editorSyncProgress}%` : "进入专业剪辑台"}</button><button onClick={downloadFilm}>下载成片</button></div> : <>
               <div className="play-controls"><button onClick={() => setPlaying((value) => !value)} disabled={!scenes.length}>{playing ? "Ⅱ" : "▶"}</button><span>{formatTime(time)}</span><input type="range" aria-label="播放进度" min={0} max={100} value={totalDuration ? (time / totalDuration) * 100 : 0} onChange={(event) => seek(Number(event.target.value))} /><span>{formatTime(totalDuration)}</span><button onClick={() => { setPlaying(false); setTime(0); }}>↺</button></div>
