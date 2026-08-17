@@ -7,6 +7,7 @@ const scores = {
   castIntegrity: null,
   costume: null,
   visualStyle: null,
+  aestheticQuality: null,
   scene: 96,
   props: null,
   spatialContinuity: 92,
@@ -23,9 +24,10 @@ test("a structural-only report pauses for human review even when its aggregate i
 });
 
 test("vision reports must satisfy the aggregate and every hard consistency dimension", () => {
-  const report = { scores: { characterIdentity: 94, castIntegrity: 98, costume: 92, visualStyle: 95, scene: 93, props: 90, spatialContinuity: 92, shotContinuity: 94, lighting: 90 }, overall: 94, mode: "vision" };
+  const report = { scores: { characterIdentity: 94, castIntegrity: 98, costume: 92, visualStyle: 95, aestheticQuality: 91, scene: 93, props: 90, spatialContinuity: 92, shotContinuity: 94, lighting: 90 }, overall: 94, mode: "vision" };
   assert.equal(videoConsistencyAccepted(report, true), true);
   assert.equal(videoConsistencyAccepted({ ...report, scores: { ...report.scores, visualStyle: 91 } }, true), false);
+  assert.equal(videoConsistencyAccepted({ ...report, scores: { ...report.scores, aestheticQuality: 85 } }, true), false);
 });
 
 test("a sub-90 report pauses unless the user explicitly approves it", () => {

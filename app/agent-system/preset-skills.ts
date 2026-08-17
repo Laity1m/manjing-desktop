@@ -177,6 +177,43 @@ export const PRESET_SKILLS: PresetSkill[] = [
   },
 
   {
+    id: "image-aesthetic-art-direction",
+    agentId: "image",
+    title: "生图美术总监：主体、构图、光色与材质",
+    content: "生成时先锁定画面的用途和第一视觉中心，再按“主体与动作 → 场景关系 → 风格媒介 → 构图景别 → 明确光源 → 主辅色 → 材质细节”组织为自然语言，不堆砌空泛质量词。主体必须一眼可读，轮廓有辨识度，前中后景层次清楚；用具体光位、光质和色温塑造体积与情绪，不使用笼统的‘漂亮光线’。细节只服务主体、剧情和时代，背景不得抢脸，画面保留呼吸空间。提示词保持紧凑，重要要求前置；需要修图或重做时一次只改一个可观察变量。",
+    tags: ["生图", "美术指导", "构图", "光影", "材质", "默认启用"],
+    source: "开源方法综合 · OpenAI ImageGen 与 Black Forest Labs FLUX Best Practices",
+    sourceUrl: "https://github.com/black-forest-labs/skills/tree/master/skills/flux-best-practices",
+  },
+  {
+    id: "image-character-casting-beauty",
+    agentId: "image",
+    title: "角色选角审美：好看、耐看且不网红同脸",
+    content: "人物生成必须同时满足角色可信度、吸引力和辨识度。先从年龄、经历、阶层、性格与戏剧功能确定脸型和气质，再设计一个主记忆点与一个次记忆点；允许轻微自然不对称，但五官比例协调、眼神有焦点、表情松弛有生命力。皮肤保留细腻层次和真实受光，发丝成束、发际线自然，妆容与服装匹配身份。禁止尖锥下巴、过度大眼厚唇、蜡像塑料皮、灰脏肤色、僵硬假笑、空洞眼神、无意义首饰和批量网红同脸。不同角色必须在头脸轮廓、眼眉、鼻口、年龄感和气质上明显区分，同一角色跨造型只改变服装与剧情状态，不换脸。",
+    tags: ["生图", "人物审美", "选角", "五官", "反同脸", "默认启用"],
+    source: "漫镜原创预设 · 人像生成与角色设计工作流综合",
+    sourceUrl: "https://openai.com/academy/image-generation/",
+  },
+  {
+    id: "image-reference-identity-lock",
+    agentId: "image",
+    title: "参考图分工与人物身份锁定",
+    content: "有参考图时先声明每张图的唯一职责：身份脸、服装、姿态、场景或画风；不得让多张参考图争夺同一职责。人物参考优先保留脸部几何、年龄、发际线和稳定辨识特征，再迁移本镜动作、表情、光线与服装。合成时统一透视、光向、色温、颗粒和材质；参考图过多或互相矛盾时减少到最小必要集合。身份漂移时不要追加形容词堆砌，应强化身份参考并只重做漂移变量。",
+    tags: ["生图", "参考图", "人物一致性", "身份锁定", "默认启用"],
+    source: "开源方法综合 · InstantID 与 PhotoMaker",
+    sourceUrl: "https://github.com/instantX-research/InstantID",
+  },
+  {
+    id: "image-human-preference-quality-gate",
+    agentId: "image",
+    title: "生图审美质量闸门：多维评分后再采用",
+    content: "采用图片前分别评分：①提示词与剧情符合度；②人物脸部协调、神态与选角吸引力；③构图层级与视觉焦点；④光色、材质与风格完成度；⑤解剖、手部、穿模、重复物、乱码等技术缺陷；⑥与 Canonical 身份和画风的一致性。不得用总分掩盖单项硬伤：人物脸崩、空洞眼神、明显同脸、风格错位或技术畸形任一出现即 REVISE。修订只写可见问题与最小改动，保留已经正确的身份、构图和光线；连续失败时更换种子或参考组合，不继续堆提示词。",
+    tags: ["生图", "审美评分", "质量闸门", "人类偏好", "默认启用"],
+    source: "开源方法综合 · ImageReward 与 VisionReward 多维人类偏好评估",
+    sourceUrl: "https://github.com/zai-org/VisionReward",
+  },
+
+  {
     id: "video-model-routing",
     agentId: "video",
     title: "按镜头需求选择视频模型",

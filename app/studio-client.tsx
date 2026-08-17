@@ -124,7 +124,7 @@ type SceneAsset = {
 };
 type AssetAnalysisState = "idle" | "analyzing" | "ready" | "error";
 type ScriptNarrativeMemory = { synopsis: string; background: string; updatedAt: string };
-type ConsistencyScores = { characterIdentity: number | null; castIntegrity: number | null; costume: number | null; visualStyle: number | null; scene: number | null; props: number | null; spatialContinuity: number | null; shotContinuity: number | null; lighting: number | null };
+type ConsistencyScores = { characterIdentity: number | null; castIntegrity: number | null; costume: number | null; visualStyle: number | null; aestheticQuality: number | null; scene: number | null; props: number | null; spatialContinuity: number | null; shotContinuity: number | null; lighting: number | null };
 type ConsistencyReport = { scores: ConsistencyScores; overall: number; decision: "pass" | "review" | "reject"; mode: "vision" | "structural"; findings: string[]; checkedAt: string; attempts: number };
 type Scene = {
   id: string;
@@ -540,10 +540,29 @@ function characterVisualPrompt(name: string) {
   return `${preset.base}, ${preset.character}`;
 }
 
+type ImageSkillPurpose = "character" | "frame" | "quality";
+
+const IMAGE_SKILLS_BY_PURPOSE: Record<ImageSkillPurpose, string[]> = {
+  character: ["preset-image-character-casting-beauty", "preset-image-aesthetic-art-direction"],
+  frame: ["preset-image-aesthetic-art-direction", "preset-image-reference-identity-lock"],
+  quality: ["preset-image-human-preference-quality-gate"],
+};
+
+function configuredImageSkillPrompt(purpose: ImageSkillPurpose) {
+  const wanted = new Set(IMAGE_SKILLS_BY_PURPOSE[purpose]);
+  const skills = agentContext("image", 250).filter((item) => wanted.has(item.id));
+  return {
+    ids: skills.map((item) => item.id),
+    content: skills.map((item) => item.content.trim()).filter(Boolean).join("\n"),
+  };
+}
+
 function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset, "name" | "identityName" | "lookName" | "episodeScope" | "role" | "appearance">) {
   const identity = String(character.identityName || character.name).trim();
   const look = characterAssetNaming(character).lookName;
-  return `${characterVisualPrompt(styleName)}, CHARACTER IDENTITY: ${identity}; THIS EPISODE LOOK/STATE: ${look}; EPISODE SCOPE: ${character.episodeScope || "current episode"}; ${character.role}, ${character.appearance}. UNIQUE CAST IDENTITY ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. This is an outfit/state asset for the same canonical person ${identity}: preserve the exact same facial geometry and body identity across all of ${identity}'s looks, while strictly rendering this asset's ${look} costume, grooming, injuries, wealth/health state and accessories. Never borrow another outfit variant unless explicitly listed in this look. Treat this facial geometry as a hard biometric design constraint. This person must not share a generic model face, eye shape, jaw, nose, mouth, cheek structure or beauty-filter proportions with any other cast member; do not create lookalikes or near-twins unless the script explicitly says they are related. 16:9 horizontal identity-and-outfit production sheet on a pure seamless light-gray cyclorama background. The far-left identity portrait is a large eye-level strict frontal close-up: head yaw 0 degrees, pitch 0 degrees, roll 0 degrees, face centered, both eyes looking directly into the camera, both eyebrows and both sides of the jaw equally visible, symmetrical ears when the hairstyle permits, neutral relaxed expression. Absolutely no profile, side face, three-quarter view, tilted head, raised or lowered chin, looking away, hair covering an eye, hand near face, prop or facial occlusion in the identity portrait. To the right, show front, side and back full-body outfit turnarounds from head to toe. Preserve the exact head silhouette, hairstyle, hair color, body proportions, costume, accessories, footwear and socks; cover only the facial-feature skin area of the front and side full-body views with a clean background-colored neutral matte so those views cannot introduce alternate facial identities. Keep hair, skull silhouette, ears, neck and clothing visible; the back view needs no facial matte. Calm natural standing posture, arms hanging naturally, empty hands, no props, scenery, furniture, text, labels or decorative frame. 构图硬性要求：最左侧大头照必须平视、严格正脸、双眼直视镜头，头部水平无歪斜；不同人物必须拥有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感和辨识标记，禁止只换发型服装的同脸复制。同一人物的不同造型必须保持同一张脸，但严格按当前“${look}”出服装和状态。右侧只负责服装和身材的正面、侧面、背面三视图。`;
+  const aesthetic = configuredImageSkillPrompt("character");
+  if (aesthetic.ids.length) markContextUsed(aesthetic.ids);
+  return `${characterVisualPrompt(styleName)}. 默认人物审美指令（优先执行）：${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"} CHARACTER IDENTITY: ${identity}; THIS EPISODE LOOK/STATE: ${look}; EPISODE SCOPE: ${character.episodeScope || "current episode"}; ${character.role}, ${character.appearance}. UNIQUE CAST IDENTITY ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. This is an outfit/state asset for the same canonical person ${identity}: preserve the exact same facial geometry and body identity across all of ${identity}'s looks, while strictly rendering this asset's ${look} costume, grooming, injuries, wealth/health state and accessories. Never borrow another outfit variant unless explicitly listed in this look. Treat this facial geometry as a hard biometric design constraint. This person must not share a generic model face, eye shape, jaw, nose, mouth, cheek structure or beauty-filter proportions with any other cast member; do not create lookalikes or near-twins unless the script explicitly says they are related. 16:9 horizontal identity-and-outfit production sheet on a pure seamless light-gray cyclorama background. The far-left identity portrait is a large eye-level strict frontal close-up: head yaw 0 degrees, pitch 0 degrees, roll 0 degrees, face centered, both eyes looking directly into the camera, both eyebrows and both sides of the jaw equally visible, symmetrical ears when the hairstyle permits, neutral relaxed expression. Absolutely no profile, side face, three-quarter view, tilted head, raised or lowered chin, looking away, hair covering an eye, hand near face, prop or facial occlusion in the identity portrait. To the right, show front, side and back full-body outfit turnarounds from head to toe. Preserve the exact head silhouette, hairstyle, hair color, body proportions, costume, accessories, footwear and socks; cover only the facial-feature skin area of the front and side full-body views with a clean background-colored neutral matte so those views cannot introduce alternate facial identities. Keep hair, skull silhouette, ears, neck and clothing visible; the back view needs no facial matte. Calm natural standing posture, arms hanging naturally, empty hands, no props, scenery, furniture, text, labels or decorative frame. 构图硬性要求：最左侧大头照必须平视、严格正脸、双眼直视镜头，头部水平无歪斜；不同人物必须拥有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感和辨识标记，禁止只换发型服装的同脸复制。同一人物的不同造型必须保持同一张脸，但严格按当前“${look}”出服装和状态。右侧只负责服装和身材的正面、侧面、背面三视图。`;
 }
 
 function isVisualCharacterAsset(character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
@@ -555,7 +574,8 @@ function isVisualCharacterAsset(character: Pick<CharacterAsset, "name" | "role" 
 
 function frameVisualPrompt(name: string) {
   const preset = visualStyle(name);
-  return `${preset.base}, ${preset.frame}`;
+  const aesthetic = configuredImageSkillPrompt("frame");
+  return `${preset.base}, ${preset.frame}${aesthetic.content ? `. 默认画面审美指令：${aesthetic.content}` : ""}`;
 }
 
 function motionVisualPrompt(name: string) {
@@ -3395,7 +3415,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function evaluateShotConsistency(scene: Scene, imageUrl: string, castForScene: CharacterAsset[], previousScene: Scene | undefined, attempts: number, evaluationMode: "frame" | "video-strip" = "frame"): Promise<ConsistencyReport> {
     const stateInherited = !previousScene || scene.startState === previousScene.endState;
-    const structuralScores: ConsistencyScores = { characterIdentity: null, castIntegrity: null, costume: null, visualStyle: null, scene: scene.environmentKey && scene.environmentBible ? 96 : 82, props: null, spatialContinuity: previousScene ? (scene.continuity ? 92 : 76) : 100, shotContinuity: stateInherited ? 98 : 70, lighting: null };
+    const structuralScores: ConsistencyScores = { characterIdentity: null, castIntegrity: null, costume: null, visualStyle: null, aestheticQuality: null, scene: scene.environmentKey && scene.environmentBible ? 96 : 82, props: null, spatialContinuity: previousScene ? (scene.continuity ? 92 : 76) : 100, shotContinuity: stateInherited ? 98 : 70, lighting: null };
     const structuralValues = Object.values(structuralScores).filter((value): value is number => typeof value === "number");
     const structuralOverall = Math.round(structuralValues.reduce((sum, value) => sum + value, 0) / Math.max(1, structuralValues.length));
     const fallback: ConsistencyReport = { scores: structuralScores, overall: structuralOverall, decision: structuralOverall >= 90 ? "pass" : structuralOverall >= 85 ? "review" : "reject", mode: "structural", findings: ["当前导演模型未执行视觉审核；人物身份、服装、道具和光线项目不计入总分。", ...(stateInherited ? [] : ["当前镜头 Start State 未完整继承上一镜 End State。"]), ...(!scene.environmentKey || !scene.environmentBible ? ["场景身份或场景圣经不完整。"] : [])], checkedAt: new Date().toISOString(), attempts };
@@ -3410,15 +3430,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       canonicalStyleImageRef.current ? consistencyImage(canonicalStyleImageRef.current, `Canonical全片风格：${style}`) : Promise.resolve(null),
     ])).filter(Boolean).slice(0, 7) as Array<{ url: string; label: string }>;
     try {
-      const system = `你是影视连续性审核引擎。必须真实比较所给图片，不得因为提示词声称一致就直接给高分。只返回JSON。每项0-100；看不到、被遮挡、画外或没有依据的项必须返回null且不得写成缺陷。castIntegrity 检查预期出镜人数、每个人的身份映射以及是否出现角色复制、角色替换、陌生人、同脸双人或人物凭空出现/消失；预期有人物时不得返回 null。visualStyle 必须始终依据用户指定的风格文字和风格参考图评分，不得返回 null；动画变真人、真人变动画、2D变3D或整体渲染语言变化都属于严重偏差。只审核本镜头景别和构图中实际可见、且剧本明确要求出现的内容，禁止要求一个近景同时展示完整房间、下装或所有场景锚点。旁白、广告声等无实体角色不审核人物和服装。新增耳饰、纹身、眼镜等标准图没有的身份特征属于真实偏差。${evaluationMode === "video-strip" ? "第一张图是同一段视频按时间从左到右、从上到下排列的五个抽帧，不是同一画面出现五个重复人物；必须检查五个时间点之间是否换脸、换装、变风格、肢体畸变、道具凭空出现或空间跳变。" : ""}`;
-      const prompt = `审核${evaluationMode === "video-strip" ? "当前视频五点抽帧" : "当前生成分镜"}与 Canonical 参考、上一镜画面是否一致。镜头标题：${scene.title}。景别/机位：${scene.camera}。预期出镜人数：${castForScene.length}。预期人物：${castForScene.map((item) => `${item.name}(${item.appearance})`).join("；") || "无实体人物"}。全片固定风格：${style}；${visualStyle(style).base}。预期场景：${scene.environmentKey || scene.title}；${scene.environmentBible || scene.visual}。重要道具：${labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").join("、") || "无明确重要道具"}。Start State：${scene.startState || "首镜"}。动作：${scene.action}。先核对人物数量和逐人身份映射，再检查人物身份、服装、画风还原、场景、道具、空间关系、镜头承接和光线。未入镜或被遮挡的内容不得扣分；除 castIntegrity 和 visualStyle 外，没有 Canonical 图像依据的项目返回 null。返回：{"scores":{"characterIdentity":0,"castIntegrity":0,"costume":0,"visualStyle":0,"scene":0,"props":0,"spatialContinuity":0,"shotContinuity":0,"lighting":0},"findings":["只写可见且可修复的具体偏差"]}`;
+      const aestheticGate = configuredImageSkillPrompt("quality");
+      const system = `你是影视连续性与审美审核引擎。必须真实比较所给图片，不得因为提示词声称一致就直接给高分。只返回JSON。每项0-100；看不到、被遮挡、画外或没有依据的项必须返回null且不得写成缺陷。castIntegrity 检查预期出镜人数、每个人的身份映射以及是否出现角色复制、角色替换、陌生人、同脸双人或人物凭空出现/消失；预期有人物时不得返回 null。visualStyle 必须始终依据用户指定的风格文字和风格参考图评分，不得返回 null；动画变真人、真人变动画、2D变3D或整体渲染语言变化都属于严重偏差。aestheticQuality 必须始终评分，检查主体吸引力与可读性、人物脸部协调和眼神、构图焦点、光色材质、解剖手部与可见生成瑕疵；人物好看但不符合角色身份也不能给高分。默认审美闸门：${aestheticGate.content || "拒绝脸崩、空洞眼神、网红同脸、杂乱构图、塑料材质和明显技术畸形。"} 只审核本镜头景别和构图中实际可见、且剧本明确要求出现的内容，禁止要求一个近景同时展示完整房间、下装或所有场景锚点。旁白、广告声等无实体角色不审核人物和服装。新增耳饰、纹身、眼镜等标准图没有的身份特征属于真实偏差。${evaluationMode === "video-strip" ? "第一张图是同一段视频按时间从左到右、从上到下排列的五个抽帧，不是同一画面出现五个重复人物；必须检查五个时间点之间是否换脸、换装、变风格、肢体畸变、道具凭空出现或空间跳变。" : ""}`;
+      const prompt = `审核${evaluationMode === "video-strip" ? "当前视频五点抽帧" : "当前生成分镜"}与 Canonical 参考、上一镜画面是否一致。镜头标题：${scene.title}。景别/机位：${scene.camera}。预期出镜人数：${castForScene.length}。预期人物：${castForScene.map((item) => `${item.name}(${item.appearance})`).join("；") || "无实体人物"}。全片固定风格：${style}；${visualStyle(style).base}。预期场景：${scene.environmentKey || scene.title}；${scene.environmentBible || scene.visual}。重要道具：${labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具").join("、") || "无明确重要道具"}。Start State：${scene.startState || "首镜"}。动作：${scene.action}。先核对人物数量和逐人身份映射，再检查人物身份、服装、画风还原、审美完成度、场景、道具、空间关系、镜头承接和光线。未入镜或被遮挡的内容不得扣分；除 castIntegrity、visualStyle 和 aestheticQuality 外，没有 Canonical 图像依据的项目返回 null。返回：{"scores":{"characterIdentity":0,"castIntegrity":0,"costume":0,"visualStyle":0,"aestheticQuality":0,"scene":0,"props":0,"spatialContinuity":0,"shotContinuity":0,"lighting":0},"findings":["只写可见且可修复的具体偏差"]}`;
       const response = await fetch("/api/desktop/invoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: config.adapter, endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, role: "director", task: "consistency_check", system, prompt, images: [current, ...references] }) });
       if (!response.ok) return { ...fallback, findings: [...fallback.findings, `视觉审核接口不可用（${response.status}），已降级为结构检查。`] };
       const data = await response.json() as { text?: string };
       const clean = String(data.text || "").replace(/```json/gi, "").replace(/```/g, "");
       const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)) as { scores?: Partial<Record<keyof ConsistencyScores, number | null>>; findings?: string[] };
       const score = (key: keyof ConsistencyScores) => typeof parsed.scores?.[key] === "number" ? Math.max(0, Math.min(100, Math.round(parsed.scores[key] as number))) : null;
-      const scores: ConsistencyScores = { characterIdentity: score("characterIdentity"), castIntegrity: score("castIntegrity"), costume: score("costume"), visualStyle: score("visualStyle"), scene: score("scene"), props: score("props"), spatialContinuity: score("spatialContinuity"), shotContinuity: score("shotContinuity"), lighting: score("lighting") };
+      const scores: ConsistencyScores = { characterIdentity: score("characterIdentity"), castIntegrity: score("castIntegrity"), costume: score("costume"), visualStyle: score("visualStyle"), aestheticQuality: score("aestheticQuality"), scene: score("scene"), props: score("props"), spatialContinuity: score("spatialContinuity"), shotContinuity: score("shotContinuity"), lighting: score("lighting") };
       const values = Object.values(scores).filter((value): value is number => typeof value === "number");
       const overall = Math.round(values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length));
       return { scores, overall, decision: overall >= 90 ? "pass" : overall >= 85 ? "review" : "reject", mode: "vision", findings: Array.isArray(parsed.findings) ? parsed.findings.map(String).slice(0, 8) : [], checkedAt: new Date().toISOString(), attempts };
@@ -3874,9 +3895,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setStatusText(`正在建立人物造型资产 ${index + 1}/${cast.length}：${characterAssetNaming(character).displayName}`);
         cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
         publishCharacters(cast);
-        const faceSkill = agentContext("image").find((item) => item.title.includes("原创AI角色捏脸"));
-        const characterPrompt = `${characterSheetPrompt(style, character)}${faceSkill ? `\n\nEnabled Image Agent Skill:\n${faceSkill.content}` : ""}`;
-        if (faceSkill) markContextUsed([faceSkill.id]);
+        const characterPrompt = characterSheetPrompt(style, character);
         if (agentConfigs.image.adapter !== "horde") {
           const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9" });
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
@@ -4439,9 +4458,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setStatusText(`生图 AI 正在补跑角色资产 ${targetIndex + 1}/${missingCharacters.length}：${character.name}`);
           cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
 	          publishCharacters(cast);
-          const faceSkill = agentContext("image").find((item) => item.title.includes("原创AI角色捏脸"));
-          const prompt = `${characterSheetPrompt(style, character)}${faceSkill ? `\n\nEnabled Image Agent Skill:\n${faceSkill.content}` : ""}`;
-          if (faceSkill) markContextUsed([faceSkill.id]);
+          const prompt = characterSheetPrompt(style, character);
           if (agentConfigs.image.adapter !== "horde") {
             const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9" });
             const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
@@ -4953,7 +4970,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     ];
     const repairReport: ConsistencyReport = scene.consistencyReport
       ? { ...scene.consistencyReport, decision: "reject", findings: repairFindings }
-      : { scores: { characterIdentity: null, castIntegrity: null, costume: null, visualStyle: null, scene: null, props: null, spatialContinuity: null, shotContinuity: null, lighting: null }, overall: 0, decision: "reject", mode: "structural", findings: repairFindings, checkedAt: new Date().toISOString(), attempts: 1 };
+      : { scores: { characterIdentity: null, castIntegrity: null, costume: null, visualStyle: null, aestheticQuality: null, scene: null, props: null, spatialContinuity: null, shotContinuity: null, lighting: null }, overall: 0, decision: "reject", mode: "structural", findings: repairFindings, checkedAt: new Date().toISOString(), attempts: 1 };
     const repairScene: Scene = { ...scene, videoRevisionRequest: userRequest, consistencyDecision: "reject", consistencyReport: repairReport, videoReviewDecision: "rejected", errorMessage: `按用户与审核原因修改：${repairFindings.join("；")}` };
     patchSceneReview(scene.id, repairScene);
     saveSeedancePendingTask(scene.id);

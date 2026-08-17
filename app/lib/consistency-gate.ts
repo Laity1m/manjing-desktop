@@ -1,4 +1,4 @@
-export type ConsistencyScoreKey = "characterIdentity" | "castIntegrity" | "costume" | "visualStyle" | "scene" | "props" | "spatialContinuity" | "shotContinuity" | "lighting";
+export type ConsistencyScoreKey = "characterIdentity" | "castIntegrity" | "costume" | "visualStyle" | "aestheticQuality" | "scene" | "props" | "spatialContinuity" | "shotContinuity" | "lighting";
 
 export type ConsistencyGateReport = {
   scores: Record<ConsistencyScoreKey, number | null>;
@@ -7,7 +7,7 @@ export type ConsistencyGateReport = {
 };
 
 const RECOMMENDED_LIMITS: Array<[ConsistencyScoreKey, number]> = [
-  ["costume", 88], ["visualStyle", 92], ["scene", 88], ["props", 85], ["spatialContinuity", 88], ["shotContinuity", 90], ["lighting", 85],
+  ["costume", 88], ["visualStyle", 92], ["aestheticQuality", 86], ["scene", 88], ["props", 85], ["spatialContinuity", 88], ["shotContinuity", 90], ["lighting", 85],
 ];
 
 const SCORE_LABELS: Record<ConsistencyScoreKey, string> = {
@@ -15,6 +15,7 @@ const SCORE_LABELS: Record<ConsistencyScoreKey, string> = {
   castIntegrity: "人物数量",
   costume: "服装",
   visualStyle: "画风",
+  aestheticQuality: "审美完成度",
   scene: "场景",
   props: "道具",
   spatialContinuity: "空间连续性",
@@ -40,7 +41,7 @@ export function videoConsistencyAccepted(report: ConsistencyGateReport, _hasVisi
     return value === null ? !required : value >= minimum;
   };
   if (hasVisibleCharacters && (!passes("characterIdentity", 90) || !passes("castIntegrity", 95) || !passes("costume", 88))) return false;
-  if (!passes("visualStyle", 92) || !passes("scene", 88) || !passes("spatialContinuity", 88) || !passes("shotContinuity", 90) || !passes("lighting", 85)) return false;
+  if (!passes("visualStyle", 92) || !passes("aestheticQuality", 86) || !passes("scene", 88) || !passes("spatialContinuity", 88) || !passes("shotContinuity", 90) || !passes("lighting", 85)) return false;
   if (!passes("props", 85, false)) return false;
   return true;
 }

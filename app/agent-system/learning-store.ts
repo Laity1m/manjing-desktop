@@ -74,7 +74,7 @@ export const AGENT_PROFILES: AgentProfile[] = [
 ];
 
 const STORE_KEY = "manjing-agent-learning-v145";
-const PRESET_KEY = "manjing-agent-preset-skills-v2";
+const PRESET_KEY = "manjing-agent-preset-skills-v3";
 const IMPORTED_PRESET_KEY = "manjing-agent-imported-skills-v1";
 let learnedItemsCache: LearnedItem[] | null = null;
 let importedSkillsLoading = false;
