@@ -33,9 +33,16 @@ export function consistencyGateWarnings(report: ConsistencyGateReport, hasVisibl
 }
 
 export function videoConsistencyAccepted(report: ConsistencyGateReport, _hasVisibleCharacters?: boolean) {
-  void _hasVisibleCharacters;
-  // 单项建议值仍会展示给用户，但不再覆盖总分造成“95 分仍 REJECT”。
-  return report.overall >= 90;
+  const hasVisibleCharacters = Boolean(_hasVisibleCharacters);
+  if (report.mode !== "vision" || report.overall < 90) return false;
+  const passes = (key: ConsistencyScoreKey, minimum: number, required = true) => {
+    const value = report.scores[key];
+    return value === null ? !required : value >= minimum;
+  };
+  if (hasVisibleCharacters && (!passes("characterIdentity", 90) || !passes("castIntegrity", 95) || !passes("costume", 88))) return false;
+  if (!passes("visualStyle", 92) || !passes("scene", 88) || !passes("spatialContinuity", 88) || !passes("shotContinuity", 90) || !passes("lighting", 85)) return false;
+  if (!passes("props", 85, false)) return false;
+  return true;
 }
 
 export function videoPreflightAccepted(manualOverride: unknown, report: ConsistencyGateReport, hasVisibleCharacters?: boolean) {

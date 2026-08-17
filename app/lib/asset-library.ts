@@ -51,6 +51,7 @@ export type LibraryPlaceholderInput = {
   name: string;
   category: "character" | "scene" | "prop" | "audio";
   identityKey: string;
+  entityId?: string;
   lookName?: string;
   semanticDescription: string;
   generationPrompt?: string;
@@ -248,7 +249,7 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
     return updateLibraryAsset(existing.id, {
       name,
       identityKey,
-      entityId: identityKey,
+      entityId: input.entityId?.trim().slice(0, 120) || identityKey,
       lookName: input.lookName || existing.lookName,
       variantName: input.lookName || existing.variantName,
       semanticDescription: input.semanticDescription,
@@ -275,7 +276,7 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
     locked: true,
     canonical: false,
     identityKey,
-    entityId: identityKey,
+    entityId: input.entityId?.trim().slice(0, 120) || identityKey,
     lookName: input.lookName?.trim().slice(0, 120) || (input.category === "character" ? "基础版" : undefined),
     variantName: input.lookName?.trim().slice(0, 120) || (input.category === "character" ? "基础版" : undefined),
     purposes: defaultAssetPurposes(input.category, mediaType),
@@ -356,7 +357,7 @@ export async function listLibraryAssets(options: { allProjects?: boolean } = {})
     });
     let activeProjectId = "";
     try { activeProjectId = String(JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}").projectId || ""); } catch { activeProjectId = ""; }
-    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).filter((item) => options.allProjects || !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global").sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300);
+    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).filter((item) => options.allProjects || !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   } finally {
     database.close();
   }
@@ -384,7 +385,7 @@ export async function loadLibraryAsset(id: string) {
 }
 
 export async function loadLibraryAssets(ids: string[]) {
-  const unique = [...new Set(ids)].slice(0, 60);
+  const unique = [...new Set(ids)];
   const loaded: LibraryAsset[] = [];
   for (const id of unique) {
     const asset = await loadLibraryAsset(id);

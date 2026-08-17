@@ -2,12 +2,12 @@ import { IMPORTED_DEFAULT_SKILLS } from "./imported-default-skills";
 
 export interface PresetSkill {
   id: string;
-  agentId: "director" | "writer" | "storyboard" | "prompt" | "image" | "video" | "voice" | "editor";
+  agentId: "producer" | "director" | "writer" | "character" | "scene" | "storyboard" | "prompt" | "image" | "video" | "voice" | "editor";
   title: string;
   content: string;
   tags: string[];
   source: string;
-  sourceUrl: string;
+  sourceUrl?: string;
 }
 
 export const PRESET_SKILLS: PresetSkill[] = [

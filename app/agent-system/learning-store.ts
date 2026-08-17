@@ -114,7 +114,7 @@ function scheduleImportedDefaultSkills() {
   if ("requestIdleCallback" in window) {
     (window as Window & { requestIdleCallback: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback(load, { timeout: 2500 });
   } else {
-    window.setTimeout(load, 120);
+    globalThis.setTimeout(load, 120);
   }
 }
 

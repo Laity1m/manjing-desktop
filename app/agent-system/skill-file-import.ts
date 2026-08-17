@@ -36,8 +36,8 @@ export async function parseSkillFile(file: File): Promise<ImportedSkillDocument>
 }
 
 async function readDocx(file: File) {
-  const module = await import("mammoth");
-  const mammoth = module.default || module;
+  const mammothModule = await import("mammoth");
+  const mammoth = mammothModule.default || mammothModule;
   const result = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
   return result.value || "";
 }

@@ -11,6 +11,7 @@ export type ImportedDefaultSkill = {
   content: string;
   tags: string[];
   source: string;
+  sourceUrl?: string;
   builtIn: boolean;
 };
 

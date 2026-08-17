@@ -61,7 +61,7 @@ export async function POST(request: Request) {
     if (body.action === "create") {
       const prompt = String(body.prompt || "").trim().slice(0, 1800);
       const negativePrompt = String(body.negativePrompt || "").trim().slice(0, 800);
-      const model = String(body.model || "doubao-seedance-1-5-pro-251215").trim();
+      const model = String(body.model || "doubao-seedance-2-0-fast-260128").trim();
       if (prompt.length < 8) return json({ error: "视频提示词至少需要 8 个字" }, 400);
       if (!MODEL_PATTERN.test(model)) return json({ error: "Seedance 模型 ID 或 Endpoint ID 格式不正确" }, 400);
       const ratio = body.ratio === "16:9" ? "16:9" : "9:16";
@@ -89,11 +89,11 @@ export async function POST(request: Request) {
           const kind = ["image", "video", "audio"].includes(String(reference.kind)) ? String(reference.kind) as "image" | "video" | "audio" : "image";
           const limit = kind === "image" ? 9 : 3;
           const url = referenceUrl(reference.url);
-          if (!url || accepted.length >= 12 || counts[kind] >= limit) continue;
+          if (!url || accepted.length >= 15 || counts[kind] >= limit) continue;
           counts[kind] += 1;
           // Seedance 2.0 first/last-frame control is mutually exclusive with
           // omni-reference media. Manjing uses omni-reference mode exclusively:
-          // continuity frames are ordinary @Image references too.
+          // extracted first/last frames are never submitted as generation references.
           const role = kind === "image" ? "reference_image" : kind === "video" ? "reference_video" : "reference_audio";
           content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
           accepted.push({ kind, role, token: `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`, name: String(reference.name || `${kind}-${counts[kind]}`).slice(0, 120) });
@@ -110,7 +110,7 @@ export async function POST(request: Request) {
       const requestId = String(body.requestId || "").trim();
       const cached = requestId && /^[a-z0-9-]{8,80}$/i.test(requestId) ? createCache.get(requestId) : undefined;
       if (cached && cached.expiresAt > Date.now()) return json(cached.payload, 202);
-      const upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: true, generate_audio: audioEnabled }) }, "create");
+      const upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled }) }, "create");
       const payload = await upstream.json().catch(() => ({ message: `Seedance 方舟接口返回了无法解析的内容（${upstream.status}）` })) as { id?: string; error?: { message?: unknown }; message?: unknown };
       if (!upstream.ok || !payload.id) return json({ error: safeError(payload) }, upstream.status || 502);
       const result = { id: payload.id, status: "queued", acceptedReferences: accepted, ignoredReferences: Math.max(0, rawReferences.length - accepted.length) };

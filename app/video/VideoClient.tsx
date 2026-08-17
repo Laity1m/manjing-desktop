@@ -23,7 +23,7 @@ import {
 
 type VideoAdapter = "browser" | "pollinations" | "seedance" | "webhook";
 type ReferenceKind = "image" | "video" | "audio";
-type ReferenceRole = "character" | "scene" | "style" | "first_frame" | "last_frame" | "motion" | "camera" | "edit" | "rhythm" | "voice" | "sound";
+type ReferenceRole = "character" | "scene" | "style" | "motion" | "camera" | "edit" | "rhythm" | "voice" | "sound";
 type VideoConfig = {
   preset: string;
   adapter: VideoAdapter;
@@ -91,7 +91,7 @@ const BASE_MODELS: Array<{ id: string; name: string; note: string; config: Video
   {
     id: "pollinations-video",
     name: "Pollinations 云端",
-    note: "文本生成视频，支持可选首帧图片",
+    note: "文本生成视频，支持普通图片引导（不作为首尾帧控制）",
     config: {
       preset: "pollinations-video",
       adapter: "pollinations",
@@ -102,12 +102,12 @@ const BASE_MODELS: Array<{ id: string; name: string; note: string; config: Video
   },
   {
     id: "volc-seedance",
-    name: "Seedance（火山）",
-    note: "火山 ARK 引擎；支持文本与多模态参考输入",
+    name: "Seedance 2.0（火山）",
+    note: "火山 ARK 全能参考引擎；支持 @Image / @Video / @Audio，不使用首尾帧控制",
     config: {
       preset: "volc-seedance",
       adapter: "seedance",
-      model: "doubao-seedance-1-5-pro-251215",
+      model: "doubao-seedance-2-0-260128",
       endpoint: "",
       apiKey: "",
     },
@@ -119,8 +119,6 @@ const ROLE_OPTIONS: Record<ReferenceKind, Array<{ value: ReferenceRole; label: s
     { value: "character", label: "角色正脸/全身" },
     { value: "scene", label: "场景构图" },
     { value: "style", label: "风格参考" },
-    { value: "first_frame", label: "第一帧" },
-    { value: "last_frame", label: "结尾帧" },
   ],
   video: [
     { value: "motion", label: "动作示例" },
@@ -187,7 +185,7 @@ function videoCapability(config: VideoConfig) {
     return { image: 9, video: 3, audio: 3, full: true, label: "完整多模态输入：图片/视频/音频均可参考" };
   }
   if (config.adapter === "pollinations") {
-    return { image: 1, video: 0, audio: 0, full: false, label: "文本生成 + 可选首帧图片" };
+    return { image: 1, video: 0, audio: 0, full: false, label: "文本生成 + 普通图片引导（不锁首尾帧）" };
   }
   if (config.adapter === "webhook") {
     return { image: 5, video: 2, audio: 1, full: false, label: "自定义 API 格式，按接入规则提交参数" };
@@ -398,7 +396,7 @@ export default function VideoClient() {
       }
       const item: ReferenceItem = {
         id: uid(),
-        name: parsed.pathname.split("/").pop() || `${remoteKind}-reference`,
+        name: parsed?.pathname.split("/").pop() || `${remoteKind}-reference`,
         kind: remoteKind,
         role: ROLE_OPTIONS[remoteKind][0].value,
         sourceUrl: isArkAsset ? `asset://${raw.replace(/^asset:\/\//i, "")}` : parsed!.href,
@@ -1328,7 +1326,7 @@ export default function VideoClient() {
             <input
               value={customModelId}
               onChange={(event) => setCustomModelId(event.target.value)}
-              placeholder="如：doubao-seedance-1-5-pro-251215"
+              placeholder="如：doubao-seedance-2-0-fast-260128"
             />
             <label>模型类型</label>
             <div className="video-field-tip">决定调用参数格式与能力边界</div>

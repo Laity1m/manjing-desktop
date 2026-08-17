@@ -828,7 +828,7 @@ async function invokeSeedance(input, fetchImpl = fetch) {
   if (input?.action === "create") {
     const prompt = String(input?.prompt || "").trim().slice(0, 1800);
     const negativePrompt = String(input?.negativePrompt || "").trim().slice(0, 800);
-    const model = String(input?.model || "doubao-seedance-1-5-pro-251215").trim();
+    const model = String(input?.model || "doubao-seedance-2-0-fast-260128").trim();
     if (prompt.length < 8) throw Object.assign(new Error("视频提示词至少需要 8 个字"), { statusCode: 400, retryable: false });
     if (!SEEDANCE_MODEL_PATTERN.test(model)) throw Object.assign(new Error("Seedance 模型 ID 或 Endpoint ID 格式不正确"), { statusCode: 400, retryable: false });
     const ratio = input?.ratio === "16:9" ? "16:9" : "9:16";
@@ -856,7 +856,7 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         const kind = ["image", "video", "audio"].includes(String(reference?.kind)) ? String(reference.kind) : "image";
         const limit = kind === "image" ? 9 : 3;
         const url = seedanceReferenceUrl(reference?.url);
-        if (!url || acceptedReferences.length >= 12 || counts[kind] >= limit) continue;
+        if (!url || acceptedReferences.length >= 15 || counts[kind] >= limit) continue;
         counts[kind] += 1;
         // Seedance 2.0 cannot mix first/last-frame control with omni reference
         // media. The desktop runtime therefore submits every image as @Image.
@@ -885,7 +885,7 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         payload = await seedanceProviderJson(SEEDANCE_ARK_API, {
           method: "POST",
           headers: { ...headers, "X-Manjing-Request-Id": requestId },
-          body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: true, generate_audio: audioEnabled })
+          body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled })
         }, "create", fetchImpl);
       } catch (error) {
         error.message = `${error.message}。漫镜请求编号：${requestId}`;

@@ -21,14 +21,13 @@ test("renders the Simplified Chinese multi-page motion-comic portal", async () =
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>漫镜 · AI 漫剧创作与剪辑工作台<\/title>/);
-  assert.match(html, /到一部/);
-  assert.match(html, /真正会动/);
+  assert.match(html, /<title>漫镜 —— AI 漫剧与视频工作台<\/title>/);
+  assert.match(html, /从剧本到成片/);
+  assert.match(html, /快速创作 AI 漫剧与 AI 视频/);
   assert.match(html, /进入 AI 工作台/);
-  assert.match(html, /打开专业剪辑台/);
-  assert.match(html, /模型与 Key/);
-  assert.match(html, /项目资产/);
-  assert.match(html, /0–120s/);
+  assert.match(html, /打开剪辑编辑/);
+  assert.match(html, /模型中心/);
+  assert.match(html, /项目/);
   assert.match(html, /href="\/studio"/);
   assert.match(html, /href="\/editor"/);
   assert.match(html, /href="\/models"/);
@@ -39,13 +38,13 @@ test("renders the Simplified Chinese multi-page motion-comic portal", async () =
 test("renders every primary product route", async () => {
   const cases = [
     ["/studio", /一键生成完整 AI 漫剧/],
-    ["/video", /自主视频生成/],
+    ["/video", /AI 视频工作室/],
     ["/canvas", /正在恢复本机画布/],
     ["/editor", /保存工程/],
-    ["/models", /模型与 Key/],
-    ["/projects", /项目与资产/],
-    ["/assets", /REUSABLE ASSET VAULT/],
-    ["/projects/detail?id=missing", /PROJECT DETAIL/],
+    ["/models", /模型中心/],
+    ["/projects", /系列项目中心/],
+    ["/assets", /复用视觉素材库/],
+    ["/projects/detail?id=missing", /项目详情/],
   ];
   for (const [path, marker] of cases) {
     const response = await worker.fetch(new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }), env, ctx);
@@ -79,7 +78,7 @@ test("timeboxes the optional free director review instead of blocking production
 
 test("completes truncated free storyboards instead of aborting production", async () => {
   const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
-  assert.match(source, /parseStoryboard\(raw, productionDuration, 1\)/);
+  assert.match(source, /parseStoryboard\(raw, productionDuration, sceneCountForDuration\(productionDuration\), 8\)/);
   assert.match(source, /completeFreeStoryboard\(partial, story\.trim\(\), style, productionDuration\)/);
   assert.match(source, /免费编剧输出不完整，漫镜正在自动补全分镜/);
 });
@@ -88,7 +87,7 @@ test("ships a user-editable multitrack workbench and downloadable deliverables",
   const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   assert.match(source, /AI 制作现场/);
   assert.match(source, /下载剧本/);
-  assert.match(source, /下载分镜/);
+  assert.match(source, /下载镜头计划/);
   assert.match(source, /保存工程/);
   assert.match(source, /替换图片/);
   assert.match(source, /导入视频/);
@@ -100,7 +99,8 @@ test("ships a user-editable multitrack workbench and downloadable deliverables",
   assert.match(source, /aria-pressed=\{voiceEnabled\}/);
   assert.match(source, /一键漫剧配音已关闭，LibTV 将跳过人声/);
   assert.match(source, /if \(!voiceEnabled \|\| !scene\.audioUrl\) buffers\.push\(null\)/);
-  assert.match(source, /voiceEnabled, bgmEnabled, voice/);
+  assert.match(source, /voiceEnabled/);
+  assert.match(source, /bgmEnabled/);
 });
 
 test("retries timed-out AI departments without clearing completed upstream assets", async () => {
@@ -111,12 +111,12 @@ test("retries timed-out AI departments without clearing completed upstream asset
   assert.match(source, /正在从上次中断处重新运行/);
   assert.match(source, /已完成成果仍然保留，可重新运行中断的岗位/);
   assert.match(source, /重新运行\$\{role\.title\}/);
-  assert.match(source, /agentConfigs\.director\.adapter !== "horde"/);
-  assert.match(source, /\$\{agentName\("director"\)\}复核失败/);
-  assert.match(source, /AI Horde 免费导演未及时交稿/);
+  assert.match(source, /directorReview\(storyboardDraft/);
+  assert.match(source, /\$\{agentName\("director"\)\}复核未及时完成/);
+  assert.match(source, /免费导演 AI 正在排队复核/);
   assert.doesNotMatch(source, /recordActivity\("director", "免费导演未及时交稿/);
   assert.match(source, /filter\(\(scene\) => !scene\.imageUrl \|\| scene\.status === "error"\)/);
-  assert.match(source, /filter\(\(scene\) => scene\.imageUrl && \(!scene\.videoUrl \|\| scene\.status === "error"\)\)/);
+  assert.match(source, /filter\(\(scene\) => !scene\.videoUrl \|\| scene\.status === "error"\)/);
   assert.match(source, /filter\(\(scene\) => scene\.dialogue\.trim\(\) && \(!scene\.audioUrl \|\| scene\.status === "error"\)\)/);
   assert.match(source, /recordActivity\(activeRole,/);
   assert.match(source, /sceneActionRef\.current/);
@@ -132,13 +132,13 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /normalizeImageBlobForAspect/);
   assert.match(page, /width: mediaAspect === "9:16" \? "720" : "1280"/);
   assert.match(page, /height: mediaAspect === "9:16" \? "1280" : "720"/);
-  assert.match(page, /references: await videoReferences\(scene\)/);
+  assert.match(page, /references: await videoReferences\(scene, previousScene/);
   assert.match(page, /canvas\.toBlob\(resolve, "image\/jpeg", 0\.94\)/);
   assert.match(page, /function characterSheetPrompt/);
-  assert.match(page, /画面最左侧为人物正面面部大特写/);
-  assert.match(page, /右侧依次排列人物正面全身、侧面全身、背面全身三视图/);
+  assert.match(page, /最左侧大头照必须平视、严格正脸/);
+  assert.match(page, /右侧只负责服装和身材的正面、侧面、背面三视图/);
   assert.match(page, /imageAspect: "16:9"/);
-  assert.match(page, /16:9 横版，纯浅灰色无缝影棚背景/);
+  assert.match(page, /16:9 horizontal identity-and-outfit production sheet/);
   assert.match(page, /missingCharacters = cast\.filter\(\(character\) => isVisualCharacterAsset\(character\) && !character\.imageUrl\)/);
   assert.doesNotMatch(page, /character\.sheetVersion !== 2/);
   assert.match(page, /sheetVersion: 2 as const/);
@@ -190,7 +190,7 @@ test("connects official LibTV orchestration and Volcengine Seedance jobs", async
   assert.match(libtv, /body\.action === "message"/);
   assert.match(libtv, /events/);
   assert.match(seedance, /contents\/generations\/tasks/);
-  assert.match(seedance, /return_last_frame: true/);
+  assert.match(seedance, /return_last_frame: false/);
   assert.match(page, /referenceMode: "omni"/);
   assert.match(seedance, /TRANSIENT_STATUSES/);
   assert.match(seedance, /为避免重复创建和扣费/);
@@ -241,8 +241,8 @@ test("documents provider keys and keeps project search controls interactive", as
   assert.match(keys, /复制名称/);
   assert.match(keys, /addCustomModel/);
   assert.match(keys, /保存到我的模型库/);
-  assert.match(projects, /setFilter\("working"\)/);
-  assert.match(projects, /setQuery\(event\.target\.value\)/);
+  assert.match(projects, /series-overview/);
+  assert.match(projects, /function createBlank/);
 });
 
 test("persists generated media across the studio and editor routes", async () => {
@@ -324,19 +324,20 @@ test("keeps model deletion, settings writes, and desktop navigation non-blocking
   assert.match(modelsPage, /confirmLabel="确认删除"/);
   assert.match(studio, /confirmLabel="确认删除"/);
   destructivePages.forEach((source) => assert.doesNotMatch(source, /window\.confirm/));
-  assert.doesNotMatch(navigation, /next\/link|<Link/);
-  assert.match(navigation, /<a key=\{item\.id\}/);
+  assert.match(navigation, /next\/link/);
+  assert.match(navigation, /<Link prefetch=\{false\} key=\{item\.id\}/);
   assert.match(customModels, /controller\.abort\(\), timeoutMs/);
   assert.match(customModels, /操作已解除锁定/);
   assert.match(studio, /本机配置写入超过 6 秒，操作已解除锁定/);
   assert.match(runtime, /function localFileDeadline/);
   assert.match(runtime, /本机设置异常过大，已拒绝写入以避免界面卡死/);
-  assert.match(studio, /doubao-seedance-1-5-pro-251215/);
+  assert.match(studio, /doubao-seedance-2-0-260128/);
 });
 
 test("discovers provider models and invokes compatible text APIs through the desktop runtime", async () => {
   const runtimeSource = await readFile(new URL("../windows-app/desktop-runtime.js", import.meta.url), "utf8");
-  assert.match(runtimeSource, /TEXT_ROLE_TIMEOUT_MS = \{ writer: 120000, director: 120000, editor: 90000 \}/);
+  assert.match(runtimeSource, /const TEXT_ROLE_TIMEOUT_MS = \{/);
+  assert.match(runtimeSource, /writer: 420000/);
   assert.match(runtimeSource, /已保留现有成果，请检查地址、网络或服务商队列后重新运行该岗位/);
   const { discoverRemoteModels, invokeTextModel } = require("../windows-app/desktop-runtime.js");
   const calls = [];
@@ -467,7 +468,7 @@ test("retries interrupted Seedance status checks and sends current official task
     assert.equal(createBody.ratio, "9:16");
     assert.equal(createBody.duration, 10);
     assert.equal(createBody.resolution, "720p");
-    assert.equal(createBody.generate_audio, false);
+    assert.equal(createBody.generate_audio, true);
     assert.equal(createBody.watermark, false);
   } finally {
     globalThis.fetch = originalFetch;
@@ -483,7 +484,7 @@ test("uses the buffered desktop Seedance channel for resume queries and interrup
   assert.match(runtimeSource, /任务编号仍已保留，请稍后重新运行视频 AI 继续下载/);
   assert.match(studio, /path\.replace\("\/api\/seedance", "\/api\/desktop\/seedance"\)/);
   assert.match(studio, /任务编号仍已保留，请重新运行视频 AI 继续下载/);
-  assert.match(video, /内置 Seedance 通道/);
+  assert.match(video, /pollSeedance/);
 
   const { invokeSeedance, downloadSeedanceMedia } = require("../windows-app/desktop-runtime.js");
   let statusUrl = "";
@@ -553,25 +554,24 @@ test("ships an independent free-video page with explicit multimodal @ references
   const seedance = await readFile(new URL("../app/api/seedance/route.ts", import.meta.url), "utf8");
   const runtime = await readFile(new URL("../windows-app/desktop-runtime.js", import.meta.url), "utf8");
   assert.match(video, /accept="image\/\*,video\/\*,audio\/\*"/);
-  assert.match(video, /@图片/);
-  assert.match(video, /@视频/);
-  assert.match(video, /@音频/);
-  assert.match(video, /insertReferenceMention/);
-  assert.match(video, /prepareReferences/);
-  assert.match(video, /generateSeedance/);
+  assert.match(video, /可插入引用标记/);
+  assert.match(video, /引用该素材/);
+  assert.match(video, /const mention =/);
+  assert.match(video, /const enabled = referenceItems\.filter/);
+  assert.match(video, /createSeedanceTask/);
   assert.match(video, /generatePollinations/);
   assert.match(video, /generateWebhook/);
   assert.match(video, /aria-label="生成视频配音"/);
-  assert.match(video, /audio: String\(voiceEnabled\)/);
-  assert.match(video, /buildVoicePrompt/);
-  assert.match(video, /voiceover: \{ enabled: voiceEnabled/);
+  assert.match(video, /enabled: voiceEnabled/);
+  assert.match(video, /function buildPrompt/);
+  assert.match(video, /voiceover: \{/);
   assert.match(video, /voiceLanguage, voiceStyle, voiceScript/);
   assert.match(video, /导入剪辑台/);
   assert.match(video, /source: "video"/);
   assert.match(seedance, /reference_image/);
   assert.match(seedance, /reference_video/);
   assert.match(seedance, /reference_audio/);
-  assert.match(seedance, /generate_audio: voiceEnabled/);
+  assert.match(seedance, /generate_audio: audioEnabled/);
   assert.match(seedance, /counts = \{ image: 0, video: 0, audio: 0 \}/);
   assert.match(runtime, /invokeVideoModel/);
   assert.match(runtime, /\/api\/desktop\/video/);
@@ -589,11 +589,11 @@ test("keeps modules on independent routes and restores project state without eag
   assert.match(studio, /manjing-studio-session-v2/);
   assert.match(studio, /loadEditorProjectById/);
   assert.match(studio, /studioSnapshot/);
-  assert.match(projects, /查看项目详情/);
-  assert.match(projects, /manjing-new-studio/);
-  assert.match(projects, /project\.durable \? "恢复并进入剪辑" : "继续制作"/);
+  assert.match(projects, /打开项目/);
+  assert.match(projects, /activateSeriesEpisode/);
+  assert.match(projects, /startEpisode/);
   assert.match(detail, /getEditorProjectMetadataById/);
-  assert.match(detail, /查看详情不会加载视频解码器/);
+  assert.doesNotMatch(detail, /<video/);
   assert.match(handoff, /manjing-editor-active-project/);
   assert.match(handoff, /getEditorProjectMetadataById/);
 });
@@ -681,7 +681,7 @@ test("Windows app directly loads the bundled app without an iframe or local web 
   assert.match(main, /mainWindow\.loadURL\(initialUrl\)/);
   assert.doesNotMatch(main, /loadFile\(|shell\.html|iframe|127\.0\.0\.1|chatgpt\.site/);
   assert.doesNotMatch(runtime, /createServer|server\.listen|chatgpt\.site/);
-  assert.equal(desktopPackage.version, "1.3.8");
+  assert.equal(desktopPackage.version, "1.5.2");
   assert.match(main, /dataRoot: app\.getPath\("userData"\)/);
   assert.match(runtime, /manjing-settings\.json/);
   assert.match(runtime, /\/api\/desktop\/settings/);
@@ -693,6 +693,7 @@ test("Windows app directly loads the bundled app without an iframe or local web 
     "main.js",
     "preload.js",
     "desktop-runtime.js",
+    "enterprise-assets.js",
     "build/icon.svg",
     "build/icon.png",
     "package.json",
