@@ -1,0 +1,83 @@
+name: Build, verify, and publish Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag
+        required: true
+        default: v1.5.2
+
+permissions:
+  contents: write
+
+jobs:
+  release-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build, typecheck, and run unit tests
+        run: pnpm test
+
+      - name: Build Windows x64 installer
+        run: pnpm --dir windows-app run dist
+
+      - name: Run packaged desktop smoke tests
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "windows-app/release/win-unpacked/漫镜.exe"
+          $flags = @(
+            "--smoke-test",
+            "--smoke-director-model",
+            "--smoke-editor-handoff",
+            "--smoke-canvas",
+            "--smoke-project-workflow",
+            "--smoke-video-audio",
+            "--smoke-studio-voice",
+            "--smoke-navigation"
+          )
+          foreach ($flag in $flags) {
+            $process = Start-Process -FilePath $exe -ArgumentList $flag -PassThru -Wait -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) { throw "$flag failed with exit code $($process.ExitCode)" }
+          }
+
+      - name: Replace old assets and publish verified installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $installer = Get-ChildItem -LiteralPath "windows-app/release" -Filter "*全能参考-无首尾帧-x64.exe" |
+            Where-Object { $_.Name -notlike "*uninstaller*" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) { throw "Windows installer was not generated." }
+
+          $upload = Join-Path $installer.DirectoryName "Manjing-1.5.2-Final-x64-Setup.exe"
+          Copy-Item -LiteralPath $installer.FullName -Destination $upload -Force
+          $digest = (Get-FileHash -LiteralPath $upload -Algorithm SHA256).Hash
+
+          $assets = gh release view $env:RELEASE_TAG --json assets --jq ".assets[].name"
+          foreach ($asset in $assets) {
+            if ($asset) { gh release delete-asset $env:RELEASE_TAG $asset --yes }
+          }
+
+          gh release upload $env:RELEASE_TAG "$upload#漫镜 v1.5.2 Windows x64 最终安装包（推荐下载）"
+          "Installer SHA256: $digest" >> $env:GITHUB_STEP_SUMMARY
