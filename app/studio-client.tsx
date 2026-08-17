@@ -17,6 +17,7 @@ import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/cust
 import { createCanvasFromStudio } from "./lib/production-canvas";
 import { attachLibraryFileToPlaceholder, deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, saveLibraryPlaceholder, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
 import { findReusableLibraryAsset, normalizeAssetIdentity, normalizeAssetLook } from "./lib/asset-reuse";
+import { characterIdentityLockInstruction, selectCharacterIdentityReference } from "./lib/character-identity-reference";
 import { videoConsistencyAccepted } from "./lib/consistency-gate";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
 import { fallbackScriptAssetManifest, localizedSceneDisplayName, parseScriptAssetManifest } from "./lib/script-asset-manifest";
@@ -1245,6 +1246,45 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (!loaded?.url) return null;
     await markLibraryAssetUsed(match.id);
     return loaded;
+  }
+
+  async function prepareCharacterIdentityReference(url: string, identity: string) {
+    if (!url || agentConfigs.image.adapter !== "pollinations" || /^https:\/\//i.test(url)) return url;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`人物“${identity}”的 Canonical 身份参考图无法读取`);
+    return uploadPollinationsMedia(await response.blob(), `identity-${stableReuseToken(identity)}.png`, agentKey("image"));
+  }
+
+  async function loadCharacterIdentityReference(character: CharacterAsset, workingCharacters = characters) {
+    const identity = characterIdentity(character);
+    const inMemory = selectCharacterIdentityReference(character, workingCharacters);
+    if (inMemory) {
+      const url = await prepareCharacterIdentityReference(inMemory.remoteUrl || inMemory.imageUrl || "", identity);
+      if (url) return { url, source: characterAssetNaming(inMemory).displayName };
+    }
+    const projectId = activeAssetProjectId();
+    const library = await listLibraryAssets({ allProjects: true });
+    const match = findReusableLibraryAsset(library, {
+      category: "character",
+      identityKey: identity,
+      lookName: characterLook(character),
+      projectId,
+      mediaType: "image",
+      allowCrossProject: true,
+      allowLookFallback: true,
+    });
+    if (!match) return null;
+    const [loaded] = await loadLibraryAssets([match.id]);
+    if (!loaded?.url) return null;
+    await markLibraryAssetUsed(match.id);
+    return { url: await prepareCharacterIdentityReference(loaded.url, identity), source: match.name };
+  }
+
+  async function characterGenerationRequest(character: CharacterAsset, workingCharacters = characters) {
+    const identityReference = await loadCharacterIdentityReference(character, workingCharacters);
+    const prompt = `${characterSheetPrompt(style, character)}${identityReference ? `\n${characterIdentityLockInstruction(characterIdentity(character), characterLook(character), true)}` : ""}`;
+    if (identityReference) recordActivity("image", `人物“${characterIdentity(character)}”的新造型已锁定参考“${identityReference.source}”的同一张脸`, "done");
+    return { prompt, references: identityReference ? [identityReference.url] : [] };
   }
 
   async function pairExistingBlueprintAssets(characterItems = characters, propItems = propAssets, sceneItems = sceneAssets, options: { allowCharacterLookCandidates?: boolean } = {}) {
@@ -3264,6 +3304,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (!response.ok) throw new Error("人物参考图读取失败，已停止生成，避免重新设计人物");
       return blobToDataUrl(await response.blob());
     })) : referenceUrls;
+    const pollinationsImageReferences = kind === "image" && config.adapter === "pollinations" ? await Promise.all(referenceUrls.slice(0, 6).map(async (reference, referenceIndex) => {
+      if (/^https:\/\//i.test(reference)) return reference;
+      const response = await fetch(reference);
+      if (!response.ok) throw new Error(`第 ${referenceIndex + 1} 张人物参考图读取失败，已停止生成以避免换脸`);
+      return uploadPollinationsMedia(await response.blob(), `image-reference-${referenceIndex + 1}.png`, agentKey("image"));
+    })) : transferableImageReferences;
     const transferableMediaReferences = kind === "image" ? transferableImageReferences : await Promise.all((options.references || []).map(async (reference) => {
       if (typeof reference === "string") {
         if (!reference.startsWith("blob:")) return reference;
@@ -3317,7 +3363,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         enhance: "true",
         safe: "true",
       });
-      if (referenceUrls.length) params.set("image", referenceUrls.join("|"));
+      if (pollinationsImageReferences.length) params.set("image", pollinationsImageReferences.join("|"));
       url = `${base}/image/${encodeURIComponent(prompt)}?${params}`;
     } else if (kind === "audio") {
       const params = new URLSearchParams({ response_format: "mp3", safe: "true" });
@@ -3363,10 +3409,18 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return data.url;
   }
 
-  async function makeImage(scene: Scene, index: number, run: number, characterGuide = "", outputAspect: "9:16" | "16:9" = aspect, promptOverride = "") {
+  async function makeImage(scene: Scene, index: number, run: number, characterGuide = "", outputAspect: "9:16" | "16:9" = aspect, promptOverride = "", references: MediaReference[] = []) {
     const prompt = promptOverride || `${frameVisualPrompt(style)}, one coherent scene rather than a comic page, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, correct anatomy and natural hands, layered foreground middle ground and background for camera motion, no typography, no speech bubbles, no panel borders`;
-    if (["openai", "pollinations", "webhook"].includes(agentConfigs.image.adapter)) return (await pollinationsMedia("image", prompt, index, { imageAspect: outputAspect })).url;
-    const task = await startHorde("image", { prompt, aspect: outputAspect, model: agentConfigs.image.model });
+    if (["openai", "pollinations", "webhook"].includes(agentConfigs.image.adapter)) return (await pollinationsMedia("image", prompt, index, { imageAspect: outputAspect, references })).url;
+    const referenceUrl = references.map((reference) => typeof reference === "string" ? reference : reference.url).find(Boolean) || "";
+    let sourceImage = "";
+    if (referenceUrl) {
+      const response = await fetch(referenceUrl);
+      if (!response.ok) throw new Error("Canonical 人物参考图读取失败，已停止免费生图以避免换脸");
+      const dataUrl = await blobToDataUrl(await response.blob());
+      sourceImage = dataUrl.replace(/^data:image\/[^;]+;base64,/i, "");
+    }
+    const task = await startHorde("image", { prompt, aspect: outputAspect, model: agentConfigs.image.model, sourceImage });
     const result = await pollHorde("image", task.id, run);
     const remote = String(result.imageUrl || "");
     const response = await fetch(`/api/media?url=${encodeURIComponent(remote)}`);
@@ -3895,16 +3949,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setStatusText(`正在建立人物造型资产 ${index + 1}/${cast.length}：${characterAssetNaming(character).displayName}`);
         cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
         publishCharacters(cast);
-        const characterPrompt = characterSheetPrompt(style, character);
+        const characterRequest = await characterGenerationRequest(character, cast);
+        const characterPrompt = characterRequest.prompt;
         if (agentConfigs.image.adapter !== "horde") {
-          const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9" });
+          const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9", references: characterRequest.references });
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : assetUploadKey ? await uploadPollinationsMedia(asset.blob, `character-${index + 1}.png`, assetUploadKey) : "";
           characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
           cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
         } else {
           const referenceScene: Scene = { id: uid(), title: character.name, visual: characterPrompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-          const imageUrl = await makeImage(referenceScene, 50 + index, run, "", "16:9", characterPrompt);
+          const imageUrl = await makeImage(referenceScene, 50 + index, run, "", "16:9", characterPrompt, characterRequest.references);
           characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
           cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
         }
@@ -4458,16 +4513,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setStatusText(`生图 AI 正在补跑角色资产 ${targetIndex + 1}/${missingCharacters.length}：${character.name}`);
           cast = cast.map((item) => item.id === character.id ? { ...item, status: "generating" as const } : item);
 	          publishCharacters(cast);
-          const prompt = characterSheetPrompt(style, character);
+          const characterRequest = await characterGenerationRequest(character, cast);
+          const prompt = characterRequest.prompt;
           if (agentConfigs.image.adapter !== "horde") {
-            const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9" });
+            const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9", references: characterRequest.references });
             const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
             const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-retry-${targetIndex + 1}.png`, uploadKey) : "";
 	            characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
 	            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
           } else {
             const referenceScene: Scene = { id: uid(), title: character.name, visual: prompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-            const imageUrl = await makeImage(referenceScene, 50 + targetIndex, run, "", "16:9", prompt);
+            const imageUrl = await makeImage(referenceScene, 50 + targetIndex, run, "", "16:9", prompt, characterRequest.references);
 	            characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
 	            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
           }
@@ -4486,7 +4542,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const castForScene = presentCast.length ? presentCast : cast.slice(0, 2);
           if (agentConfigs.image.adapter !== "horde") {
             const prompt = `${frameVisualPrompt(style)}, one coherent scene, exact identities and costumes from references, ${scene.shot}, ${scene.visual}, ${scene.action}, expressive face, natural anatomy and hands, layered depth, no text, no speech bubbles, no panel borders`;
-            const frame = await pollinationsMedia("image", prompt, sceneIndex, { references: castForScene.map((item) => item.remoteUrl).filter(Boolean) as string[] });
+            const frame = await pollinationsMedia("image", prompt, sceneIndex, { references: castForScene.map((item) => item.remoteUrl || item.imageUrl).filter(Boolean) as string[] });
             const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
             const remoteImageUrl = "remoteUrl" in frame && frame.remoteUrl ? frame.remoteUrl : uploadKey ? await uploadPollinationsMedia(frame.blob, `scene-${sceneIndex + 1}-retry.png`, uploadKey) : "";
             if (scene.imageUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.imageUrl);
@@ -5192,12 +5248,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           return;
         }
       }
-      const prompt = characterSheetPrompt(style, character);
+      const characterRequest = await characterGenerationRequest(character, characters);
+      const prompt = characterRequest.prompt;
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
       let generatedRemoteUrl = "";
       if (agentConfigs.image.adapter !== "horde") {
-        const asset = await pollinationsMedia("image", prompt, 700 + characters.findIndex((item) => item.id === character.id), { imageAspect: "16:9" });
+        const asset = await pollinationsMedia("image", prompt, 700 + characters.findIndex((item) => item.id === character.id), { imageAspect: "16:9", references: characterRequest.references });
         const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-blueprint-${character.id}.png`, uploadKey) : "";
         generatedUrl = asset.url;
@@ -5205,7 +5262,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         generatedRemoteUrl = remoteUrl;
       } else {
         const referenceScene: Scene = { id: uid(), title: character.name, visual: prompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-        generatedUrl = await makeImage(referenceScene, 700 + characters.findIndex((item) => item.id === character.id), run, "", "16:9", prompt);
+        generatedUrl = await makeImage(referenceScene, 700 + characters.findIndex((item) => item.id === character.id), run, "", "16:9", prompt, characterRequest.references);
         const response = await fetch(generatedUrl);
         if (response.ok) generatedBlob = await response.blob();
       }

@@ -160,7 +160,9 @@ export async function POST(request: Request) {
       const prompt = String(body.prompt || "").trim().slice(0, 1800);
       const aspect = body.aspect === "16:9" ? "16:9" : "9:16";
       const requestedModel = String(body.model || "").trim().slice(0, 160);
+      const sourceImage = String(body.sourceImage || "").trim();
       if (prompt.length < 8) return json({ error: "画面描述太短" }, 400);
+      if (sourceImage && (sourceImage.length > 12_000_000 || !/^[a-z0-9+/=\r\n]+$/i.test(sourceImage))) return json({ error: "人物身份参考图格式无效或文件过大" }, 400);
       const fullPrompt = [
         prompt,
         "cinematic Chinese manhua panel, professional composition, expressive characters, coherent anatomy, dramatic lighting, highly detailed, no text, no caption",
@@ -182,7 +184,9 @@ export async function POST(request: Request) {
             steps: 24,
             sampler_name: "k_euler_a",
             cfg_scale: 7,
+            ...(sourceImage ? { denoising_strength: 0.55 } : {}),
           },
+          ...(sourceImage ? { source_image: sourceImage, source_processing: "img2img" } : {}),
           nsfw: false,
           censor_nsfw: true,
           shared: true,
