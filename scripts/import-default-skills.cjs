@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS bootstrap script */
 const fs = require("node:fs");
 const path = require("node:path");
 

@@ -791,6 +791,11 @@ function seedanceParameterError(data, status) {
   return "";
 }
 
+function invalidSeedanceWebReference(error) {
+  const detail = String(error?.message || "");
+  return Number(error?.providerStatus) === 400 && /(reference_(?:video|audio)|video_url|audio_url).*(?:web\s*url|invalid|not valid|must be provided)|(?:web\s*url|invalid|not valid).*(reference_(?:video|audio)|video_url|audio_url)/i.test(detail);
+}
+
 function validSeedanceMediaUrl(value) {
   try {
     const target = new URL(String(value || ""));
@@ -900,19 +905,34 @@ async function invokeSeedance(input, fetchImpl = fetch) {
     if (inflight) return inflight;
     const createPromise = (async () => {
       let payload;
+      let submittedReferences = acceptedReferences;
       try {
-        payload = await seedanceProviderJson(SEEDANCE_ARK_API, {
-          method: "POST",
-          headers: { ...headers, "X-Manjing-Request-Id": requestId },
-          body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled })
-        }, "create", fetchImpl);
+        try {
+          payload = await seedanceProviderJson(SEEDANCE_ARK_API, {
+            method: "POST",
+            headers: { ...headers, "X-Manjing-Request-Id": requestId },
+            body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled })
+          }, "create", fetchImpl);
+        } catch (error) {
+          if (!invalidSeedanceWebReference(error) || !acceptedReferences.some((reference) => reference.kind === "video" || reference.kind === "audio")) throw error;
+          // A rejected HTTP 400 did not create a paid task. Retry once without
+          // the unusable expiring web video/audio while preserving canonical
+          // image assets and the full textual continuity contract.
+          const fallbackContent = content.filter((item) => item.type !== "video_url" && item.type !== "audio_url");
+          submittedReferences = acceptedReferences.filter((reference) => reference.kind === "image");
+          payload = await seedanceProviderJson(SEEDANCE_ARK_API, {
+            method: "POST",
+            headers: { ...headers, "X-Manjing-Request-Id": requestId },
+            body: JSON.stringify({ model, content: fallbackContent, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled })
+          }, "create", fetchImpl);
+        }
       } catch (error) {
         error.message = `${error.message}。漫镜请求编号：${requestId}`;
         error.requestId = requestId;
         throw error;
       }
       if (!payload?.id) throw Object.assign(new Error(`Seedance 没有返回任务编号：${seedanceErrorMessage(payload)}`), { statusCode: 502, retryable: false });
-      const result = { id: String(payload.id), requestId, status: "queued", acceptedReferences, ignoredReferences: Math.max(0, rawReferences.length - acceptedReferences.length) };
+      const result = { id: String(payload.id), requestId, status: "queued", acceptedReferences: submittedReferences, ignoredReferences: Math.max(0, rawReferences.length - submittedReferences.length), referenceFallback: submittedReferences.length < acceptedReferences.length };
       SEEDANCE_CREATE_CACHE.set(requestId, { expiresAt: Date.now() + 30 * 60 * 1000, payload: result });
       if (SEEDANCE_CREATE_CACHE.size > 80) for (const [key, value] of SEEDANCE_CREATE_CACHE) if (value.expiresAt <= Date.now()) SEEDANCE_CREATE_CACHE.delete(key);
       return result;

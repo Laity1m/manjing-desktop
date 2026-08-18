@@ -1,5 +1,7 @@
 "use strict";
 
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS test runner */
+
 const { readdirSync } = require("node:fs");
 const { join } = require("node:path");
 const { spawnSync } = require("node:child_process");

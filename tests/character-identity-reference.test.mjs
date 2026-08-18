@@ -30,10 +30,20 @@ test("approved identity references outrank pending alternatives and rejected fac
   assert.equal(selectCharacterIdentityReference(target, [pending, rejected, base])?.id, "base");
 });
 
+test("library identity anchors remain stable across app versions and outfit variants", async () => {
+  const { selectLibraryCharacterIdentityAnchor } = await loadReferenceModule();
+  const assets = [
+    { id: "new-look", name: "苏梨-战损版", identityKey: "苏梨", lookName: "战损版", category: "character", mediaType: "image", reusable: true, locked: true, canonical: true, assetState: "ready", createdAt: "2026-08-18T00:00:00.000Z" },
+    { id: "original-face", name: "苏梨-基础版", identityKey: "苏梨", lookName: "基础版", category: "character", mediaType: "image", reusable: true, locked: true, canonical: true, assetState: "ready", createdAt: "2026-01-01T00:00:00.000Z" },
+    { id: "other-person", name: "萧玦-基础版", identityKey: "萧玦", lookName: "基础版", category: "character", mediaType: "image", reusable: true, locked: true, canonical: true, assetState: "ready", createdAt: "2025-01-01T00:00:00.000Z" },
+  ];
+  assert.equal(selectLibraryCharacterIdentityAnchor("苏梨", assets)?.id, "original-face");
+});
+
 test("identity-lock prompt changes only the look while preserving exact facial geometry", async () => {
   const { characterIdentityLockInstruction } = await loadReferenceModule();
   const instruction = characterIdentityLockInstruction("苏梨", "夜间居家服", true);
-  assert.match(instruction, /LOCKED CANONICAL IDENTITY/);
+  assert.match(instruction, /PERMANENT CANONICAL FACE ANCHOR/);
   assert.match(instruction, /same person, not a similar casting/);
   assert.match(instruction, /Change only the episode look to 夜间居家服/);
 });

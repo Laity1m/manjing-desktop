@@ -112,10 +112,19 @@ export async function POST(request: Request) {
       const requestId = String(body.requestId || "").trim();
       const cached = requestId && /^[a-z0-9-]{8,80}$/i.test(requestId) ? createCache.get(requestId) : undefined;
       if (cached && cached.expiresAt > Date.now()) return json(cached.payload, 202);
-      const upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled }) }, "create");
-      const payload = await upstream.json().catch(() => ({ message: `Seedance 方舟接口返回了无法解析的内容（${upstream.status}）` })) as { id?: string; error?: { message?: unknown }; message?: unknown };
+      let submittedReferences = accepted;
+      let upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled }) }, "create");
+      let payload = await upstream.json().catch(() => ({ message: `Seedance 方舟接口返回了无法解析的内容（${upstream.status}）` })) as { id?: string; error?: { message?: unknown }; message?: unknown };
+      const referenceDetail = safeError(payload);
+      const invalidWebReference = upstream.status === 400 && /(reference_(?:video|audio)|video_url|audio_url).*(?:web\s*url|invalid|not valid|must be provided)|(?:web\s*url|invalid|not valid).*(reference_(?:video|audio)|video_url|audio_url)/i.test(referenceDetail);
+      if (!upstream.ok && invalidWebReference && accepted.some((reference) => reference.kind === "video" || reference.kind === "audio")) {
+        const fallbackContent = content.filter((item) => item.type !== "video_url" && item.type !== "audio_url");
+        submittedReferences = accepted.filter((reference) => reference.kind === "image");
+        upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content: fallbackContent, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled }) }, "create");
+        payload = await upstream.json().catch(() => ({ message: `Seedance 方舟接口返回了无法解析的内容（${upstream.status}）` }));
+      }
       if (!upstream.ok || !payload.id) return json({ error: safeError(payload) }, upstream.status || 502);
-      const result = { id: payload.id, status: "queued", acceptedReferences: accepted, ignoredReferences: Math.max(0, rawReferences.length - accepted.length) };
+      const result = { id: payload.id, status: "queued", acceptedReferences: submittedReferences, ignoredReferences: Math.max(0, rawReferences.length - submittedReferences.length), referenceFallback: submittedReferences.length < accepted.length };
       if (requestId && /^[a-z0-9-]{8,80}$/i.test(requestId)) {
         createCache.set(requestId, { expiresAt: Date.now() + 30 * 60 * 1000, payload: result });
         if (createCache.size > 80) for (const [key, value] of createCache) if (value.expiresAt <= Date.now()) createCache.delete(key);

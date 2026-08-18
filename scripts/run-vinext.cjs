@@ -1,5 +1,7 @@
 "use strict";
 
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS runtime shim */
+
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 

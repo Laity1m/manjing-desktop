@@ -11,7 +11,7 @@ test("seeds editable image-agent art direction and quality-gate skills for exist
   assert.match(presets, /id: "image-character-casting-beauty"/);
   assert.match(presets, /id: "image-reference-identity-lock"/);
   assert.match(presets, /id: "image-human-preference-quality-gate"/);
-  assert.match(store, /manjing-agent-preset-skills-v3/);
+  assert.match(store, /manjing-agent-preset-skills-v4/);
 });
 
 test("uses the concise editable defaults instead of appending the legacy full face skill", () => {

@@ -17,8 +17,9 @@ import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/cust
 import { createCanvasFromStudio } from "./lib/production-canvas";
 import { attachLibraryFileToPlaceholder, deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, saveLibraryPlaceholder, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
 import { findReusableLibraryAsset, normalizeAssetIdentity, normalizeAssetLook } from "./lib/asset-reuse";
-import { characterIdentityLockInstruction, selectCharacterIdentityReference } from "./lib/character-identity-reference";
+import { characterIdentityLockInstruction, selectCharacterIdentityReference, selectLibraryCharacterIdentityAnchor } from "./lib/character-identity-reference";
 import { videoConsistencyAccepted } from "./lib/consistency-gate";
+import { planSequentialVideo } from "./lib/sequential-video-flow";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
 import { fallbackScriptAssetManifest, localizedSceneDisplayName, parseScriptAssetManifest } from "./lib/script-asset-manifest";
 
@@ -42,7 +43,7 @@ async function archiveGeneratedAsset(url: string, name: string, category: Librar
   }
   const locked = Boolean(identityKey && ["character", "prop", "scene", "audio"].includes(category));
   const saved = await saveLibraryFile(file, { name: metadata.displayName, category, duration, tags: [...tags, archiveKey], identityKey, lookName: metadata.lookName, entityId: metadata.entityId, variantName: metadata.variantName, locked });
-  if (identityKey) await updateLibraryAsset(saved.id, { canonical: category === "prop", locked, reusable: true, identityKey, ...(metadata.lookName ? { lookName: metadata.lookName } : {}), ...(metadata.entityId ? { entityId: metadata.entityId } : {}), ...(metadata.variantName ? { variantName: metadata.variantName } : {}) });
+  if (identityKey) await updateLibraryAsset(saved.id, { canonical: category === "prop" || (category === "character" && tags.includes("用户批准")), locked, reusable: true, identityKey, ...(metadata.lookName ? { lookName: metadata.lookName } : {}), ...(metadata.entityId ? { entityId: metadata.entityId } : {}), ...(metadata.variantName ? { variantName: metadata.variantName } : {}) });
 }
 
 function autoArchive(url: string, name: string, category: LibraryAssetCategory, duration: number, tags: string[], metadata: GeneratedAssetMetadata = {}) {
@@ -295,8 +296,8 @@ function voiceReuseIdentity(scene: Scene, voiceName: string) {
   return `voice:${stableReuseToken([scene.speaker, voiceName, scene.emotion, scene.dialogue].join("|"))}`;
 }
 
-const CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v3";
-const CHARACTER_IMAGE_NEGATIVE_PROMPT = "low quality, poorly drawn face, incoherent facial proportions, generic cloned face, waxy plastic skin, excessive beauty filter, crossed eyes, deformed iris, bad anatomy, bad hands, extra fingers, duplicate body, cropped feet, text, logo, watermark";
+const CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v4";
+const CHARACTER_IMAGE_NEGATIVE_PROMPT = "low quality, ugly or uncanny face, incoherent facial proportions, generic cloned face, influencer same-face, pointed V-line jaw, oversized vacant eyes, swollen lips, waxy plastic skin, gray muddy skin, excessive beauty filter, stiff smile, crossed eyes, deformed iris, bad anatomy, bad hands, extra fingers, duplicate body, cropped feet, random jewelry, text, logo, watermark";
 
 const CURATED_FACE_DESIGNS = [
   "a refined oval facial structure with softly defined cheekbones; the primary memory feature is calm almond-shaped eyes, supported by a natural straight nose and a balanced relaxed mouth; a subtle beauty mark below one eye",
@@ -323,6 +324,12 @@ function characterAestheticDirection(styleName: string) {
   if (preset.category === "写实") return `DEFAULT AESTHETIC DIRECTION ${CHARACTER_AESTHETIC_VERSION}: premium feature-film casting appeal that remains faithful to age, role and lived experience; coherent facial proportions with one memorable primary feature and two quieter supporting features; natural asymmetry, believable bone structure, real skin texture, individually groomed hair and restrained role-appropriate makeup. Light the close-up with a large soft key 30 degrees camera-left, gentle eye catchlights, controlled fill and a subtle rim separation; use an eye-level 85mm portrait perspective with flattering but truthful facial geometry, clean exposure and restrained editorial color. Attractive means intentional, expressive and well-cast, never identical, airbrushed, influencer-like or youth-filtered`;
   if (/3D|三维|CG/i.test(`${styleName} ${preset.base}`)) return `DEFAULT AESTHETIC DIRECTION ${CHARACTER_AESTHETIC_VERSION}: high-end animation character appeal with a clear silhouette, harmonious large-medium-small shape rhythm, readable brow-eye-nose-mouth hierarchy and one memorable primary facial feature; sculpted planes transition cleanly, eyes have controlled size and focused catchlights, mouth corners and cheeks support nuanced acting, and the face remains rig-friendly from every angle. Use soft studio key light, clean fill and a restrained rim to reveal form and materials. Preserve age and role; avoid uncanny human skin, doll-like blankness, swollen rounded features, generic family-film sameness and over-cute proportions`;
   return `DEFAULT AESTHETIC DIRECTION ${CHARACTER_AESTHETIC_VERSION}: professional animation model-sheet appeal built from a distinctive readable silhouette, harmonious facial construction, one dominant memory feature, two supporting features, clear shape language and a controlled character-specific palette. Eyes, brows and mouth must support nuanced acting while staying anatomically coherent in this style. Preserve age and role; avoid generic template faces, same-face casting, random feature collisions, excessive cuteness, muddy color and noisy costume detail`;
+}
+
+function screenCastingBeautyContract(styleName: string) {
+  const preset = visualStyle(styleName);
+  const medium = preset.category === "写实" ? "feature-film casting" : preset.category === "动画" ? "premium animation character design" : "illustrative character design";
+  return `SCREEN-APPEAL CONTRACT: create a ${medium} that audiences can recognize and enjoy watching for many episodes. “Good-looking” means harmonious facial proportions, focused lively eyes, a relaxed expressive mouth, clean face-to-hair silhouette, healthy role-appropriate complexion, coherent grooming, flattering truthful light, and one memorable feature; it never means an interchangeable influencer face. Preserve story-required age, ethnicity, fatigue, scars, body type and social identity. Use a restrained character-specific palette and remove decorative noise that competes with the face.`;
 }
 
 function firstDialogueForCharacter(script: string, characterName: string) {
@@ -591,7 +598,9 @@ function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset,
   const look = characterAssetNaming(character).lookName;
   const aesthetic = configuredImageSkillPrompt("character");
   if (aesthetic.ids.length) markContextUsed(aesthetic.ids);
-  return `PURPOSE: professional 16:9 production character identity-and-outfit sheet for ${identity}, not a beauty advertisement. SUBJECT: ${identity}; role: ${character.role}; current episode look/state: ${look}; episode scope: ${character.episodeScope || "current episode"}; script-grounded appearance: ${character.appearance}. STYLE: ${characterVisualPrompt(styleName)}. 默认人物审美指令（优先执行）：${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"} ${characterAestheticDirection(styleName)}. UNIQUE CAST DESIGN ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. Preserve the character's script-required age, ethnicity, body type, injuries, fatigue, wealth or health state; role-appropriate screen appeal must never erase story information. This is an outfit/state asset for the same canonical person ${identity}: preserve the exact same facial geometry and body identity across all of ${identity}'s looks, while strictly rendering this asset's ${look} costume, grooming, state and accessories. Never borrow another outfit variant unless explicitly listed in this look. Treat this facial geometry as a hard biometric design constraint. This person must not share a generic model face, eye shape, jaw, nose, mouth, cheek structure or beauty-filter proportions with any other cast member; do not create lookalikes or near-twins unless the script explicitly says they are related. COMPOSITION: pure seamless light-gray cyclorama background. The far-left identity portrait is a large, sharp, eye-level strict frontal close-up: head yaw 0 degrees, pitch 0 degrees, roll 0 degrees, face centered, both eyes looking directly into the camera, both eyebrows and both sides of the jaw equally visible, neutral relaxed expression. Absolutely no profile, side face, three-quarter view, tilted head, raised or lowered chin, looking away, hair covering an eye, hand near face, prop or facial occlusion in the identity portrait. To the right, show exact front, side and back full-body outfit turnarounds from head to toe. Preserve the exact head silhouette, hairstyle, hair color, body proportions, costume, accessories, footwear and socks. Use a clean background-colored neutral matte only over the facial-feature skin area of the smaller front and side full-body views so they cannot introduce alternate facial identities; keep hair, skull silhouette, ears, neck and clothing visible. Calm natural standing posture, arms relaxed, empty hands. OUTPUT QUALITY: intentional production design, clean value hierarchy, refined color harmony, coherent anatomy, crisp eyes and hair, believable material separation, no props, scenery, furniture, text, labels, decorative frame, facial occlusion, tilted head, cropped feet or alternate face. 构图硬性要求：最左侧大头照必须平视、严格正脸、双眼直视镜头，光线通透且能清楚塑造五官；不同人物必须是成套协调设计，拥有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感和主要记忆点，禁止随机拼凑五官，也禁止只换发型服装的同脸复制。同一人物的不同造型必须保持同一张脸，但严格按当前“${look}”出服装和状态。右侧只负责服装和身材的正面、侧面、背面三视图。`;
+  return `Create one polished 16:9 production character reference for ${identity}, role: ${character.role}. Current episode look: ${look}. Script facts: ${character.appearance}. Visual medium: ${characterVisualPrompt(styleName)}. ${screenCastingBeautyContract(styleName)} ${characterAestheticDirection(styleName)}. Curated facial design ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. ${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"}
+
+Composition: a clean two-view casting sheet on a seamless warm light-gray studio background. On the left, one large eye-level strict frontal head-and-shoulders portrait with neutral relaxed expression, direct focused gaze, both eyes and both jaw sides fully visible, soft 30-degree key light and small natural catchlights. On the right, one head-to-toe front view in the exact ${look} costume, relaxed posture and empty hands. Both views are unquestionably the same person with identical facial geometry, age, skin tone, hairline and hairstyle. Keep the face large, sharp and unobstructed. Use clean value hierarchy, refined color harmony, believable materials and natural anatomy. No side/back face, alternate face, head tilt, hair over an eye, hand near face, props, scenery, furniture, text, labels, decorative frame or cropped feet. Different cast members must differ in skull silhouette, eyes, nose, mouth, brows, age rhythm and primary memory feature; this same identity must never change face between outfits.`;
 }
 
 function isVisualCharacterAsset(character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
@@ -1269,7 +1278,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const runtimeShotReuseRef = useRef(new Map<string, string>());
   const runtimeVoiceReuseRef = useRef(new Map<string, { url: string; duration: number }>());
   const canonicalVoiceAudioRef = useRef(new Map<string, string>());
-  const canonicalStyleImageRef = useRef("");
   const videoAssetPreflightRef = useRef(new Set<string>());
   const sceneReviewPatchesRef = useRef(new Map<string, Partial<Scene>>());
   const characterReviewPatchesRef = useRef(new Map<string, Partial<CharacterAsset>>());
@@ -1306,17 +1314,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const url = await prepareCharacterIdentityReference(inMemory.remoteUrl || inMemory.imageUrl || "", identity);
       if (url) return { url, source: characterAssetNaming(inMemory).displayName };
     }
-    const projectId = activeAssetProjectId();
     const library = await listLibraryAssets({ allProjects: true });
-    const match = findReusableLibraryAsset(library, {
-      category: "character",
-      identityKey: identity,
-      lookName: characterLook(character),
-      projectId,
-      mediaType: "image",
-      allowCrossProject: true,
-      allowLookFallback: true,
-    });
+    const match = selectLibraryCharacterIdentityAnchor(identity, library);
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
     if (!loaded?.url) return null;
@@ -3003,7 +3002,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       scene: { id: scene.environmentKey || scene.title, bible: scene.environmentBible || scene.visual },
       props,
       continuityReference: scene.remoteImageUrl || "",
-      previousTailReference: previousScene?.remoteImageUrl || previousScene?.videoEndFrameUrl || "",
+      previousApprovedVideoReference: previousScene?.videoReviewDecision === "approved" ? previousScene.remoteVideoUrl || "" : "",
     };
     const deterministic = `${styleBible} ${performanceLock} ${priorFailureConstraints} Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue blocking and physical state from the previous shot end frame: ${previousScene.endState || previousScene.action}. Preserve screen position, depth, facing direction, hand occupancy and prop position unless the action visibly changes it.` : "This is the opening shot."} Continuity rule: ${continuityRule} Current action: ${scene.action}. Camera choreography: ${cameraPlan}. Execute the action in three readable phases: settle, one motivated action, settle. Use restrained breathing, stable hair and cloth amplitude, smooth camera speed, matching exposure, contrast, saturation and light direction. Locked props: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state for the next shot"}. ${vocalDirection} One continuous cinematic shot, no unintended cuts, no subtitles. ${physicalContinuity} Avoid: ${styleNegative}.`;
     const config = agentConfigs.prompt;
@@ -3029,67 +3028,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     } catch (reason) {
       recordActivity("prompt", `镜头总控接口未完成，已安全降级到本地提示词编译：${reason instanceof Error ? reason.message : "未知错误"}`, "warning");
       return `${deterministic} Voice direction: ${vocalDirection}`;
-    }
-  }
-
-  async function legacyVideoReferences(scene: Scene, previousScene?: Scene) {
-    const cast = charactersForScene(characters, scene).filter(isVisualCharacterAsset);
-    const previousTail = [previousScene?.remoteImageUrl, previousScene?.imageUrl].filter((value): value is string => Boolean(value));
-    const currentAnchors = [scene.remoteImageUrl, scene.imageUrl, ...cast.flatMap((character) => [character.remoteUrl, character.imageUrl])].filter((value): value is string => Boolean(value));
-    const trustedPortraits = agentConfigs.video.adapter === "seedance" ? cast
-      .filter((character) => character.arkAssetId && character.portraitAuthorizationStatus === "authorized")
-      .map((character) => `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`) : [];
-    const trustedVoices: string[] = [];
-    const entityReferences: string[] = [];
-    try {
-      const projectId = activeAssetProjectId();
-      const library = (await listLibraryAssets({ allProjects: true })).filter((asset) => !asset.projectId || asset.scope === "global" || asset.projectId === projectId);
-      const propNames = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
-      const environmentIdentity = (scene.environmentKey || scene.title).toLocaleLowerCase("zh-CN");
-      const candidates = library.filter((asset) => {
-        if (asset.mediaType !== "image" || asset.reusable === false) return false;
-        const searchable = `${asset.name} ${asset.identityKey || ""} ${asset.lookName || ""} ${asset.tags.join(" ")}`.toLocaleLowerCase("zh-CN");
-        if (asset.category === "character") return cast.some((character) => {
-          const identity = characterIdentity(character).toLocaleLowerCase("zh-CN");
-          const look = characterLook(character).toLocaleLowerCase("zh-CN");
-          const assetIdentity = String(asset.identityKey || "").trim().toLocaleLowerCase("zh-CN");
-          const assetLook = String(asset.lookName || "").trim().toLocaleLowerCase("zh-CN");
-          return assetIdentity ? assetIdentity === identity && (!assetLook || assetLook === look) : searchable.includes(characterAssetNaming(character).displayName.toLocaleLowerCase("zh-CN"));
-        });
-        if (asset.category === "scene") return Boolean(environmentIdentity && searchable.includes(environmentIdentity));
-        if (asset.category === "prop") return propNames.some((name) => searchable.includes(name.toLocaleLowerCase("zh-CN")));
-        return false;
-      }).sort((a, b) => Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || (b.usageCount || 0) - (a.usageCount || 0)).slice(0, 6);
-      const loadedEntities = await loadLibraryAssets(candidates.map((asset) => asset.id));
-      for (const entity of loadedEntities) {
-        if (!entity.url) continue;
-        const response = await fetch(entity.url);
-        if (!response.ok) continue;
-        const dataUrl = await blobToDataUrl(await response.blob());
-        if (dataUrl.startsWith("data:image/")) entityReferences.push(dataUrl);
-      }
-      await Promise.all(candidates.map((asset) => markLibraryAssetUsed(asset.id)));
-      const voiceAssets = library.filter((asset) => asset.category === "audio" && asset.reusable !== false && scene.characters.some((name) => `${asset.identityKey || ""} ${asset.name} ${asset.tags.join(" ")}`.includes(name))).slice(0, 3);
-      const loadedVoices = await loadLibraryAssets(voiceAssets.map((asset) => asset.id));
-      for (const voice of loadedVoices) {
-        if (!voice.url) continue;
-        const response = await fetch(voice.url);
-        if (!response.ok) continue;
-        const dataUrl = await blobToDataUrl(await response.blob());
-        if (dataUrl.startsWith("data:audio/")) trustedVoices.push(dataUrl);
-      }
-      await Promise.all(voiceAssets.map((asset) => markLibraryAssetUsed(asset.id)));
-    } catch { /* voice reference is optional */ }
-    const orderedReferences = [...previousTail, ...trustedPortraits, ...currentAnchors, ...entityReferences, ...trustedVoices];
-    if (!scene.imageUrl) return [...new Set(orderedReferences)].slice(0, 10);
-    try {
-      const response = await fetch(scene.imageUrl);
-      if (!response.ok) return [...new Set(orderedReferences)].slice(0, 10);
-      const normalized = await normalizeImageBlobForAspect(await response.blob(), aspect);
-      const dataUrl = await blobToDataUrl(normalized);
-      return [...new Set(dataUrl.startsWith("data:image/") ? [...orderedReferences, dataUrl] : orderedReferences)].slice(0, 10);
-    } catch {
-      return [...new Set(orderedReferences)].slice(0, 10);
     }
   }
 
@@ -3154,7 +3092,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       const characterUrl = await usableReferenceUrl(character.remoteUrl || character.imageUrl);
       if (characterUrl) {
-        if (!canonicalStyleImageRef.current) canonicalStyleImageRef.current = character.remoteUrl || character.imageUrl || "";
         pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `Canonical 人物造型：${characterAssetNaming(character).displayName}` });
       }
     }
@@ -3171,9 +3108,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (sceneUrl) pushReference({ kind: "image", role: "reference_image", url: sceneUrl, name: `Canonical 空场景：${canonicalSceneAsset.name}（${canonicalSceneAsset.environmentKey}）` });
     }
 
-    const styleAnchor = await usableReferenceUrl(canonicalStyleImageRef.current);
-    if (styleAnchor) pushReference({ kind: "image", role: "reference_image", url: styleAnchor, name: `全片固定风格：${style}` });
-
     try {
       const projectId = activeAssetProjectId();
       const library = (await listLibraryAssets({ allProjects: true })).filter((asset) => !asset.projectId || asset.scope === "global" || asset.projectId === projectId);
@@ -3181,15 +3115,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const candidates = library.filter((asset) => {
         if (asset.mediaType !== "image" || asset.reusable === false) return false;
         const searchable = `${asset.name} ${asset.identityKey || ""} ${asset.lookName || ""} ${asset.tags.join(" ")}`.toLocaleLowerCase("zh-CN");
-        if (asset.category === "character") return cast.some((character) => {
-          const identity = characterIdentity(character).toLocaleLowerCase("zh-CN");
-          const look = characterLook(character).toLocaleLowerCase("zh-CN");
-          const assetIdentity = String(asset.identityKey || "").trim().toLocaleLowerCase("zh-CN");
-          const assetLook = String(asset.lookName || "").trim().toLocaleLowerCase("zh-CN");
-          return assetIdentity ? assetIdentity === identity && (!assetLook || assetLook === look) : searchable.includes(characterAssetNaming(character).displayName.toLocaleLowerCase("zh-CN"));
-        });
-        if (asset.category === "scene") return Boolean(environmentIdentity && searchable.includes(environmentIdentity));
-        if (asset.category === "prop") return propNames.some((name) => searchable.includes(name.toLocaleLowerCase("zh-CN")));
+        // Current character, scene and prop cards were already added above as
+        // the single authority for each semantic role. Adding historical
+        // library duplicates here lets multiple faces/outfit revisions compete
+        // in one Seedance request and is a major source of identity blending.
+        if (asset.category === "character") return false;
+        if (asset.category === "scene") return !canonicalSceneAsset && Boolean(environmentIdentity && searchable.includes(environmentIdentity));
+        if (asset.category === "prop") return propNames.some((name) => !propOverride.some((prop) => prop.name === name && Boolean(prop.remoteUrl || prop.imageUrl)) && searchable.includes(name.toLocaleLowerCase("zh-CN")));
         return false;
       }).sort((a, b) => Number(videoAssetPreflightRef.current.has(b.id)) - Number(videoAssetPreflightRef.current.has(a.id)) || Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || (b.usageCount || 0) - (a.usageCount || 0)).slice(0, 8);
       const loadedEntities = await loadLibraryAssets(candidates.map((asset) => asset.id));
@@ -3298,7 +3230,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }),
       }, "创建 Seedance 视频任务", 1);
       if (!created.ok) throw new Error(await responseError(created));
-      const task = await created.json() as { id?: string; requestId?: string; acceptedReferences?: Array<{ kind: string; role: string; name: string }> };
+      const task = await created.json() as { id?: string; requestId?: string; acceptedReferences?: Array<{ kind: string; role: string; name: string }>; referenceFallback?: boolean };
       if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
       if (task.acceptedReferences?.length) {
         const firstFrameCount = task.acceptedReferences.filter((reference) => reference.role === "first_frame").length;
@@ -3306,6 +3238,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const lockedAssetCount = task.acceptedReferences.filter((reference) => reference.role === "reference_image").length;
         recordActivity("video", `Seedance 已按无首帧全能参考模式接收 ${task.acceptedReferences.length} 项素材：${lockedAssetCount} 项人物/场景/道具资产已绑定`, "done");
       }
+      if (task.referenceFallback) recordActivity("video", "上一镜视频或音色公网地址已失效；方舟明确拒绝后，漫镜仅重提一次人物、场景、道具 Canonical 图片与完整状态提示词，当前镜头继续生成", "warning");
       taskId = task.id;
       window.localStorage.setItem("manjing-seedance-last-request-v146", JSON.stringify({ requestId: task.requestId || requestId, taskId, model: config.model, scene: options.resumeKey || "", createdAt: Date.now(), status: "created" }));
       saveSeedancePendingTask(resumeKey, { id: taskId, model: config.model, createdAt: Date.now(), promptSignature });
@@ -3553,7 +3486,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       ...castForScene.slice(0, 3).map((character) => consistencyImage(character.imageUrl || "", `Canonical角色：${character.name}`)),
       scene.imageUrl && scene.imageUrl !== imageUrl ? consistencyImage(scene.imageUrl, "本镜已批准视觉参考") : Promise.resolve(null),
       previousScene?.remoteImageUrl || previousScene?.imageUrl ? consistencyImage(previousScene.remoteImageUrl || previousScene.imageUrl || "", "上一镜通过审核的结束画面") : Promise.resolve(null),
-      canonicalStyleImageRef.current ? consistencyImage(canonicalStyleImageRef.current, `Canonical全片风格：${style}`) : Promise.resolve(null),
     ])).filter(Boolean).slice(0, 7) as Array<{ url: string; label: string }>;
     try {
       const aestheticGate = configuredImageSkillPrompt("quality");
@@ -4649,8 +4581,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         setPhase("video");
         let work = scenes.map((scene) => ({ ...scene }));
         await preflightReusableVideoAssets(work, characters);
-        let targets = work.filter((scene) => !scene.videoUrl || scene.status === "error").map((scene) => scene.id);
-        if (!targets.length) {
+        const sequentialPlan = planSequentialVideo(work);
+        if (sequentialPlan.kind === "review") {
+          setSelected(sequentialPlan.index);
+          setStatusText(`请先审核第 ${sequentialPlan.index + 1} 个分镜，批准或修改后再生成下一镜`);
+          setPhase("ready");
+          return;
+        }
+        let targets = sequentialPlan.kind === "generate" ? [sequentialPlan.sceneId] : [];
+        if (sequentialPlan.kind === "complete") {
           const fallback = work[selected] || work[0];
           if (fallback) targets = [fallback.id];
         }
@@ -4892,7 +4831,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setSceneAction({ id: scene.id, type: "video" });
     setError("");
     try {
-      const frames = await extractVideoContinuityFrames(scene.candidateVideoUrl, scene);
+      let frames = { start: scene.videoStartFrameUrl || "", middle: scene.videoPosterUrl || "", end: scene.videoEndFrameUrl || "" };
+      if (!frames.start && !frames.middle && !frames.end) {
+        try {
+          const extracted = await withStageTimeout(extractVideoContinuityFrames(scene.candidateVideoUrl, scene), 20000, "视频质检帧补取等待超过 20 秒");
+          frames = { start: extracted.start, middle: extracted.middle, end: extracted.end };
+        } catch (reason) {
+          recordActivity("video", `“${scene.title}”已批准；质检缩略图补取失败但不再阻塞下一镜：${reason instanceof Error ? reason.message : "视频解码器不可用"}`, "warning");
+        }
+      }
       let approvedAssetId = scene.candidateVideoAssetId;
       if (approvedAssetId) {
         const candidateMetadata = (await listLibraryAssets({ allProjects: true })).find((asset) => asset.id === approvedAssetId);
@@ -4921,7 +4868,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         await extractGeneratedVideoVoice(scene, scene.candidateVideoUrl).catch((reason) => { recordActivity("voice", `“${scene.title}”批准后音色提取失败：${reason instanceof Error ? reason.message : "音轨不可读"}`, "warning"); return null; });
       }
       recordActivity("director", `“${scene.title}”待复核候选已由用户人工批准并进入成片`, "warning");
-      setStatusText(`“${scene.title}”已批准，正在准备生成下一分镜`);
+      const nextPlan = planSequentialVideo(scenes.map((item) => item.id === scene.id ? { ...item, videoUrl: scene.candidateVideoUrl, candidateVideoUrl: undefined, videoReviewDecision: "approved" as const, status: "ready" } : item));
+      setStatusText(nextPlan.kind === "generate" ? `“${scene.title}”已批准，正在生成第 ${nextPlan.index + 1} 镜` : `“${scene.title}”已批准，全部镜头视频已完成`);
       setSequentialResumeToken((value) => value + 1);
     } catch (reason) {
       setError(reason instanceof Error ? `候选视频处理失败：${reason.message}` : "候选视频处理失败");
@@ -6174,11 +6122,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const pendingAudioReviews = scenes.filter((item) => item.audioUrl && item.audioReviewDecision === "pending");
   const pendingMusicReviews = musicUrl && musicReviewDecision === "pending" ? 1 : 0;
   const pendingReviewCount = pendingCharacterReviews.length + pendingImageReviews.length + pendingVideoReviews.length + pendingAudioReviews.length + pendingMusicReviews;
+  const sequentialVideoPlan = planSequentialVideo(scenes);
 
   useEffect(() => {
     if (!sequentialResumeToken) return;
-    const timeout = window.setTimeout(() => { void generateAll(); }, 120);
+    const timeout = window.setTimeout(() => {
+      const nextPlan = planSequentialVideo(scenes);
+      if (nextPlan.kind === "review") return;
+      if (nextPlan.kind === "generate") void rerunRole("video");
+      else void generateAll();
+    }, 250);
     return () => window.clearTimeout(timeout);
+    // Only an approval token may start another paid generation. Depending on
+    // scene/function identities here would replay the request on ordinary renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sequentialResumeToken]);
 
   return (
@@ -6395,7 +6352,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑</small></button>
           {busy && <button className="cancel-button" onClick={cancelGeneration}>{phase === "exporting" ? "停止合成" : "停止"}</button>}
         </div>
-        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{error && failedRole && <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
+        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{error && failedRole && <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button>}{!error && nativeVideoEnabled && phase === "ready" && sequentialVideoPlan.kind === "generate" && <button type="button" className="job-retry-button" onClick={() => void rerunRole("video")} disabled={busy}>继续生成第 {sequentialVideoPlan.index + 1} 镜</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
         {(activityLog.length > 0 || busy) && <div className="workflow-monitor">
           <div className="workflow-heading"><div><b>AI 制作现场</b><span>每个岗位正在做什么、用了哪个模型、交付了什么，都实时记录</span></div><em>{busy ? "制作直播中" : "本次流程已保存"}</em></div>
           <div className="workflow-roles">{AGENT_ROLES.map((role) => {

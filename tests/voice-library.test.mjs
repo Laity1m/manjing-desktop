@@ -33,7 +33,8 @@ test("pauses after every generated shot for approve-or-revise review", () => {
 
 test("enforces distinct cast faces and varied motivated camera choreography", () => {
   assert.match(studio, /characterFaceSignature/);
-  assert.match(studio, /must not share a generic model face/);
+  assert.match(studio, /Different cast members must differ in skull silhouette/);
+  assert.match(studio, /generic cloned face/);
   assert.match(studio, /cinematicCameraPlan/);
   assert.match(studio, /肩后横移/);
   assert.match(studio, /弧形环绕/);
@@ -44,7 +45,7 @@ test("reuses canonical voice audio in TTS and multimodal video references", () =
   assert.match(studio, /role: "reference_audio"/);
   assert.match(studio, /referenceText: voiceReference\?\.referenceText/);
   assert.match(studio, /全模态视频将优先引用/);
-  assert.match(studio, /voiceAssets = library\.filter/);
+  assert.match(studio, /voiceAssets = canonicalVoiceReference \? \[\] : library\.filter/);
 });
 
 test("ships an auditable voice library and optional video-to-MP3 extraction", () => {

@@ -116,7 +116,8 @@ test("retries timed-out AI departments without clearing completed upstream asset
   assert.match(source, /免费导演 AI 正在排队复核/);
   assert.doesNotMatch(source, /recordActivity\("director", "免费导演未及时交稿/);
   assert.match(source, /filter\(\(scene\) => !scene\.imageUrl \|\| scene\.status === "error"\)/);
-  assert.match(source, /filter\(\(scene\) => !scene\.videoUrl \|\| scene\.status === "error"\)/);
+  assert.match(source, /const sequentialPlan = planSequentialVideo\(work\)/);
+  assert.match(source, /sequentialPlan\.kind === "generate" \? \[sequentialPlan\.sceneId\] : \[\]/);
   assert.match(source, /filter\(\(scene\) => scene\.dialogue\.trim\(\) && \(!scene\.audioUrl \|\| scene\.status === "error"\)\)/);
   assert.match(source, /recordActivity\(activeRole,/);
   assert.match(source, /sceneActionRef\.current/);
@@ -135,10 +136,10 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /references: await videoReferences\(scene, previousScene/);
   assert.match(page, /canvas\.toBlob\(resolve, "image\/jpeg", 0\.94\)/);
   assert.match(page, /function characterSheetPrompt/);
-  assert.match(page, /最左侧大头照必须平视、严格正脸/);
-  assert.match(page, /右侧只负责服装和身材的正面、侧面、背面三视图/);
+  assert.match(page, /one large eye-level strict frontal head-and-shoulders portrait/);
+  assert.match(page, /one head-to-toe front view in the exact \$\{look\} costume/);
   assert.match(page, /imageAspect: "16:9"/);
-  assert.match(page, /professional 16:9 production character identity-and-outfit sheet/);
+  assert.match(page, /Create one polished 16:9 production character reference/);
   assert.match(page, /missingCharacters = cast\.filter\(\(character\) => isVisualCharacterAsset\(character\) && !character\.imageUrl\)/);
   assert.doesNotMatch(page, /character\.sheetVersion !== 2/);
   assert.match(page, /sheetVersion: 2 as const/);

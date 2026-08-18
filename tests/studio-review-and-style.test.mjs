@@ -39,11 +39,12 @@ test("imported scripts create editable asset skeletons before any image generati
 });
 
 test("all character generation paths use the concise default aesthetic director", () => {
-  assert.match(source, /CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v3"/);
+  assert.match(source, /CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v4"/);
   assert.match(source, /const CURATED_FACE_DESIGNS = \[/);
   assert.match(source, /one memorable primary feature and two quieter supporting features/);
   assert.match(source, /harmonious large-medium-small shape rhythm/);
-  assert.match(source, /禁止随机拼凑五官/);
+  assert.match(source, /SCREEN-APPEAL CONTRACT/);
+  assert.match(source, /clean two-view casting sheet/);
   assert.match(source, /negative_prompt", CHARACTER_IMAGE_NEGATIVE_PROMPT/);
   assert.doesNotMatch(source, /Enabled Image Agent Skill/);
 });

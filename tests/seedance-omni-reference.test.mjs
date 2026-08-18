@@ -103,3 +103,32 @@ test("Seedance drops local video/audio references that Ark cannot fetch as web U
   assert.equal(media.some((item) => String(item.video_url?.url || "").startsWith("data:")), false);
   assert.equal(result.ignoredReferences, 2);
 });
+
+test("Seedance retries one rejected web reference as canonical-image-only without duplicating a paid task", async () => {
+  const bodies = [];
+  let calls = 0;
+  const result = await invokeSeedance({
+    action: "create",
+    requestId: "expired-reference-fallback-test",
+    apiKey: "test-seedance-key",
+    model: "doubao-seedance-2-0-260128",
+    prompt: "上一镜公网地址失效时仍按人物和场景资产生成下一镜",
+    references: [
+      { kind: "video", role: "reference_video", url: "https://media.volces.com/expired.mp4", name: "上一镜" },
+      { kind: "audio", role: "reference_audio", url: "https://media.volces.com/expired.wav", name: "音色" },
+      { kind: "image", role: "reference_image", url: "https://media.volces.com/character.jpg", name: "Canonical人物" },
+    ],
+  }, async (_url, init) => {
+    calls += 1;
+    bodies.push(JSON.parse(String(init.body)));
+    if (calls === 1) return new Response(JSON.stringify({ error: { message: "reference_video must be provided as a web url" } }), { status: 400 });
+    return new Response(JSON.stringify({ id: "cgt-referencefallback1" }), { status: 200 });
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.id, "cgt-referencefallback1");
+  assert.equal(result.referenceFallback, true);
+  assert.deepEqual(bodies[0].content.filter((item) => item.type !== "text").map((item) => item.role), ["reference_video", "reference_audio", "reference_image"]);
+  assert.deepEqual(bodies[1].content.filter((item) => item.type !== "text").map((item) => item.role), ["reference_image"]);
+  assert.deepEqual(result.acceptedReferences.map((item) => item.role), ["reference_image"]);
+});
