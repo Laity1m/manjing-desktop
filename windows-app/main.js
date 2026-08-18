@@ -784,12 +784,16 @@ app.whenReady().then(async () => {
   try {
     if (isSmokeTest) {
       let attempts = 0;
-      const recovered = await invokeImageModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "test", model: "gpt-image-smoke", prompt: "测试瞬时断线重试", aspect: "9:16" }, async () => {
-        attempts += 1;
-        if (attempts < 3) return new Response(JSON.stringify({ error: { message: "upstream connection termination" } }), { status: 503, headers: { "Retry-After": "0" } });
-        return new Response(JSON.stringify({ data: [{ b64_json: "aW1hZ2U=" }] }), { status: 200 });
-      });
-      if (attempts !== 3 || recovered.dataUrl !== "data:image/png;base64,aW1hZ2U=") throw new Error("生图接口瞬时断线重试自检失败");
+      let generationError = null;
+      try {
+        await invokeImageModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "test", model: "gpt-image-smoke", prompt: "测试生图创建请求不重复提交", aspect: "9:16" }, async () => {
+          attempts += 1;
+          return new Response(JSON.stringify({ error: { message: "upstream connection termination" } }), { status: 503, headers: { "Retry-After": "0" } });
+        });
+      } catch (error) {
+        generationError = error;
+      }
+      if (attempts !== 1 || Number(generationError?.statusCode) !== 503) throw new Error("生图创建请求单次提交保护自检失败");
       const volcengineSdk = volcengineSdkStatus();
       if (!volcengineSdk.installed || volcengineSdk.version !== "1.36.2" || !volcengineSdk.signerReady) {
         throw new Error(`火山引擎 SDK 内置自检失败：${volcengineSdk.note}`);

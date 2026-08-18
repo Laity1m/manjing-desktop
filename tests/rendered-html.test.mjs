@@ -674,7 +674,8 @@ test("Windows app directly loads the bundled app without an iframe or local web 
   assert.match(main, /MANJING_VIDEO_AUDIO_OK/);
   assert.match(main, /MANJING_STUDIO_VOICE_OK/);
   assert.match(main, /render-process-gone/);
-  assert.match(main, /生图接口瞬时断线重试自检失败/);
+  assert.match(main, /生图创建请求单次提交保护自检失败/);
+  assert.match(main, /attempts !== 1/);
   assert.match(main, /protocol\.handle\(APP_SCHEME, runtime\.handle\)/);
   assert.match(main, /mainWindow\.loadURL\(initialUrl\)/);
   assert.doesNotMatch(main, /loadFile\(|shell\.html|iframe|127\.0\.0\.1|chatgpt\.site/);
