@@ -1,6 +1,6 @@
 "use client";
 
-import { appendSeriesProductionRecord } from "./lib/series-project";
+import { appendSeriesProductionRecord, isGenericNonAssetCharacter, isNonCharacterLabel } from "./lib/series-project";
 
 import StudioProjectBinding from "./components/StudioProjectBinding";
 
@@ -84,6 +84,8 @@ type CharacterAsset = {
   sceneHints?: string[];
   role: string;
   appearance: string;
+  visualEvidence?: string;
+  requiresVisualAsset?: boolean;
   voice: string;
   needsVoice?: boolean;
   firstDialogue?: string;
@@ -220,6 +222,7 @@ function characterAssetKey(character: CharacterAsset) {
 function deduplicateCharacterAssets(items: CharacterAsset[]) {
   const unique = new Map<string, CharacterAsset>();
   for (const item of items) {
+    if (!isVisualCharacterAsset(item)) continue;
     const key = characterAssetKey(item);
     const existing = unique.get(key);
     if (!existing) {
@@ -287,14 +290,34 @@ function voiceReuseIdentity(scene: Scene, voiceName: string) {
   return `voice:${stableReuseToken([scene.speaker, voiceName, scene.emotion, scene.dialogue].join("|"))}`;
 }
 
+const CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v3";
+const CHARACTER_IMAGE_NEGATIVE_PROMPT = "low quality, poorly drawn face, incoherent facial proportions, generic cloned face, waxy plastic skin, excessive beauty filter, crossed eyes, deformed iris, bad anatomy, bad hands, extra fingers, duplicate body, cropped feet, text, logo, watermark";
+
+const CURATED_FACE_DESIGNS = [
+  "a refined oval facial structure with softly defined cheekbones; the primary memory feature is calm almond-shaped eyes, supported by a natural straight nose and a balanced relaxed mouth; a subtle beauty mark below one eye",
+  "a compact soft-square facial structure with a clean jaw and gentle cheek volume; the primary memory feature is expressive deep-set eyes, supported by a broad natural nose and a wide restrained mouth; one faint eyebrow notch",
+  "an elegant heart-shaped facial structure with a defined but not pointed chin; the primary memory feature is slightly upturned hooded eyes, supported by a softly sculpted nose and a clear cupid's-bow lip line; naturally asymmetric brows",
+  "a youthful round-oval facial structure with smooth transitions through the cheek and jaw; the primary memory feature is bright wide-set eyes, supported by a softly rounded nose and balanced full lips; light freckles across the nose",
+  "a mature oblong facial structure with a composed forehead-to-jaw rhythm; the primary memory feature is a strong thoughtful brow and narrow eyes, supported by a subtly aquiline nose and a straight expressive mouth; a distinct widow's peak",
+  "a high-cheekbone diamond facial structure with a graceful tapered jaw; the primary memory feature is elongated monolid eyes, supported by a low natural bridge and a small controlled mouth; a subtle chin cleft",
+  "a broad oval facial structure with grounded cheek and jaw planes; the primary memory feature is warm deep-set eyes, supported by a strong straight nose and an asymmetric expressive mouth; slightly uneven brows",
+  "a slender soft-angular facial structure with a clean lower-face silhouette; the primary memory feature is downturned story-rich eyes, supported by a short straight nose and a gently full lower lip; a small cheek dimple visible only in expression",
+  "a balanced trapezoid facial structure with a confident lower jaw; the primary memory feature is close-set focused eyes, supported by a broad bridge and a long restrained lip line; a faint scar through one eyebrow when compatible with the script",
+  "a short oval facial structure with softly lifted cheek planes; the primary memory feature is rounded hooded eyes, supported by a petite natural nose and a compact bow-shaped mouth; a subtle off-center hairline",
+  "a long heart-oval facial structure with elegant vertical proportions; the primary memory feature is wide-set elongated eyes, supported by a defined natural nose tip and a softly asymmetric mouth; sparse freckles at the cheekbones",
+  "a sturdy rounded-square facial structure with believable cheek and jaw weight; the primary memory feature is clear almond eyes beneath a strong brow, supported by a softly aquiline nose and a broad balanced mouth; one small chin cleft",
+];
+
 function characterFaceSignature(name: string) {
   const seed = Number.parseInt(stableReuseToken(name).slice(0, 7), 36) || 1;
-  const face = ["long oval face with a narrow chin", "compact round face with broad cheeks", "angular heart-shaped face with a defined jaw", "soft square face with a strong lower jaw", "high-cheekbone diamond face", "oblong face with a tall forehead"];
-  const eyes = ["wide-set almond eyes", "close-set narrow eyes", "round deep-set eyes", "upturned hooded eyes", "downturned large eyes", "monolid elongated eyes"];
-  const nose = ["short straight nose", "high narrow bridge with a defined tip", "soft low bridge and rounded tip", "slightly aquiline profile", "broad natural bridge", "small upturned nose"];
-  const mouth = ["wide mouth with a thin upper lip", "small bow-shaped mouth", "full lips with a pronounced cupid's bow", "asymmetric expressive mouth", "straight restrained lip line", "full lower lip and narrow upper lip"];
-  const marker = ["a subtle beauty mark below the left eye", "a faint eyebrow notch", "light freckles across the nose", "a small chin cleft", "a distinct widow's peak", "slightly asymmetric eyebrows"];
-  return `${face[seed % face.length]}, ${eyes[Math.floor(seed / 7) % eyes.length]}, ${nose[Math.floor(seed / 17) % nose.length]}, ${mouth[Math.floor(seed / 31) % mouth.length]}, ${marker[Math.floor(seed / 47) % marker.length]}`;
+  return `${CURATED_FACE_DESIGNS[seed % CURATED_FACE_DESIGNS.length]}. Keep natural human asymmetry and role-appropriate age, heritage, skin texture, fatigue, scars and life experience. The design must feel intentionally cast and visually harmonious, not cosmetically perfected or made into a generic beauty-filter face`;
+}
+
+function characterAestheticDirection(styleName: string) {
+  const preset = visualStyle(styleName);
+  if (preset.category === "写实") return `DEFAULT AESTHETIC DIRECTION ${CHARACTER_AESTHETIC_VERSION}: premium feature-film casting appeal that remains faithful to age, role and lived experience; coherent facial proportions with one memorable primary feature and two quieter supporting features; natural asymmetry, believable bone structure, real skin texture, individually groomed hair and restrained role-appropriate makeup. Light the close-up with a large soft key 30 degrees camera-left, gentle eye catchlights, controlled fill and a subtle rim separation; use an eye-level 85mm portrait perspective with flattering but truthful facial geometry, clean exposure and restrained editorial color. Attractive means intentional, expressive and well-cast, never identical, airbrushed, influencer-like or youth-filtered`;
+  if (/3D|三维|CG/i.test(`${styleName} ${preset.base}`)) return `DEFAULT AESTHETIC DIRECTION ${CHARACTER_AESTHETIC_VERSION}: high-end animation character appeal with a clear silhouette, harmonious large-medium-small shape rhythm, readable brow-eye-nose-mouth hierarchy and one memorable primary facial feature; sculpted planes transition cleanly, eyes have controlled size and focused catchlights, mouth corners and cheeks support nuanced acting, and the face remains rig-friendly from every angle. Use soft studio key light, clean fill and a restrained rim to reveal form and materials. Preserve age and role; avoid uncanny human skin, doll-like blankness, swollen rounded features, generic family-film sameness and over-cute proportions`;
+  return `DEFAULT AESTHETIC DIRECTION ${CHARACTER_AESTHETIC_VERSION}: professional animation model-sheet appeal built from a distinctive readable silhouette, harmonious facial construction, one dominant memory feature, two supporting features, clear shape language and a controlled character-specific palette. Eyes, brows and mouth must support nuanced acting while staying anatomically coherent in this style. Preserve age and role; avoid generic template faces, same-face casting, random feature collisions, excessive cuteness, muddy color and noisy costume detail`;
 }
 
 function firstDialogueForCharacter(script: string, characterName: string) {
@@ -563,14 +586,16 @@ function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset,
   const look = characterAssetNaming(character).lookName;
   const aesthetic = configuredImageSkillPrompt("character");
   if (aesthetic.ids.length) markContextUsed(aesthetic.ids);
-  return `${characterVisualPrompt(styleName)}. 默认人物审美指令（优先执行）：${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"} CHARACTER IDENTITY: ${identity}; THIS EPISODE LOOK/STATE: ${look}; EPISODE SCOPE: ${character.episodeScope || "current episode"}; ${character.role}, ${character.appearance}. UNIQUE CAST IDENTITY ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. This is an outfit/state asset for the same canonical person ${identity}: preserve the exact same facial geometry and body identity across all of ${identity}'s looks, while strictly rendering this asset's ${look} costume, grooming, injuries, wealth/health state and accessories. Never borrow another outfit variant unless explicitly listed in this look. Treat this facial geometry as a hard biometric design constraint. This person must not share a generic model face, eye shape, jaw, nose, mouth, cheek structure or beauty-filter proportions with any other cast member; do not create lookalikes or near-twins unless the script explicitly says they are related. 16:9 horizontal identity-and-outfit production sheet on a pure seamless light-gray cyclorama background. The far-left identity portrait is a large eye-level strict frontal close-up: head yaw 0 degrees, pitch 0 degrees, roll 0 degrees, face centered, both eyes looking directly into the camera, both eyebrows and both sides of the jaw equally visible, symmetrical ears when the hairstyle permits, neutral relaxed expression. Absolutely no profile, side face, three-quarter view, tilted head, raised or lowered chin, looking away, hair covering an eye, hand near face, prop or facial occlusion in the identity portrait. To the right, show front, side and back full-body outfit turnarounds from head to toe. Preserve the exact head silhouette, hairstyle, hair color, body proportions, costume, accessories, footwear and socks; cover only the facial-feature skin area of the front and side full-body views with a clean background-colored neutral matte so those views cannot introduce alternate facial identities. Keep hair, skull silhouette, ears, neck and clothing visible; the back view needs no facial matte. Calm natural standing posture, arms hanging naturally, empty hands, no props, scenery, furniture, text, labels or decorative frame. 构图硬性要求：最左侧大头照必须平视、严格正脸、双眼直视镜头，头部水平无歪斜；不同人物必须拥有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感和辨识标记，禁止只换发型服装的同脸复制。同一人物的不同造型必须保持同一张脸，但严格按当前“${look}”出服装和状态。右侧只负责服装和身材的正面、侧面、背面三视图。`;
+  return `PURPOSE: professional 16:9 production character identity-and-outfit sheet for ${identity}, not a beauty advertisement. SUBJECT: ${identity}; role: ${character.role}; current episode look/state: ${look}; episode scope: ${character.episodeScope || "current episode"}; script-grounded appearance: ${character.appearance}. STYLE: ${characterVisualPrompt(styleName)}. 默认人物审美指令（优先执行）：${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"} ${characterAestheticDirection(styleName)}. UNIQUE CAST DESIGN ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. Preserve the character's script-required age, ethnicity, body type, injuries, fatigue, wealth or health state; role-appropriate screen appeal must never erase story information. This is an outfit/state asset for the same canonical person ${identity}: preserve the exact same facial geometry and body identity across all of ${identity}'s looks, while strictly rendering this asset's ${look} costume, grooming, state and accessories. Never borrow another outfit variant unless explicitly listed in this look. Treat this facial geometry as a hard biometric design constraint. This person must not share a generic model face, eye shape, jaw, nose, mouth, cheek structure or beauty-filter proportions with any other cast member; do not create lookalikes or near-twins unless the script explicitly says they are related. COMPOSITION: pure seamless light-gray cyclorama background. The far-left identity portrait is a large, sharp, eye-level strict frontal close-up: head yaw 0 degrees, pitch 0 degrees, roll 0 degrees, face centered, both eyes looking directly into the camera, both eyebrows and both sides of the jaw equally visible, neutral relaxed expression. Absolutely no profile, side face, three-quarter view, tilted head, raised or lowered chin, looking away, hair covering an eye, hand near face, prop or facial occlusion in the identity portrait. To the right, show exact front, side and back full-body outfit turnarounds from head to toe. Preserve the exact head silhouette, hairstyle, hair color, body proportions, costume, accessories, footwear and socks. Use a clean background-colored neutral matte only over the facial-feature skin area of the smaller front and side full-body views so they cannot introduce alternate facial identities; keep hair, skull silhouette, ears, neck and clothing visible. Calm natural standing posture, arms relaxed, empty hands. OUTPUT QUALITY: intentional production design, clean value hierarchy, refined color harmony, coherent anatomy, crisp eyes and hair, believable material separation, no props, scenery, furniture, text, labels, decorative frame, facial occlusion, tilted head, cropped feet or alternate face. 构图硬性要求：最左侧大头照必须平视、严格正脸、双眼直视镜头，光线通透且能清楚塑造五官；不同人物必须是成套协调设计，拥有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感和主要记忆点，禁止随机拼凑五官，也禁止只换发型服装的同脸复制。同一人物的不同造型必须保持同一张脸，但严格按当前“${look}”出服装和状态。右侧只负责服装和身材的正面、侧面、背面三视图。`;
 }
 
 function isVisualCharacterAsset(character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
-  const description = `${character.name} ${character.role} ${character.appearance}`;
-  const voiceOnly = /旁白|画外音|广告声|广播声|系统音|系统播报|提示音|播音|解说|声音|voice\s*over|narrator|announcer/i.test(description);
-  const explicitlyInvisible = /无实体|不出镜|仅声音|只闻其声|画外传来|未实体化/i.test(description);
-  return !voiceOnly && !explicitlyInvisible;
+  const name = character.name.trim();
+  const role = character.role.trim();
+  const description = `${role} ${character.appearance}`;
+  const voiceOnlyRole = /^(?:纯)?(?:旁白|画外音|广告声|广播声|系统音|系统播报|提示音|播音|解说|声音|男声|女声|电话声|narrator|voice\s*over|announcer|system\s*voice)$/i.test(role);
+  const explicitlyInvisible = /无实体|不出镜|仅声音|只闻其声|画外传来|未实体化|voice[- ]?only|never\s+seen/i.test(description);
+  return !isNonCharacterLabel(name) && !isGenericNonAssetCharacter(name) && !voiceOnlyRole && !explicitlyInvisible;
 }
 
 function frameVisualPrompt(name: string) {
@@ -746,6 +771,19 @@ async function withStageProgress<T>(task: Promise<T>, hardTimeoutMs: number, tim
     return await withStageTimeout(task, hardTimeoutMs, timeoutMessage);
   } finally {
     window.clearInterval(ticker);
+  }
+}
+
+async function fetchWithHardTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number, timeoutMessage: string) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (reason) {
+    if (controller.signal.aborted) throw new Error(timeoutMessage);
+    throw reason;
+  } finally {
+    window.clearTimeout(timer);
   }
 }
 
@@ -1214,6 +1252,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const assetReuseKeyRef = useRef("");
+  const batchAssetGenerationRef = useRef(false);
   const runRef = useRef(0);
   const editorSyncRef = useRef(false);
   const quickModelSaveRef = useRef(false);
@@ -1519,7 +1558,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           if (snapshot.style && STYLE_PROMPTS[snapshot.style]) setStyle(snapshot.style);
           if (typeof snapshot.targetDuration === "number") setTargetDuration(snapshot.targetDuration);
           if (snapshot.aspect === "9:16" || snapshot.aspect === "16:9") setAspect(snapshot.aspect);
-          if (Array.isArray(snapshot.characters)) setCharacters(snapshot.characters as CharacterAsset[]);
+          if (Array.isArray(snapshot.characters)) setCharacters(deduplicateCharacterAssets(snapshot.characters as CharacterAsset[]));
           if (Array.isArray(snapshot.propAssets)) { setPropAssets(snapshot.propAssets as PropAsset[]); setAssetAnalysisState("ready"); }
           if (Array.isArray(snapshot.sceneAssets)) {
             const storedScenes = snapshot.sceneAssets as SceneAsset[];
@@ -1706,8 +1745,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const unique = deduplicateCharacterAssets(characters);
     if (unique.length === characters.length) return;
     setCharacters(unique);
-    setImportMessage(`已合并 ${characters.length - unique.length} 张同人物同造型的重复工作台卡片；已有图片优先保留，不再重复生图`);
+    setImportMessage(`已清理或合并 ${characters.length - unique.length} 张无效/重复人物卡片；栏目标题和 VO 标记不会进入人物资产`);
   }, [characters]);
+
+  useEffect(() => {
+    if (!agentTeamLoaded) return;
+    void removeMisclassifiedNarrativeAssets().catch((reason) => console.warn("[manjing invalid script assets]", reason));
+    // This cleanup intentionally runs only once after the persisted agent team is restored.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentTeamLoaded]);
 
   useEffect(() => {
     if (!agentTeamLoaded) return;
@@ -3323,11 +3369,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (config.adapter === "openai") {
       if (kind !== "image") throw new Error("OpenAI 兼容图片接口只能用于生图岗位");
       if (!validAgentEndpoint(config.endpoint)) throw new Error("生图 AI 需要填写 OpenAI 兼容 API 地址");
-      const response = await fetch("/api/desktop/image", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "openai", endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, prompt, aspect: mediaAspect, references: transferableImageReferences }),
-      });
+      const response = await fetchWithHardTimeout(
+        "/api/desktop/image",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "openai", endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, prompt, aspect: mediaAspect, references: transferableImageReferences }),
+        },
+        195000,
+        "生图模型等待超过 195 秒，已停止本次请求；请检查生图模型接口后重试",
+      );
       if (!response.ok) throw new Error(await responseError(response));
       const data = await response.json() as { dataUrl?: string };
       if (!data.dataUrl?.startsWith("data:image/")) throw new Error("OpenAI 兼容生图接口没有返回图片");
@@ -3355,14 +3406,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const base = "https://gen.pollinations.ai";
     let url = "";
     if (kind === "image") {
+      const imageModel = options.references?.length ? config.model || "kontext" : config.model === "kontext" ? "zimage" : config.model || "zimage";
       const params = new URLSearchParams({
-        model: options.references?.length ? config.model || "kontext" : config.model === "kontext" ? "zimage" : config.model || "zimage",
+        model: imageModel,
         width: mediaAspect === "9:16" ? "720" : "1280",
         height: mediaAspect === "9:16" ? "1280" : "720",
         seed: String(Math.abs(story.length * 97 + index * 7919)),
         enhance: "true",
         safe: "true",
       });
+      if (/^(?:flux|zimage)$/i.test(imageModel)) params.set("negative_prompt", CHARACTER_IMAGE_NEGATIVE_PROMPT);
       if (pollinationsImageReferences.length) params.set("image", pollinationsImageReferences.join("|"));
       url = `${base}/image/${encodeURIComponent(prompt)}?${params}`;
     } else if (kind === "audio") {
@@ -3386,7 +3439,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       url = `${base}/video/${encodeURIComponent(prompt)}?${params}`;
     }
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+    const response = await fetchWithHardTimeout(
+      url,
+      { headers: { Authorization: `Bearer ${key}` } },
+      180000,
+      `${kind === "image" ? "图片" : kind === "audio" ? "配音" : "视频"}服务等待超过 180 秒，已停止本次请求；请检查模型服务后重试`,
+    );
     if (!response.ok) throw new Error(await responseError(response));
     const receivedBlob = await response.blob();
     const expected = kind === "image" ? "image/" : kind === "audio" ? "audio/" : "video/";
@@ -3398,11 +3456,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function uploadPollinationsMedia(blob: Blob, filename: string, uploadKey = agentKey("image")) {
     const form = new FormData();
     form.append("file", blob, filename);
-    const response = await fetch("https://gen.pollinations.ai/upload", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${uploadKey}` },
-      body: form,
-    });
+    const response = await fetchWithHardTimeout(
+      "https://gen.pollinations.ai/upload",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${uploadKey}` },
+        body: form,
+      },
+      120000,
+      "参考素材上传等待超过 120 秒，已停止本次请求；请检查网络或素材服务后重试",
+    );
     if (!response.ok) throw new Error(await responseError(response));
     const data = await response.json() as { url?: string };
     if (!data.url) throw new Error("角色参考素材上传失败");
@@ -5037,7 +5100,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   function isMisclassifiedNarrativeAsset(asset: LibraryAsset) {
     if (!/^script:(?:character|voice):/i.test(asset.blueprintKey || "")) return false;
     const label = String(asset.identityKey || asset.name || "").replace(/[-—_ ]*(?:标准音色|基础版)$/u, "").trim();
-    return /^(?:系列项目|当前制作|当前剧集|剧本简介|故事简介|剧情简介|内容简介|项目简介|全剧背景故事|背景故事|故事背景|世界观|世界背景|项目长期记忆|本集相关角色圣经|上一集结束状态|本集完整剧本|人物关系与隐藏信息|世界规则与连续性约束|分集时间线|series project|current production|current episode|synopsis|logline|summary|background|backstory|worldbuilding|world bible|project memory|previous episode end state|full script)$/iu.test(label);
+    const semantic = String(asset.semanticDescription || "");
+    return !isVisualCharacterAsset({ name: label, role: semantic.split(/[。.;；]/)[0] || "", appearance: semantic });
   }
 
   async function removeMisclassifiedNarrativeAssets(projectId?: string, episodeId?: string) {
@@ -5046,7 +5110,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       && (!projectId || asset.projectId === projectId)
       && (!episodeId || !asset.episodeId || asset.episodeId === episodeId));
     await Promise.all(obsolete.map((asset) => deleteLibraryAsset(asset.id)));
-    if (obsolete.length) recordActivity("writer", `已清理 ${obsolete.length} 个把简介、背景或项目标题误当成人物/音色的旧框架`, "done");
+    if (obsolete.length) recordActivity("writer", `已清理 ${obsolete.length} 个把栏目、镜头/声音标记或无名群演误当成人物/音色的旧框架`, "done");
   }
 
   async function persistScriptAssetBlueprint(characterItems: CharacterAsset[], propItems: PropAsset[], sceneItems: SceneAsset[], scriptContent: string) {
@@ -5055,14 +5119,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const projectId = activeContext.projectId || editorProjectIdRef.current;
     const episodeId = activeContext.episodeId;
     await removeMisclassifiedNarrativeAssets(projectId, episodeId);
-    const savedCharacters = await Promise.all(characterItems.map(async (character) => {
+    const validCharacterItems = deduplicateCharacterAssets(characterItems);
+    const savedCharacters = await Promise.all(validCharacterItems.map(async (character) => {
       const naming = characterAssetNaming(character);
       const saved = await saveLibraryPlaceholder({
         name: naming.displayName,
         category: "character",
         identityKey: naming.identityKey,
         lookName: naming.lookName,
-        semanticDescription: `${character.role}。${character.appearance}`,
+        semanticDescription: `${character.role}。${character.appearance}${character.visualEvidence ? `。出镜依据：${character.visualEvidence}` : ""}`,
         generationPrompt: characterSheetPrompt(style, character),
         tags: ["剧本人物", naming.identityKey, `造型:${naming.lookName}`, `集数:${character.episodeScope || "当前集"}`, ...(character.sceneHints || []).slice(0, 6).map((hint) => `镜头:${hint}`)],
         blueprintKey: `script:character:${naming.identityKey}:${naming.lookName}`,
@@ -5103,7 +5168,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const [loaded] = saved.assetState !== "placeholder" ? await loadLibraryAssets([saved.id]) : [];
       return loaded?.url ? { ...sceneAsset, libraryAssetId: saved.id, imageUrl: loaded.url, remoteUrl: loaded.url.startsWith("https://") ? loaded.url : sceneAsset.remoteUrl, reviewDecision: loaded.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : { ...sceneAsset, libraryAssetId: saved.id };
     }));
-    const speakingCharacters = [...new Map(characterItems.map((character) => {
+    const speakingCharacters = [...new Map(validCharacterItems.map((character) => {
       const identity = characterIdentity(character);
       return [identity.toLocaleLowerCase("zh-CN"), { character: { ...character, name: identity, identityName: identity }, referenceText: character.firstDialogue || firstDialogueForCharacter(scriptContent, identity) }] as const;
     }).filter(([, item]) => item.character.needsVoice !== false && item.referenceText)).values()];
@@ -5132,7 +5197,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setStatusText("AI 正在区分简介、背景设定、人物造型、场景、对白与重要道具");
     setImportMessage(`正在分析“${filename}”：此阶段不会生成任何图片或消耗生图额度`);
     recordActivity("writer", "开始分析导入剧本中的人物、服装状态、可复用场景与重要道具");
-    const system = `你是影视制片的剧本拆解师。只分析，不改写剧本，不生成图片。先区分元数据、剧本简介、背景故事/世界观、人物表、场景标题、动作和真正的角色对白。完整提取所有实际需要视觉出镜的具名人物、每个需要稳定复用的拍摄场景，以及推动剧情、被人物持有或穿戴、发生状态变化、跨镜重复出现的重要道具。场景资产不是分镜图：每个不同地点/布景/时代状态建立一张没有人物、没有可移动剧情道具的 Canonical 空场景参考图，用于无首尾帧、无分镜图时仍能通过全能参考锁定建筑、门窗、固定陈设、空间布局、天气、时段、色调和光线方向；同一场景只建一次，可跨镜复用，发生实质改造/灾后/季节变化时才拆成独立 environmentKey。中文剧本中的场景 name 必须使用简短自然的中文，例如“苏梨破院”“户部公廨大厅”，严禁把 EP01_ENV_... 一类英文机器编码填进 name；environmentKey 是内部稳定复用键，可保持已有值，但新建时也优先使用简短中文。人物身份与人物造型必须分层：同一人物仍使用同一个 identityName，但本集每一种实际出镜的服装、妆发或剧情状态都要分别输出一条人物造型资产，例如男主平时黑衣、本集先穿白衣后受伤，就输出男主/白衣版和男主/白衣战损版；禁止把多个互斥造型揉在一张图里。lookName 必须短而明确，使用“白衣版、黑衣常服版、西装版、颓废版、战损版”等可直接显示和引用的名字；sceneHints 写明使用该造型或场景的标题、镜号或可检索剧情短语。没有明确变化时只输出基础版。系列项目、当前制作、剧本简介、背景故事、项目长期记忆、角色圣经、上一集结束状态等栏目标题绝对不是人物或场景；纯旁白、画外音、无名群演、普通桌椅和无剧情意义装饰也不是人物资产。只有实际说过台词的人物才需要建立音色框架；同一人物无论多少造型只共用一个音色。只返回 JSON：{"synopsis":"剧本简介或根据剧情提炼的简明故事梗概","background":"背景故事、时代地点、世界规则、主要关系与前史；没有明确内容就如实概括","characters":[{"name":"实际人物名（与 identityName 相同）","identityName":"人物固定身份名","lookName":"当前服装/状态造型名","episodeScope":"第几集或当前集","sceneHints":["使用该造型的镜号、场景标题或剧情短语"],"role":"身份/关系","appearance":"该人物不变的身份特征 + 仅当前造型的服装、妆发和状态；没有依据就写待补充，不得擅自编造","reason":"该造型在何处出镜的依据","needsVoice":true或false,"firstDialogue":"该人物第一句真实台词；没说话则为空"}],"scenes":[{"name":"便于用户识别的中文场景名（中文剧本严禁使用英文机器编码）","environmentKey":"稳定且唯一的场景身份，新建中文剧本优先使用短中文","description":"建筑、空间布局、门窗方向、固定陈设、主色调与光线方向","timeWeather":"时间、季节、天气和环境状态","episodeScope":"第几集或当前集","sceneHints":["使用该场景的镜号或剧情短语"],"reason":"需要建立并复用场景图的原因"}],"props":[{"name":"道具名","description":"剧本明确的形状、材质、颜色、尺寸和状态；没有依据就写待补充","importance":"hero|recurring|story","reason":"需要道具资产的原因"}]}。`;
+    const system = `你是影视制片的剧本拆解师。只分析，不改写剧本，不生成图片。先区分元数据、剧本简介、背景故事/世界观、人物表、场景标题、动作和真正的角色对白。完整提取所有实际需要视觉出镜的具名人物、每个需要稳定复用的拍摄场景，以及推动剧情、被人物持有或穿戴、发生状态变化、跨镜重复出现的重要道具。场景资产不是分镜图：每个不同地点/布景/时代状态建立一张没有人物、没有可移动剧情道具的 Canonical 空场景参考图，用于无首尾帧、无分镜图时仍能通过全能参考锁定建筑、门窗、固定陈设、空间布局、天气、时段、色调和光线方向；同一场景只建一次，可跨镜复用，发生实质改造/灾后/季节变化时才拆成独立 environmentKey。中文剧本中的场景 name 必须使用简短自然的中文，例如“苏梨破院”“户部公廨大厅”，严禁把 EP01_ENV_... 一类英文机器编码填进 name；environmentKey 是内部稳定复用键，可保持已有值，但新建时也优先使用简短中文。人物身份与人物造型必须分层：同一人物仍使用同一个 identityName，但本集每一种实际出镜的服装、妆发或剧情状态都要分别输出一条人物造型资产，例如男主平时黑衣、本集先穿白衣后受伤，就输出男主/白衣版和男主/白衣战损版；禁止把多个互斥造型揉在一张图里。lookName 必须短而明确，使用“白衣版、黑衣常服版、西装版、颓废版、战损版”等可直接显示和引用的名字；sceneHints 写明使用该造型或场景的标题、镜号或可检索剧情短语。没有明确变化时只输出基础版。人物 appearance 必须先忠实提取剧本明确的年龄感、族裔、体型、脸部与妆造信息；如果剧本没有写具体五官，可以根据身份和性格补充一套协调而有美感的角色设计方向：一个主要面部记忆点、两个辅助五官、清晰脸型与轮廓、角色专属发型妆面和克制配色。美感必须服务年龄、身份和剧情，不得把老人、反派、伤病或疲惫状态统一美化成年轻网红脸，也不得随机拼凑互相冲突的五官。系列项目、当前制作、剧本简介、背景故事、项目长期记忆、角色圣经、上一集结束状态、“小传/人物小传/角色小传”等栏目标题绝对不是人物或场景；片名、题材、时长、作者、编剧、人物关系、场次、镜号、景别、运镜、情绪、转场、音效、配乐、字幕、MONTAGE、FLASHBACK、CUT TO、TITLE CARD、SFX 等制片字段和剧本技术标记也绝对不是人物。VO、V.O.、-VO-、OS、O.S. 是附着在真实角色名后的画外音/声音位置扩展：如“苏梨（V.O.）”应识别为苏梨，但孤立的 VO/OS 绝对不是人物名。群演甲、路人A、众人、群众、男声、女声、系统声等没有稳定身份且不需要跨镜一致性的对象不得建立人物资产。每个人物必须给出可核对的 visualEvidence；只有剧本明确出镜或明确要求稳定视觉形象时 requiresVisualAsset 才能为 true，纯声音、栏目标题、舞台说明和技术标记必须为 false。普通桌椅和无剧情意义装饰也不是资产。只有实际说过台词的具名人物才需要建立音色框架；同一人物无论多少造型只共用一个音色。只返回 JSON：{"synopsis":"剧本简介或根据剧情提炼的简明故事梗概","background":"背景故事、时代地点、世界规则、主要关系与前史；没有明确内容就如实概括","characters":[{"name":"实际人物名（与 identityName 相同，不含 VO/OS 扩展）","identityName":"人物固定身份名","lookName":"当前服装/状态造型名","episodeScope":"第几集或当前集","sceneHints":["使用该造型的镜号、场景标题或剧情短语"],"role":"身份/关系","appearance":"人物固定身份特征、成套协调的脸型/主要记忆点/辅助五官，以及仅当前造型的服装、妆发和状态；缺失部分按角色身份克制补全，不得网红化或抹去年龄和剧情状态","reason":"该造型在何处出镜的依据","requiresVisualAsset":true或false,"visualEvidence":"证明该人物实际出镜或需要稳定视觉形象的原文场景/动作证据","needsVoice":true或false,"firstDialogue":"该人物第一句真实台词；没说话则为空"}],"scenes":[{"name":"便于用户识别的中文场景名（中文剧本严禁使用英文机器编码）","environmentKey":"稳定且唯一的场景身份，新建中文剧本优先使用短中文","description":"建筑、空间布局、门窗方向、固定陈设、主色调与光线方向","timeWeather":"时间、季节、天气和环境状态","episodeScope":"第几集或当前集","sceneHints":["使用该场景的镜号或剧情短语"],"reason":"需要建立并复用场景图的原因"}],"props":[{"name":"道具名","description":"剧本明确的形状、材质、颜色、尺寸和状态；没有依据就写待补充","importance":"hero|recurring|story","reason":"需要道具资产的原因"}]}。`;
     const prompt = `请为以下完整剧本建立资产候选清单。保持原文人物名和语言；同一人物的称谓要合并为同一 identityName，但必须把本集实际出现的不同服装/妆发/受伤或贫富等状态拆成独立 lookName 资产。还要提取所有实际需要的 Canonical 空场景图并建立唯一 environmentKey；即使后续完全不用首尾帧和分镜图，视频模型也必须能只靠人物、场景、道具、音色的全能参考生成。所有人物造型和场景都给出 sceneHints。\n\n${content.slice(0, 30000)}`;
     let usedFallback = false;
     try {
@@ -5163,7 +5228,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const previousScenes = new Map(sceneAssets.map((item) => [item.environmentKey.toLocaleLowerCase("zh-CN"), item]));
       const nextCharacters = manifest.characters.map((item) => {
         const previous = previousCharacters.get(`${normalizeAssetIdentity(item.identityName)}::${normalizedCharacterLook(item.lookName)}`);
-        return { id: previous?.id || uid(), libraryAssetId: previous?.libraryAssetId, name: item.identityName, identityName: item.identityName, lookName: item.lookName, episodeScope: item.episodeScope, sceneHints: item.sceneHints, role: item.role, appearance: item.appearance, voice: previous?.voice || voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, imageUrl: previous?.imageUrl, remoteUrl: previous?.remoteUrl, reviewDecision: previous?.reviewDecision, sheetVersion: previous?.sheetVersion, status: previous?.imageUrl ? "ready" as const : "queued" as const };
+        return { id: previous?.id || uid(), libraryAssetId: previous?.libraryAssetId, name: item.identityName, identityName: item.identityName, lookName: item.lookName, episodeScope: item.episodeScope, sceneHints: item.sceneHints, role: item.role, appearance: item.appearance, visualEvidence: item.visualEvidence, requiresVisualAsset: item.requiresVisualAsset, voice: previous?.voice || voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, imageUrl: previous?.imageUrl, remoteUrl: previous?.remoteUrl, reviewDecision: previous?.reviewDecision, sheetVersion: previous?.sheetVersion, status: previous?.imageUrl ? "ready" as const : "queued" as const };
       });
       const nextProps = manifest.props.map((item) => {
         const previous = previousProps.get(item.name.toLocaleLowerCase());
@@ -5186,7 +5251,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       usedFallback = true;
       const manifest = fallbackScriptAssetManifest(content);
       persistScriptMemory({ synopsis: manifest.synopsis, background: manifest.background });
-      const localCharacters = manifest.characters.map((item) => ({ id: uid(), name: item.name, role: item.role, appearance: item.appearance, voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, status: "queued" as const }));
+      const localCharacters = manifest.characters.map((item) => ({ id: uid(), name: item.name, role: item.role, appearance: item.appearance, visualEvidence: item.visualEvidence, requiresVisualAsset: item.requiresVisualAsset, voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, status: "queued" as const }));
       const localProps = manifest.props.map((item) => ({ id: uid(), ...item, status: "queued" as const }));
       const localScenes = manifest.scenes.map((item) => ({ id: uid(), ...item, status: "queued" as const }));
       const persisted = await persistScriptAssetBlueprint(localCharacters, localProps, localScenes, content);
@@ -5236,7 +5301,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const actionId = `character-generate:${character.id}`;
     const run = Date.now();
     runRef.current = run;
-    setAssetAction(actionId);
+    if (!autoAdopt) setAssetAction(actionId);
     updateCharacterAsset(character.id, { status: "generating" });
     try {
       if (!character.imageUrl) {
@@ -5245,7 +5310,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (reused?.url) {
           updateCharacterAsset(character.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : character.remoteUrl, arkAssetId: reused.arkAssetId, portraitAuthorizationStatus: reused.portraitAuthorizationStatus, sheetVersion: 2, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
           recordActivity("image", `生图前二次检索命中“${naming.displayName}”，已复用资产库图片并取消重复生图`, "done");
-          return;
+          return true;
         }
       }
       const characterRequest = await characterGenerationRequest(character, characters);
@@ -5279,10 +5344,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         updateCharacterAsset(character.id, { imageUrl: generatedUrl, remoteUrl: generatedRemoteUrl, sheetVersion: 2, reviewDecision: "pending", status: "ready" });
         recordActivity("image", `人物“${character.name}”资产图已生成，等待用户采用或上传替换`, "done");
       }
+      return true;
     } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "人物资产生成失败";
       updateCharacterAsset(character.id, { status: "error" });
-      setError(reason instanceof Error ? reason.message : "人物资产生成失败");
-    } finally { setAssetAction(""); }
+      setError(message);
+      recordActivity("image", `人物“${character.name}”生成失败：${message}`, "error");
+      if (autoAdopt) throw new Error(message);
+      return false;
+    } finally { if (!autoAdopt) setAssetAction(""); }
   }
 
   async function uploadPropBlueprint(prop: PropAsset, file?: File) {
@@ -5305,7 +5375,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const actionId = `prop-generate:${prop.id}`;
     const run = Date.now();
     runRef.current = run;
-    setAssetAction(actionId);
+    if (!autoAdopt) setAssetAction(actionId);
     updatePropAsset(prop.id, { status: "generating" });
     try {
       if (!prop.imageUrl) {
@@ -5313,7 +5383,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (reused?.url) {
           updatePropAsset(prop.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : prop.remoteUrl, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
           recordActivity("image", `生图前二次检索命中道具“${prop.name}”，已复用资产库图片并取消重复生图`, "done");
-          return;
+          return true;
         }
       }
       const prompt = `${frameVisualPrompt(style)}, production prop identity sheet for ${prop.name}, ${prop.description}, exact shape, material, color, scale and story state, front side and three-quarter reference views, neutral background, no person, no redesign, no text`;
@@ -5345,10 +5415,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         updatePropAsset(prop.id, { imageUrl: generatedUrl, remoteUrl: generatedRemoteUrl, reviewDecision: "pending", status: "ready" });
         recordActivity("image", `道具“${prop.name}”资产图已生成，等待用户采用或上传替换`, "done");
       }
+      return true;
     } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "道具资产生成失败";
       updatePropAsset(prop.id, { status: "error" });
-      setError(reason instanceof Error ? reason.message : "道具资产生成失败");
-    } finally { setAssetAction(""); }
+      setError(message);
+      recordActivity("image", `道具“${prop.name}”生成失败：${message}`, "error");
+      if (autoAdopt) throw new Error(message);
+      return false;
+    } finally { if (!autoAdopt) setAssetAction(""); }
   }
 
   async function uploadSceneBlueprint(sceneAsset: SceneAsset, file?: File) {
@@ -5371,7 +5446,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const actionId = `scene-generate:${sceneAsset.id}`;
     const run = Date.now();
     runRef.current = run;
-    setAssetAction(actionId);
+    if (!autoAdopt) setAssetAction(actionId);
     updateSceneAsset(sceneAsset.id, { status: "generating" });
     try {
       if (!sceneAsset.imageUrl) {
@@ -5379,7 +5454,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (reused?.url) {
           updateSceneAsset(sceneAsset.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : sceneAsset.remoteUrl, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
           recordActivity("image", `生图前二次检索命中场景“${sceneAsset.name}”，已复用资产库图片并取消重复生图`, "done");
-          return;
+          return true;
         }
       }
       const prompt = `${frameVisualPrompt(style)}, canonical empty environment reference for ${sceneAsset.name}, environment identity ${sceneAsset.environmentKey}, ${sceneAsset.description}, ${sceneAsset.timeWeather}. Lock the exact architecture, room proportions, doors, windows, pathways, fixed furniture, spatial layout, palette, weather, time of day and light direction. No people, silhouettes, crowds, animals, movable story props, text, labels, storyboard panels or camera collage. One clean cinematic establishing reference image for repeated multimodal @Image use.`;
@@ -5410,20 +5485,27 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         updateSceneAsset(sceneAsset.id, { imageUrl: generatedUrl, remoteUrl: generatedRemoteUrl, reviewDecision: "pending", status: "ready" });
         recordActivity("image", `场景“${sceneAsset.name}”已生成，等待用户采用或上传替换`, "done");
       }
+      return true;
     } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "场景资产生成失败";
       updateSceneAsset(sceneAsset.id, { status: "error" });
-      setError(reason instanceof Error ? reason.message : "场景资产生成失败");
-    } finally { setAssetAction(""); }
+      setError(message);
+      recordActivity("image", `场景“${sceneAsset.name}”生成失败：${message}`, "error");
+      if (autoAdopt) throw new Error(message);
+      return false;
+    } finally { if (!autoAdopt) setAssetAction(""); }
   }
 
   async function generateAllMissingBlueprints() {
-    if (assetAction) return;
+    if (assetAction || batchAssetGenerationRef.current) return;
+    batchAssetGenerationRef.current = true;
     setAssetAction("pair-assets");
     setError("");
     let paired;
     try {
       paired = await pairExistingBlueprintAssets();
     } catch (reason) {
+      batchAssetGenerationRef.current = false;
       setAssetAction("");
       setError(reason instanceof Error ? reason.message : "生成前资产配对失败");
       return;
@@ -5432,6 +5514,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const missingProps = paired.props.filter((item) => !item.imageUrl);
     const missingScenes = paired.scenes.filter((item) => !item.imageUrl);
     if (!missingCharacters.length && !missingProps.length && !missingScenes.length) {
+      batchAssetGenerationRef.current = false;
       setAssetAction("");
       setStatusText("资产配对后图片已经齐全，未调用生图模型");
       return;
@@ -5439,26 +5522,48 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setAssetAction("batch-generate");
     recordActivity("image", `开始补齐 ${missingCharacters.length} 套人物造型、${missingScenes.length} 个场景和 ${missingProps.length} 个道具；每一项都会在调用生图模型前再次检索全资产库，只有确实缺失的才生成`);
     try {
-      let completed = 0;
+      let attempted = 0;
       const total = missingCharacters.length + missingScenes.length + missingProps.length;
+      const failures: string[] = [];
+      const runMissingAsset = async (label: string, task: Promise<boolean | undefined>) => {
+        try {
+          await withStageProgress(
+            task,
+            210000,
+            `${label}生成超过 210 秒，已停止等待；请检查生图模型接口后重试`,
+            (elapsedSeconds) => setStatusText(`一键生成缺失资产 ${attempted + 1}/${total}：${label}（已等待 ${elapsedSeconds} 秒，请勿重复启动）`),
+          );
+        } catch (reason) {
+          failures.push(`${label}：${reason instanceof Error ? reason.message : "生成失败"}`);
+        } finally {
+          attempted += 1;
+        }
+      };
       for (const character of missingCharacters) {
-        setStatusText(`一键生成缺失资产 ${completed + 1}/${total}：${character.name}`);
-        await generateCharacterBlueprint(character, true);
-        completed += 1;
+        setStatusText(`一键生成缺失资产 ${attempted + 1}/${total}：人物“${character.name}”`);
+        await runMissingAsset(`人物“${character.name}”`, generateCharacterBlueprint(character, true));
       }
       for (const prop of missingProps) {
-        setStatusText(`一键生成缺失资产 ${completed + 1}/${total}：${prop.name}`);
-        await generatePropBlueprint(prop, propAssets.findIndex((item) => item.id === prop.id), true);
-        completed += 1;
+        setStatusText(`一键生成缺失资产 ${attempted + 1}/${total}：道具“${prop.name}”`);
+        await runMissingAsset(`道具“${prop.name}”`, generatePropBlueprint(prop, propAssets.findIndex((item) => item.id === prop.id), true));
       }
       for (const sceneAsset of missingScenes) {
-        setStatusText(`一键生成缺失资产 ${completed + 1}/${total}：${sceneAsset.name}`);
-        await generateSceneBlueprint(sceneAsset, sceneAssets.findIndex((item) => item.id === sceneAsset.id), true);
-        completed += 1;
+        setStatusText(`一键生成缺失资产 ${attempted + 1}/${total}：场景“${sceneAsset.name}”`);
+        await runMissingAsset(`场景“${sceneAsset.name}”`, generateSceneBlueprint(sceneAsset, sceneAssets.findIndex((item) => item.id === sceneAsset.id), true));
       }
-      setStatusText(`一键补齐完成：已处理 ${completed} 项；命中已有资产的项目未调用生图模型`);
-      setImportMessage(`已保留并复用资产库已有图片，只为二次检索后仍缺失的人物、场景和道具调用 AI`);
+      if (failures.length) {
+        const summary = `批量补齐结束：成功 ${total - failures.length}/${total}，失败 ${failures.length}；失败原因已写入制作记录`;
+        setStatusText(summary);
+        setError(failures.join("\n"));
+        setImportMessage("已有资产仍会保留；失败项目不会被假装成已完成，可修正模型配置后重新运行");
+        recordActivity("image", `${summary}。${failures.slice(0, 3).join("；")}`, "error");
+      } else {
+        setStatusText(`一键补齐完成：成功 ${total}/${total}；命中已有资产的项目未调用生图模型`);
+        setImportMessage("已保留并复用资产库已有图片，只为二次检索后仍缺失的人物、场景和道具调用 AI");
+        recordActivity("image", `批量补齐完成：${total} 项缺失资产均已生成并入库`, "done");
+      }
     } finally {
+      batchAssetGenerationRef.current = false;
       setAssetAction("");
     }
   }
@@ -5723,12 +5828,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
       setTargetDuration(Number(payload.targetDuration) || 0);
       setScenes(importedScenes);
-      setCharacters(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
+      const importedCharacters = deduplicateCharacterAssets(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
+      setCharacters(importedCharacters);
       const importedProps = Array.isArray(payload.propAssets) ? (payload.propAssets as PropAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : [];
       setPropAssets(importedProps);
       const importedSceneAssets = Array.isArray(payload.sceneAssets) ? (payload.sceneAssets as SceneAsset[]).slice(0, 30).map((item, index) => ({ ...item, id: uid(), name: localizedSceneDisplayName(item, index) })) : [];
       setSceneAssets(importedSceneAssets);
-      setAssetAnalysisState(importedProps.length || importedSceneAssets.length || (Array.isArray(payload.characters) && payload.characters.length > 0) ? "ready" : "idle");
+      setAssetAnalysisState(importedProps.length || importedSceneAssets.length || importedCharacters.length ? "ready" : "idle");
       setMusicPrompt(String(payload.musicPrompt || ""));
       setSubtitleScale(Math.max(0.7, Math.min(1.6, Number(payload.subtitleScale) || 1)));
       setSubtitleColor(typeof payload.subtitleColor === "string" ? payload.subtitleColor : "#ffffff");
@@ -6072,7 +6178,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <div className="voice-library-inline"><div><span>独立人物音色库</span><b>{voiceProfiles.filter((item) => item.canonical && item.voiceConsent !== "revoked").length} 个 Canonical 音色</b><small>按项目/剧本和公共库分组；视频全能参考会先查当前项目，再引用公共音色。</small></div><Link href="/voices">管理音色库 ↗</Link>{voiceProfiles.filter((item) => item.canonical && item.voiceConsent !== "revoked").slice(0, 3).map((profile) => <article key={profile.id}><i>声</i><span><b>{profile.identityKey}</b><small>{profile.lookName || "标准音色"} · 已引用 {profile.usageCount || 0} 次</small></span>{profile.url && <audio src={profile.url} controls preload="metadata" />}</article>)}</div>
               {voiceEnabled && !generatedVoiceEnabled && <p>免费默认配音只能在设备上预览；若要把声音写进成片，请在下方“配音 AI”岗位选择 Pollinations、CosyVoice、VibeVoice 或自定义配音接口。</p>}
             </section>
-            <div className="style-library-head"><label>视觉风格</label><span>{STYLE_PRESETS.length} 种 · 写实 / 动画 / 艺术</span></div>
+            <div className="style-library-head"><label>视觉风格</label><span>{STYLE_PRESETS.length} 种 · 默认启用角色美术指导与防同脸设计</span></div>
             <div className="style-library" role="list" aria-label="漫剧视觉风格库">{STYLE_PRESETS.map((item) => <button type="button" role="listitem" key={item.name} className={`style-card ${style === item.name ? "active" : ""}`} onClick={() => setStyle(item.name)} aria-pressed={style === item.name}>
               <img src={item.preview} alt="" loading="lazy" />
               <span><b>{item.name}</b><em>{item.category}</em></span>
@@ -6108,7 +6214,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             <div className="asset-blueprint-grid">
               {characters.map((character) => <article key={character.id} className={`asset-blueprint-card ${character.status}`}>
                 <div className="asset-blueprint-preview">{character.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: character.imageUrl as string, name: characterAssetNaming(character).displayName })} aria-label={`预览${characterAssetNaming(character).displayName}大图`}><img src={character.imageUrl} alt={characterAssetNaming(character).displayName} /><i>点击预览</i></button> : <span><i>人</i><small>仅框架<br />尚无图片</small></span>}</div>
-                <div className="asset-blueprint-fields"><em>人物造型资产 · {character.episodeScope || "当前集"}</em><input value={characterIdentity(character)} aria-label="人物身份名" placeholder="例如：男主" onChange={(event) => updateCharacterAsset(character.id, { name: event.target.value, identityName: event.target.value })} /><input value={characterLook(character)} aria-label="服装或状态造型名" placeholder="例如：白衣版" onChange={(event) => updateCharacterAsset(character.id, { lookName: event.target.value })} /><input value={character.role} aria-label="人物身份" placeholder="身份或人物关系" onChange={(event) => updateCharacterAsset(character.id, { role: event.target.value })} /><textarea value={character.appearance} aria-label="人物视觉描述" placeholder="不变的身份特征 + 当前造型的服装、妆发和状态" onChange={(event) => updateCharacterAsset(character.id, { appearance: event.target.value })} /><small>{character.sceneHints?.length ? `使用镜头：${character.sceneHints.join("、")}` : "未指定镜头时，将按分镜文字匹配此造型"}</small></div>
+                <div className="asset-blueprint-fields"><em>人物造型资产 · {character.episodeScope || "当前集"}</em><input value={characterIdentity(character)} aria-label="人物身份名" placeholder="例如：男主" onChange={(event) => updateCharacterAsset(character.id, { name: event.target.value, identityName: event.target.value })} /><input value={characterLook(character)} aria-label="服装或状态造型名" placeholder="例如：白衣版" onChange={(event) => updateCharacterAsset(character.id, { lookName: event.target.value })} /><input value={character.role} aria-label="人物身份" placeholder="身份或人物关系" onChange={(event) => updateCharacterAsset(character.id, { role: event.target.value })} /><textarea value={character.appearance} aria-label="人物视觉描述" placeholder="不变的身份特征 + 当前造型的服装、妆发和状态" onChange={(event) => updateCharacterAsset(character.id, { appearance: event.target.value })} /><small>{character.visualEvidence ? `出镜依据：${character.visualEvidence}` : character.sceneHints?.length ? `使用镜头：${character.sceneHints.join("、")}` : "未指定镜头时，将按分镜文字匹配此造型"}</small></div>
                 <p>{character.imageUrl ? character.assetMatchKind === "look-candidate" ? `资产库中找到同一人物候选；请确认是否符合“${characterLook(character)}”` : character.reviewDecision === "pending" ? "AI 图片待采用" : "已有可用人物资产" : "等待用户选择资产来源"}</p>
                 <footer>{character.reviewDecision === "pending" && character.imageUrl ? <><button onClick={() => approveCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "确认造型并配对" : "采用并入库"}</button><label className={assetAction ? "disabled" : ""}>上传图片替换<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="danger" onClick={() => rejectCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "不匹配，移除候选" : "删除图片"}</button></> : <><label className={assetAction ? "disabled" : ""}>上传已有图片<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => void generateCharacterBlueprint(character)} disabled={Boolean(assetAction)}>{assetAction === `character-generate:${character.id}` ? "生成中…" : character.imageUrl ? "让 AI 重做" : "让 AI 生成"}</button></>}<button className="plain-danger" onClick={() => setCharacters((items) => items.filter((item) => item.id !== character.id))} disabled={Boolean(assetAction)}>删除框架</button></footer>
               </article>)}

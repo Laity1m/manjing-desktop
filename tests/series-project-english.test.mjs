@@ -35,3 +35,46 @@ test("supports English profile and colon-dialogue formats", async () => {
   assert.deepEqual(characters.map((item) => item.name), ["Mara Vale", "Jon O'Neil"]);
   assert.match(characters[0].description, /forensic engineer/i);
 });
+
+test("rejects screenplay structure, production metadata, sound cues and generic extras", async () => {
+  const { extractCharacters, isGenericNonAssetCharacter, isNonCharacterLabel, normalizeScriptCharacterName } = await loadSeriesProjectModule();
+  const characters = extractCharacters(`PROJECT TITLE: False Signal
+LOGLINE: A detective follows a missing transmission.
+CHARACTER BREAKDOWN:
+MONTAGE
+The city wakes beneath the rain.
+BLACK SCREEN
+A distant siren rises.
+SFX: METAL DOOR SLAMS
+BOOM
+The windows tremble.
+CROWD: Run!
+MAN #1: Look out!
+MARA (V.O.)
+I remember the signal.
+ELIAS (O.S.)
+Then stop listening.`);
+  assert.deepEqual(characters.map((item) => item.name), ["MARA", "ELIAS"]);
+  for (const label of ["PROJECT TITLE", "CHARACTER BREAKDOWN", "MONTAGE", "BLACK SCREEN", "SFX", "SMASH CUT", "TITLE CARD", "CONTINUOUS", "THE END"]) {
+    assert.equal(isNonCharacterLabel(label), true, label);
+  }
+  for (const label of ["CROWD", "MAN #1", "VOICE 2", "EXTRA A"]) assert.equal(isGenericNonAssetCharacter(label), true, label);
+  assert.equal(normalizeScriptCharacterName("MARA (V.O.)"), "MARA");
+  assert.equal(normalizeScriptCharacterName("ELIAS（O.S.）"), "ELIAS");
+  assert.equal(normalizeScriptCharacterName("苏梨-VO-"), "苏梨");
+  assert.equal(isNonCharacterLabel(normalizeScriptCharacterName("-VO-")), true);
+});
+
+test("supports Fountain forced and dual-dialogue character cues without importing outline syntax", async () => {
+  const { extractCharacters } = await loadSeriesProjectModule();
+  const characters = extractCharacters(`# ACT I
+= The investigation begins.
+.SNIPER SCOPE POV
+!SCANNING THE AISLES
+>SMASH CUT TO:
+@McCLANE
+Stay behind me.
+STEEL ^
+I can cover the door.`);
+  assert.deepEqual(characters.map((item) => item.name), ["McCLANE", "STEEL"]);
+});

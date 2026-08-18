@@ -33,6 +33,19 @@ test("imported scripts create editable asset skeletons before any image generati
   assert.match(source, /persistScriptAssetBlueprint/);
   assert.match(source, /saveLibraryPlaceholder/);
   assert.match(source, /资产准备尚未完成：\$\{unresolvedCharacters\.length\} 个人物、\$\{unresolvedProps\.length\} 个道具仍需上传图片，或让 AI 生成后采用/);
+  assert.match(source, /“小传\/人物小传\/角色小传”等栏目标题绝对不是人物/);
+  assert.match(source, /VO、V\.O\.、-VO-、OS、O\.S\. 是附着在真实角色名后的画外音\/声音位置扩展/);
+  assert.match(source, /removeMisclassifiedNarrativeAssets\(\)/);
+});
+
+test("all character generation paths use the concise default aesthetic director", () => {
+  assert.match(source, /CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v3"/);
+  assert.match(source, /const CURATED_FACE_DESIGNS = \[/);
+  assert.match(source, /one memorable primary feature and two quieter supporting features/);
+  assert.match(source, /harmonious large-medium-small shape rhythm/);
+  assert.match(source, /禁止随机拼凑五官/);
+  assert.match(source, /negative_prompt", CHARACTER_IMAGE_NEGATIVE_PROMPT/);
+  assert.doesNotMatch(source, /Enabled Image Agent Skill/);
 });
 
 test("pairs existing assets before image generation and opens review videos in a large preview", () => {
@@ -41,6 +54,18 @@ test("pairs existing assets before image generation and opens review videos in a
   assert.match(source, /先配对已有资产/);
   assert.match(source, /video-review-lightbox/);
   assert.match(source, /大窗预览视频/);
+});
+
+test("batch image generation cannot restart itself and exposes provider failures", () => {
+  assert.match(source, /const batchAssetGenerationRef = useRef\(false\)/);
+  assert.match(source, /if \(assetAction \|\| batchAssetGenerationRef\.current\) return/);
+  assert.match(source, /batchAssetGenerationRef\.current = true/);
+  assert.match(source, /if \(!autoAdopt\) setAssetAction\(actionId\)/);
+  assert.match(source, /withStageProgress\([\s\S]*210000/);
+  assert.match(source, /批量补齐结束：成功/);
+  assert.match(source, /失败原因已写入制作记录/);
+  assert.match(source, /fetchWithHardTimeout/);
+  assert.match(source, /controller\.abort\(\)/);
 });
 
 test("splits episode character looks and binds exactly one look to each shot", () => {

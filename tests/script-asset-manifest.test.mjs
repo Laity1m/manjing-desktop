@@ -62,6 +62,59 @@ test("does not classify project headings as characters and remembers synopsis/ba
   assert.match(manifest.background, /近未来海港城/);
 });
 
+test("rejects biography headings and VO or OS markers in both AI and local extraction", async () => {
+  const { fallbackScriptAssetManifest, parseScriptAssetManifest } = await loadManifestModule();
+  const script = "小传：野心勃勃的权势掌控者。\n-VO-：沉闷的皮靴踏地声。\nV.O.：风声渐近。\n苏梨（OS）：白天那个高高在上的贵子。\n苏梨：王爷来了！";
+  const fromAgent = parseScriptAssetManifest(JSON.stringify({
+    characters: [
+      { name: "小传", role: "metadata", appearance: "人物介绍栏目" },
+      { name: "-VO-", role: "audio cue", appearance: "none" },
+      { name: "V.O.", role: "audio cue", appearance: "none" },
+      { name: "OS", role: "audio cue", appearance: "none" },
+      { name: "苏梨", role: "女主", appearance: "白衣", needsVoice: true, firstDialogue: "王爷来了！" },
+    ],
+  }), script);
+  assert.deepEqual(fromAgent.characters.map((item) => item.name), ["苏梨"]);
+
+  const local = fallbackScriptAssetManifest(script);
+  assert.deepEqual(local.characters.map((item) => item.name), ["苏梨"]);
+});
+
+test("uses visual-identity evidence instead of accepting every script label as a person", async () => {
+  const { fallbackScriptAssetManifest, parseScriptAssetManifest } = await loadManifestModule();
+  const script = `片名：雨夜归人
+单集时长：90秒
+本集梗概：苏梨回府质问摄政王。
+人物关系：苏梨与摄政王互相试探。
+场次1：王府书房，夜，内
+镜号：1-1
+景别：中景
+运镜：缓慢横移
+SFX：皮靴踏地
+群演甲：王爷来了！
+路人A：快走！
+苏梨（V.O.）：白天那个高高在上的贵子。
+摄政王：你终于回来了。`;
+  const fromAgent = parseScriptAssetManifest(JSON.stringify({
+    characters: [
+      { name: "项目信息", role: "metadata", appearance: "none", requiresVisualAsset: true },
+      { name: "场次1", role: "heading", appearance: "none", requiresVisualAsset: true },
+      { name: "SFX", role: "sound cue", appearance: "none", requiresVisualAsset: true },
+      { name: "群演甲", role: "extra", appearance: "模糊背景人物", requiresVisualAsset: true },
+      { name: "路人A", role: "extra", appearance: "一闪而过", requiresVisualAsset: true },
+      { name: "苏梨（V.O.）", role: "女主", appearance: "白衣", requiresVisualAsset: true, visualEvidence: "随后进入王府书房", needsVoice: true, firstDialogue: "白天那个高高在上的贵子。" },
+      { name: "摄政王", role: "男主，声音低沉", appearance: "玄衣，声音沙哑", requiresVisualAsset: true, visualEvidence: "书房内正面出镜", needsVoice: true, firstDialogue: "你终于回来了。" },
+      { name: "神秘来电者", role: "仅声音", appearance: "从不出镜", requiresVisualAsset: true, voiceOnly: true },
+    ],
+  }), script);
+  assert.deepEqual(fromAgent.characters.map((item) => item.name), ["苏梨", "摄政王"]);
+  assert.match(fromAgent.characters[1].appearance, /声音沙哑/);
+
+  const local = fallbackScriptAssetManifest(script);
+  assert.deepEqual(local.characters.map((item) => item.name), ["苏梨", "摄政王"]);
+  assert.equal(local.characters[0].firstDialogue, "白天那个高高在上的贵子。");
+});
+
 test("keeps one identity while splitting per-episode costume and state assets", async () => {
   const { parseScriptAssetManifest } = await loadManifestModule();
   const manifest = parseScriptAssetManifest(JSON.stringify({

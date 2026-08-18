@@ -1,4 +1,4 @@
-import { extractCharacters } from "./series-project";
+import { extractCharacters, isGenericNonAssetCharacter, isNonCharacterLabel, normalizeScriptCharacterName } from "./series-project";
 
 export type ScriptCharacterCandidate = {
   name: string;
@@ -9,6 +9,8 @@ export type ScriptCharacterCandidate = {
   role: string;
   appearance: string;
   reason: string;
+  requiresVisualAsset: boolean;
+  visualEvidence: string;
   needsVoice: boolean;
   firstDialogue: string;
 };
@@ -117,7 +119,15 @@ export function localizedSceneDisplayName(scene: Pick<ScriptSceneCandidate, "nam
 }
 
 function isNarrativeLabel(value: string) {
-  return /^(?:系列项目|当前制作|当前剧集|剧本简介|故事简介|剧情简介|内容简介|项目简介|全剧背景故事|背景故事|故事背景|世界观|世界背景|项目长期记忆|本集相关角色圣经|上一集结束状态|本集完整剧本|人物关系与隐藏信息|世界规则与连续性约束|分集时间线|series project|current production|current episode|synopsis|logline|summary|background|backstory|worldbuilding|world bible|project memory|previous episode end state|full script)$/i.test(value.trim()) || /(?:简介|背景故事|长期记忆|结束状态|完整剧本|角色圣经|时间线)$/.test(value.trim());
+  return isNonCharacterLabel(value) || /^(?:系列项目|当前制作|当前剧集|剧本简介|故事简介|剧情简介|内容简介|项目简介|全剧背景故事|背景故事|故事背景|世界观|世界背景|项目长期记忆|本集相关角色圣经|上一集结束状态|本集完整剧本|人物关系与隐藏信息|世界规则与连续性约束|分集时间线|series project|current production|current episode|synopsis|logline|summary|background|backstory|worldbuilding|world bible|project memory|previous episode end state|full script)$/i.test(value.trim());
+}
+
+function isNonVisualCharacterRecord(item: Pick<ScriptCharacterCandidate, "name" | "role" | "appearance" | "requiresVisualAsset">) {
+  const role = clean(item.role, 120);
+  const description = `${role} ${clean(item.appearance, 420)}`;
+  const nonCharacterRole = /^(?:metadata|heading|section|label|audio cue|sound cue|sound effect|stage direction|transition|camera direction|production note|栏目|标题|字段|元数据|音频标记|声音标记|音效|舞台说明|镜头说明|制作备注)$/i.test(role);
+  const voiceOnly = /无实体|不出镜|仅声音|纯声音|只闻其声|画外传来|未实体化|voice[- ]?only|never\s+seen/i.test(description);
+  return !item.requiresVisualAsset || isNarrativeLabel(item.name) || isGenericNonAssetCharacter(item.name) || nonCharacterRole || voiceOnly;
 }
 
 function jsonObject(raw: string) {
@@ -128,18 +138,27 @@ function jsonObject(raw: string) {
 }
 
 export function fallbackScriptAssetManifest(script: string): ScriptAssetManifest {
-  const characters = extractCharacters(script).map((item) => ({
-    name: clean(item.name, 60),
-    identityName: clean(item.name, 60),
-    lookName: "基础版",
-    episodeScope: "当前集",
-    sceneHints: [] as string[],
-    role: "剧本角色",
-    appearance: clean(item.description, 360) || "等待用户补充人物外貌、年龄、发型、服装和状态",
-    reason: "在剧本人物表或对白中出现",
-    needsVoice: new RegExp(`^\\s*${item.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[：:]`, "im").test(script),
-    firstDialogue: clean(script.match(new RegExp(`^\\s*${item.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[：:]\\s*(.+)$`, "im"))?.[1], 500),
-  }));
+  const characters = extractCharacters(script).map((item) => {
+    const escapedName = item.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const cue = `${escapedName}(?:\\s*[（(]\\s*(?:V\\.?O\\.?|V\\s*\\/\\s*O|O\\.?S\\.?|O\\s*\\/\\s*S|VOICE[ -]?OVER|OFF[ -]?SCREEN|CONT['’]?D)\\s*[）)])?`;
+    const colonDialogue = script.match(new RegExp(`^\\s*${cue}\\s*[：:]\\s*(.+)$`, "im"))?.[1];
+    const screenplayDialogue = script.match(new RegExp(`^\\s*${cue}\\s*$\\n(?:\\s*[（(][^）)]+[）)]\\s*\\n)?\\s*([^\\n]+)`, "im"))?.[1];
+    const firstDialogue = clean(colonDialogue || screenplayDialogue, 500);
+    return {
+      name: clean(item.name, 60),
+      identityName: clean(item.name, 60),
+      lookName: "基础版",
+      episodeScope: "当前集",
+      sceneHints: [] as string[],
+      role: "剧本角色",
+      appearance: clean(item.description, 360) || "等待用户补充人物外貌、年龄、发型、服装和状态",
+      reason: "在剧本人物表或对白中出现",
+      requiresVisualAsset: true,
+      visualEvidence: "本地解析在人物表或实际对白中找到具名人物证据",
+      needsVoice: Boolean(firstDialogue),
+      firstDialogue,
+    };
+  });
   const propValues: string[] = [];
   for (const match of script.matchAll(/\[道具[：:]([^\]]+)\]/gi)) propValues.push(...String(match[1] || "").split(/[，,、]/));
   for (const match of script.matchAll(/^(?:重要)?道具\s*[：:]\s*(.+)$/gim)) propValues.push(...String(match[1] || "").split(/[，,、;；]/));
@@ -187,7 +206,7 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
   const background = clean(payload.background || payload.backstory || payload.world || payload.worldBible, 2400);
   const characters = rawCharacters.map((item) => {
     const value = item as Record<string, unknown>;
-    const identityName = clean(value.identityName || value.identity || value.characterName || value.name || value.n, 60);
+    const identityName = normalizeScriptCharacterName(clean(value.identityName || value.identity || value.characterName || value.name || value.n, 60));
     const lookName = clean(value.lookName || value.look || value.variant || value.outfit || value.state, 60) || "基础版";
     const rawSceneHints = Array.isArray(value.sceneHints) ? value.sceneHints : Array.isArray(value.scenes) ? value.scenes : [];
     return {
@@ -199,10 +218,12 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
       role: clean(value.role || value.r, 120) || "剧本角色",
       appearance: clean(value.appearance || value.a || value.description, 420) || "等待用户补充人物外貌、年龄、发型、服装和状态",
       reason: clean(value.reason || value.why, 180) || "剧本中需要稳定视觉身份",
+      requiresVisualAsset: value.requiresVisualAsset !== false && value.visualAsset !== false && value.isVisual !== false && value.voiceOnly !== true,
+      visualEvidence: clean(value.visualEvidence || value.onScreenEvidence || value.evidence || value.reason || value.why, 240),
       needsVoice: value.needsVoice === true || value.speaks === true || Boolean(clean(value.firstDialogue || value.dialogue || value.referenceText, 500)),
       firstDialogue: clean(value.firstDialogue || value.dialogue || value.referenceText, 500),
     };
-  }).filter((item) => item.name && !isNarrativeLabel(item.name) && !/^(?:旁白|画外音|解说|narrator|voice[ -]?over)$/i.test(item.name));
+  }).filter((item) => item.name && !isNonVisualCharacterRecord(item));
   const props = rawProps.map((item) => {
     const value = item as Record<string, unknown>;
     const importance = clean(value.importance || value.level, 20).toLowerCase();

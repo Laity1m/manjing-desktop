@@ -138,7 +138,7 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /最左侧大头照必须平视、严格正脸/);
   assert.match(page, /右侧只负责服装和身材的正面、侧面、背面三视图/);
   assert.match(page, /imageAspect: "16:9"/);
-  assert.match(page, /16:9 horizontal identity-and-outfit production sheet/);
+  assert.match(page, /professional 16:9 production character identity-and-outfit sheet/);
   assert.match(page, /missingCharacters = cast\.filter\(\(character\) => isVisualCharacterAsset\(character\) && !character\.imageUrl\)/);
   assert.doesNotMatch(page, /character\.sheetVersion !== 2/);
   assert.match(page, /sheetVersion: 2 as const/);
@@ -370,20 +370,18 @@ test("invokes OpenAI-compatible image APIs and saves desktop settings across res
   assert.equal(JSON.parse(calls[0].init.body).size, "1024x1536");
 
   let transientCalls = 0;
-  const recovered = await invokeImageModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "secret", model: "gpt-image-test", prompt: "重试生图", aspect: "16:9" }, async () => {
+  await assert.rejects(() => invokeImageModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "secret", model: "gpt-image-test", prompt: "不重复提交生图", aspect: "16:9" }, async () => {
     transientCalls += 1;
-    if (transientCalls < 3) return new Response(JSON.stringify({ error: { message: "upstream connection termination" } }), { status: 503, headers: { "Retry-After": "0" } });
-    return new Response(JSON.stringify({ data: [{ b64_json: "cmVjb3ZlcmVk" }] }), { status: 200 });
-  });
-  assert.equal(transientCalls, 3);
-  assert.equal(recovered.dataUrl, "data:image/png;base64,cmVjb3ZlcmVk");
+    return new Response(JSON.stringify({ error: { message: "upstream connection termination" } }), { status: 503, headers: { "Retry-After": "0" } });
+  }), /接口返回 503/);
+  assert.equal(transientCalls, 1);
 
   let exhaustedCalls = 0;
   await assert.rejects(() => invokeImageModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "secret", model: "gpt-image-test", prompt: "持续断线", aspect: "9:16" }, async () => {
     exhaustedCalls += 1;
     return new Response(JSON.stringify({ error: { message: "upstream connection termination" } }), { status: 503, headers: { "Retry-After": "0" } });
-  }), /生图模型 gpt-image-test连续 3 次返回 503/);
-  assert.equal(exhaustedCalls, 3);
+  }), /接口返回 503/);
+  assert.equal(exhaustedCalls, 1);
 
   let authenticationCalls = 0;
   await assert.rejects(() => invokeImageModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "bad", model: "gpt-image-test", prompt: "鉴权错误", aspect: "9:16" }, async () => {
@@ -689,6 +687,7 @@ test("Windows app directly loads the bundled app without an iframe or local web 
   assert.match(runtime, /\/api\/desktop\/seedance/);
   assert.match(runtime, /TRANSIENT_PROVIDER_STATUSES/);
   assert.match(runtime, /maxAttempts: 3/);
+  assert.match(runtime, /invokeImageModel[\s\S]*maxAttempts: 1/);
   assert.deepEqual(desktopPackage.build.files, [
     "main.js",
     "preload.js",

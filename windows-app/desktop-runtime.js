@@ -478,7 +478,7 @@ async function invokeImageModel(input, fetchImpl = fetch) {
   const data = await fetchProviderJson(target, request, fetchImpl, {
     timeoutMs: IMAGE_GENERATION_TIMEOUT_MS,
     timeoutMessage: `生图模型 ${model} 在 180 秒内没有响应；请检查服务商任务队列后重新运行生图岗位`,
-    maxAttempts: 3,
+    maxAttempts: 1,
     retryLabel: `生图模型 ${model}`
   });
   const result = Array.isArray(data?.data) ? data.data[0] : data?.result;
