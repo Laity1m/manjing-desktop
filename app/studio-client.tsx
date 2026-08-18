@@ -282,6 +282,11 @@ function stableReuseToken(value: string) {
   return (hash >>> 0).toString(36);
 }
 
+function characterIdentitySeed(identity: string) {
+  const parsed = Number.parseInt(stableReuseToken(identity), 36);
+  return (Number.isFinite(parsed) ? parsed % 2147483646 : 0) + 1;
+}
+
 function shotReuseIdentity(scene: Scene) {
   return `shot:${stableReuseToken([scene.title, scene.visual, scene.action, scene.camera, scene.environmentKey, scene.startState, scene.endState].join("|"))}`;
 }
@@ -3338,7 +3343,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     kind: "image" | "audio" | "video",
     prompt: string,
     index = 0,
-    options: { references?: MediaReference[]; voiceName?: string; duration?: number; music?: boolean; resumeKey?: string; imageAspect?: "9:16" | "16:9"; voiceover?: SceneVoiceover; referenceText?: string } = {},
+    options: { references?: MediaReference[]; voiceName?: string; duration?: number; music?: boolean; resumeKey?: string; imageAspect?: "9:16" | "16:9"; voiceover?: SceneVoiceover; referenceText?: string; variationSeed?: number } = {},
   ) {
     const role: "image" | "video" | "voice" = kind === "image" ? "image" : kind === "video" ? "video" : "voice";
     const config = agentConfigs[role];
@@ -3411,7 +3416,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         model: imageModel,
         width: mediaAspect === "9:16" ? "720" : "1280",
         height: mediaAspect === "9:16" ? "1280" : "720",
-        seed: String(Math.abs(story.length * 97 + index * 7919)),
+        seed: String(options.variationSeed ?? Math.abs(story.length * 97 + index * 7919)),
         enhance: "true",
         safe: "true",
       });
@@ -5298,6 +5303,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generateCharacterBlueprint(character: CharacterAsset, autoAdopt = false) {
     if (assetAction && !autoAdopt) return;
+    const redoRequested = Boolean(character.imageUrl);
+    // All looks of one identity start from the same latent seed. A manual redo
+    // gets a new sample, while the current/Canonical image is still submitted as
+    // the hard face reference so clothes and state can change without recasting.
+    const variationSeed = redoRequested ? Math.floor(Math.random() * 2147483646) + 1 : characterIdentitySeed(characterIdentity(character));
     const actionId = `character-generate:${character.id}`;
     const run = Date.now();
     runRef.current = run;
@@ -5314,12 +5324,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }
       }
       const characterRequest = await characterGenerationRequest(character, characters);
-      const prompt = characterRequest.prompt;
+      const prompt = `${characterRequest.prompt}${redoRequested ? "\nREDO REQUEST: create a genuinely new sampled result. Keep the locked identity and required character facts unchanged, but do not return the previous pixels; refresh the pose, expression micro-detail, lighting treatment and secondary presentation details." : ""}`;
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
       let generatedRemoteUrl = "";
       if (agentConfigs.image.adapter !== "horde") {
-        const asset = await pollinationsMedia("image", prompt, 700 + characters.findIndex((item) => item.id === character.id), { imageAspect: "16:9", references: characterRequest.references });
+        const asset = await pollinationsMedia("image", prompt, 700 + characters.findIndex((item) => item.id === character.id), { imageAspect: "16:9", references: characterRequest.references, variationSeed });
         const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-blueprint-${character.id}.png`, uploadKey) : "";
         generatedUrl = asset.url;
@@ -5372,6 +5382,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generatePropBlueprint(prop: PropAsset, index: number, autoAdopt = false) {
     if (assetAction && !autoAdopt) return;
+    const redoRequested = Boolean(prop.imageUrl);
+    const variationSeed = redoRequested ? Math.floor(Math.random() * 2147483646) + 1 : undefined;
     const actionId = `prop-generate:${prop.id}`;
     const run = Date.now();
     runRef.current = run;
@@ -5386,12 +5398,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           return true;
         }
       }
-      const prompt = `${frameVisualPrompt(style)}, production prop identity sheet for ${prop.name}, ${prop.description}, exact shape, material, color, scale and story state, front side and three-quarter reference views, neutral background, no person, no redesign, no text`;
+      const prompt = `${frameVisualPrompt(style)}, production prop identity sheet for ${prop.name}, ${prop.description}, exact shape, material, color, scale and story state, front side and three-quarter reference views, neutral background, no person, no redesign, no text${redoRequested ? ", REDO REQUEST: generate a genuinely new sample rather than returning the previous pixels; preserve the prop identity but refresh lighting and secondary presentation details" : ""}`;
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
       let generatedRemoteUrl = "";
       if (agentConfigs.image.adapter !== "horde") {
-        const asset = await pollinationsMedia("image", prompt, 800 + index, { imageAspect: "16:9" });
+        const asset = await pollinationsMedia("image", prompt, 800 + index, { imageAspect: "16:9", variationSeed });
         const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `prop-blueprint-${prop.id}.png`, uploadKey) : "";
         generatedUrl = asset.url;
@@ -5443,6 +5455,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generateSceneBlueprint(sceneAsset: SceneAsset, index: number, autoAdopt = false) {
     if (assetAction && !autoAdopt) return;
+    const redoRequested = Boolean(sceneAsset.imageUrl);
+    const variationSeed = redoRequested ? Math.floor(Math.random() * 2147483646) + 1 : undefined;
     const actionId = `scene-generate:${sceneAsset.id}`;
     const run = Date.now();
     runRef.current = run;
@@ -5457,12 +5471,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           return true;
         }
       }
-      const prompt = `${frameVisualPrompt(style)}, canonical empty environment reference for ${sceneAsset.name}, environment identity ${sceneAsset.environmentKey}, ${sceneAsset.description}, ${sceneAsset.timeWeather}. Lock the exact architecture, room proportions, doors, windows, pathways, fixed furniture, spatial layout, palette, weather, time of day and light direction. No people, silhouettes, crowds, animals, movable story props, text, labels, storyboard panels or camera collage. One clean cinematic establishing reference image for repeated multimodal @Image use.`;
+      const prompt = `${frameVisualPrompt(style)}, canonical empty environment reference for ${sceneAsset.name}, environment identity ${sceneAsset.environmentKey}, ${sceneAsset.description}, ${sceneAsset.timeWeather}. Lock the exact architecture, room proportions, doors, windows, pathways, fixed furniture, spatial layout, palette, weather, time of day and light direction. No people, silhouettes, crowds, animals, movable story props, text, labels, storyboard panels or camera collage. One clean cinematic establishing reference image for repeated multimodal @Image use.${redoRequested ? " REDO REQUEST: create a genuinely new sample instead of returning the previous pixels; preserve the environment identity and layout while refreshing the camera presentation and secondary lighting detail." : ""}`;
       let generatedUrl = "";
       let generatedBlob: Blob | null = null;
       let generatedRemoteUrl = "";
       if (agentConfigs.image.adapter !== "horde") {
-        const asset = await pollinationsMedia("image", prompt, 850 + index, { imageAspect: aspect });
+        const asset = await pollinationsMedia("image", prompt, 850 + index, { imageAspect: aspect, variationSeed });
         const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         generatedRemoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `scene-blueprint-${sceneAsset.id}.png`, uploadKey) : "";
         generatedUrl = asset.url;

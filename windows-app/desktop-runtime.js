@@ -412,11 +412,14 @@ async function invokeTextModel(input, fetchImpl = fetch) {
   }[role] || "文本 AI";
   const requestOptions = {
     timeoutMs,
-    timeoutMessage: `${roleLabel} 模型 ${model} 在 ${Math.round(timeoutMs / 1000)} 秒内没有响应；已保留现有成果，请检查地址、网络或服务商队列后重新运行该岗位`
+    timeoutMessage: `${roleLabel} 模型 ${model} 在 ${Math.round(timeoutMs / 1000)} 秒内没有响应；已保留现有成果，请检查地址、网络或服务商队列后重新运行该岗位`,
+    maxAttempts: 2,
+    retryLabel: roleLabel
   };
   let data;
   if (mode === "openai" && protocolCandidates.length) {
     let lastError;
+    let transientProtocolFallbacks = 0;
     for (const candidate of protocolCandidates) {
       try {
         data = await fetchProviderJson(candidate.target, { method: "POST", headers: providerHeaders(mode, apiKey, true), body: JSON.stringify(candidate.body) }, fetchImpl, requestOptions);
@@ -424,7 +427,19 @@ async function invokeTextModel(input, fetchImpl = fetch) {
         break;
       } catch (error) {
         lastError = error;
-        if (![404, 405].includes(Number(error?.providerStatus))) throw error;
+        const providerStatus = Number(error?.providerStatus);
+        if ([404, 405].includes(providerStatus)) continue;
+        // OpenAI-compatible relays sometimes expose both Responses and Chat
+        // Completions while only one route is temporarily healthy. Retry the
+        // current route, then try one alternate protocol before surfacing the
+        // error; this makes the UI rerun action materially different from a
+        // single repeat of the same failed request without causing an endless
+        // or high-cost retry loop.
+        if (TRANSIENT_PROVIDER_STATUSES.has(providerStatus) && transientProtocolFallbacks < 1) {
+          transientProtocolFallbacks += 1;
+          continue;
+        }
+        throw error;
       }
     }
     if (!data) throw Object.assign(new Error(`镜头总控接口没有可用的 OpenAI 生成路径。已尝试：${protocolCandidates.map((candidate) => candidate.target.pathname).join("、")}。请确认服务商的完整生成接口地址`), { statusCode: 502, providerStatus: lastError?.providerStatus });

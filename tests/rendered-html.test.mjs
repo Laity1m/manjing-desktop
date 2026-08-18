@@ -356,6 +356,30 @@ test("discovers provider models and invokes compatible text APIs through the des
   const invoked = await invokeTextModel({ mode: "openai", endpoint: "https://api.example.com/v1", apiKey: "secret", model: "writer-pro", system: "只返回 JSON", prompt: "写分镜" }, fetchImpl);
   assert.equal(invoked.text, "{\"title\":\"测试剧本\"}");
   assert.equal(calls[1].url, "https://api.example.com/v1/chat/completions");
+
+  const retryCalls = [];
+  const recovered = await invokeTextModel({ mode: "openai", endpoint: "https://relay.example.com/v1/responses", apiKey: "secret", model: "writer-pro", role: "writer", task: "storyboard", system: "只返回 JSON", prompt: "重新写分镜" }, async (url) => {
+    retryCalls.push(String(url));
+    if (retryCalls.length <= 2) return new Response(JSON.stringify({ error: { message: "upstream connection timeout" } }), { status: 500, headers: { "Retry-After": "0" } });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "{\"title\":\"备用协议恢复\"}" } }] }), { status: 200 });
+  });
+  assert.equal(recovered.text, "{\"title\":\"备用协议恢复\"}");
+  assert.deepEqual(retryCalls, [
+    "https://relay.example.com/v1/responses",
+    "https://relay.example.com/v1/responses",
+    "https://relay.example.com/v1/chat/completions",
+  ]);
+});
+
+test("explicit AI redraws use a fresh image seed instead of reproducing the same pixels", async () => {
+  const studio = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
+  assert.match(studio, /variationSeed\?: number/);
+  assert.match(studio, /options\.variationSeed \?\? Math\.abs\(story\.length \* 97 \+ index \* 7919\)/);
+  assert.match(studio, /const redoRequested = Boolean\(character\.imageUrl\)/);
+  assert.match(studio, /characterIdentitySeed\(characterIdentity\(character\)\)/);
+  assert.match(studio, /const redoRequested = Boolean\(prop\.imageUrl\)/);
+  assert.match(studio, /const redoRequested = Boolean\(sceneAsset\.imageUrl\)/);
+  assert.match(studio, /REDO REQUEST: create a genuinely new sampled result/);
 });
 
 test("invokes OpenAI-compatible image APIs and saves desktop settings across restarts", async () => {
