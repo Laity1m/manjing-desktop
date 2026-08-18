@@ -50,12 +50,7 @@ export function selectCharacterIdentityReference<T extends CharacterIdentityRefe
     .sort((left, right) => right.score - left.score || left.index - right.index)[0]?.candidate;
 }
 
-/**
- * Selects one permanent face anchor for an identity across app versions and
- * outfit variants. Canonical/base assets outrank newer look-specific assets;
- * ties deliberately prefer the oldest approved anchor so an app update cannot
- * silently replace a person's face with the newest generation.
- */
+/** Selects the best candidate when a task has not bound an identity anchor yet. */
 export function selectLibraryCharacterIdentityAnchor<T extends LibraryCharacterIdentityAnchor>(identityName: string, assets: T[]) {
   const identity = normalizeAssetIdentity(identityName);
   return assets
@@ -70,7 +65,51 @@ export function selectLibraryCharacterIdentityAnchor<T extends LibraryCharacterI
     .sort((left, right) => right.score - left.score || left.asset.createdAt.localeCompare(right.asset.createdAt))[0]?.asset;
 }
 
+export function taskIdentityAnchorKey(taskId: string, identityName: string) {
+  return `${taskId.trim() || "standalone"}::${normalizeAssetIdentity(identityName)}`;
+}
+
+/**
+ * Binds one library asset to one character only for the current studio task.
+ * The binding map intentionally lives in memory: opening a new task/session
+ * performs a fresh selection instead of claiming an engine-level permanent lock.
+ */
+export function selectTaskScopedLibraryCharacterIdentityAnchor<T extends LibraryCharacterIdentityAnchor>(
+  taskId: string,
+  identityName: string,
+  assets: T[],
+  bindings: Map<string, string>,
+) {
+  const key = taskIdentityAnchorKey(taskId, identityName);
+  const boundId = bindings.get(key);
+  if (boundId) {
+    const bound = assets.find((asset) => asset.id === boundId && asset.reusable !== false && asset.assetState !== "placeholder");
+    if (bound) return bound;
+    bindings.delete(key);
+  }
+  const selected = selectLibraryCharacterIdentityAnchor(identityName, assets);
+  if (selected) bindings.set(key, selected.id);
+  return selected;
+}
+
+export const CHARACTER_REFERENCE_POLICY = {
+  faceRegionFraction: [0.35, 0.4] as const,
+  faceRelativePriority: 1.2,
+  multiviewRelativePriority: 1.05,
+  providerGuidanceCap: 1.5,
+  identityReanchorInterval: 4,
+  spatialReanchorInterval: 6,
+};
+
+export function shouldReanchorCharacterIdentity(sceneIndex: number) {
+  return sceneIndex >= 0 && sceneIndex % CHARACTER_REFERENCE_POLICY.identityReanchorInterval === 0;
+}
+
+export function shouldReanchorSpatialLayout(sceneIndex: number) {
+  return sceneIndex > 0 && sceneIndex % CHARACTER_REFERENCE_POLICY.spatialReanchorInterval === 0;
+}
+
 export function characterIdentityLockInstruction(identity: string, lookName: string, hasReference: boolean) {
   if (!hasReference) return "";
-  return `REFERENCE IMAGE 1 IS THE PERMANENT CANONICAL FACE ANCHOR FOR ${identity}. Copy the same person, not a similar casting: preserve skull silhouette, facial thirds, eye shape and spacing, eyebrows, nose bridge and tip, philtrum, mouth width, jaw, cheek structure, ears, age, skin tone, hairline and stable identifying marks. Change only the episode look to ${lookName}; old clothing and state are not identity. Do not average this face with another reference, beautify it into a generic face, or redesign any landmark. Keep the requested character-reference composition while using reference image 1 as the single face authority.`;
+  return `REFERENCE IMAGE 1 IS THE TASK-SCOPED CANONICAL IDENTITY BASELINE FOR ${identity}; this is a workflow constraint, not a claim of permanent engine-level identity locking. Copy the same person, not a similar casting: preserve skull silhouette, facial thirds, eye shape and spacing, eyebrows, nose bridge and tip, philtrum, mouth width, jaw, cheek structure, ears, age, skin tone, hairline and stable identifying marks. Change only the episode look to ${lookName}; old clothing and state are not identity. Do not average this face with another historical reference, beautify it into a generic face, or redesign any landmark. Keep the requested four-zone character-card composition while using reference image 1 as the single identity authority for this task.`;
 }

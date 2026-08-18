@@ -77,22 +77,28 @@ test("preflights reusable assets before every Seedance video path", () => {
   assert.match(studio, /role: "reference_video"/);
 });
 
-test("direct video workflow skips storyboard images and uses approved videos without tail frames", () => {
+test("direct video workflow skips generated storyboard first frames and makes tail-frame inheritance explicit", () => {
   assert.match(studio, /const directVideoWorkflow = agentConfigs\.video\.adapter !== "browser"/);
-  assert.match(studio, /跳过分镜图，直接进入全能参考视频/);
+  assert.match(studio, /跳过分镜首帧图，直接进入全能参考视频/);
   assert.match(studio, /previousEpisodeVideoReference/);
   assert.match(studio, /continuityReferenceDecision: "cross-episode-video"/);
   assert.match(studio, /上一镜已批准视频连续性/);
+  assert.match(studio, /frameContinuityMode === "controlled-frame"/);
+  assert.match(studio, /可控继承模式：上一镜质检尾帧构图/);
+  assert.match(studio, /当前任务 Canonical 人物卡优先压制变脸/);
   assert.doesNotMatch(studio, /function persistTailFrameAsset/);
   assert.doesNotMatch(studio, /function shouldInheritTailFrame/);
 });
 
-test("keeps extracted frames for QA only and never submits them as generation references", () => {
+test("defaults to QA-only extracted frames and exposes opt-in controlled inheritance", () => {
   assert.match(studio, /videoStartFrameUrl: inspection\.frames\.start/);
   assert.match(studio, /videoEndFrameUrl: inspection\.frames\.end/);
   assert.doesNotMatch(studio, /上一镜视频截取首帧/);
   assert.doesNotMatch(studio, /上一镜视频截取尾帧/);
   assert.doesNotMatch(studio, /tags: \["视频截帧", "镜头尾帧"/);
+  assert.match(studio, /useState<FrameContinuityMode>\("identity-first"\)/);
+  assert.match(studio, /IDENTITY-FIRST MODE: do not submit extracted first\/end-frame images/);
+  assert.match(studio, /CONTROLLED FRAME INHERITANCE MODE/);
   assert.match(studio, /role: "reference_image"/);
   assert.match(seedanceRoute, /const role = kind === "image" \? "reference_image"/);
   assert.match(desktopRuntime, /const role = kind === "image" \? "reference_image"/);

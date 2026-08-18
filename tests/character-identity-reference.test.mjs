@@ -40,10 +40,30 @@ test("library identity anchors remain stable across app versions and outfit vari
   assert.equal(selectLibraryCharacterIdentityAnchor("苏梨", assets)?.id, "original-face");
 });
 
+test("identity anchors are scoped to one task and periodic re-anchors are deterministic", async () => {
+  const { CHARACTER_REFERENCE_POLICY, selectTaskScopedLibraryCharacterIdentityAnchor, shouldReanchorCharacterIdentity, shouldReanchorSpatialLayout } = await loadReferenceModule();
+  const original = { id: "original", name: "苏梨-基础版", identityKey: "苏梨", lookName: "基础版", category: "character", mediaType: "image", reusable: true, locked: true, canonical: true, assetState: "ready", createdAt: "2026-01-01T00:00:00.000Z" };
+  const newer = { ...original, id: "newer", name: "苏梨-新版", lookName: "新版", canonical: false, createdAt: "2026-08-18T00:00:00.000Z" };
+  const bindings = new Map();
+  assert.equal(selectTaskScopedLibraryCharacterIdentityAnchor("task-a", "苏梨", [original, newer], bindings)?.id, "original");
+  const promoted = { ...newer, canonical: true };
+  const demotedOriginal = { ...original, canonical: false, locked: false };
+  assert.equal(selectTaskScopedLibraryCharacterIdentityAnchor("task-a", "苏梨", [demotedOriginal, promoted], bindings)?.id, "original");
+  assert.equal(selectTaskScopedLibraryCharacterIdentityAnchor("task-b", "苏梨", [demotedOriginal, promoted], bindings)?.id, "newer");
+  assert.equal(CHARACTER_REFERENCE_POLICY.faceRelativePriority, 1.2);
+  assert.equal(CHARACTER_REFERENCE_POLICY.multiviewRelativePriority, 1.05);
+  assert.equal(CHARACTER_REFERENCE_POLICY.providerGuidanceCap, 1.5);
+  assert.equal(shouldReanchorCharacterIdentity(0), true);
+  assert.equal(shouldReanchorCharacterIdentity(4), true);
+  assert.equal(shouldReanchorCharacterIdentity(5), false);
+  assert.equal(shouldReanchorSpatialLayout(6), true);
+});
+
 test("identity-lock prompt changes only the look while preserving exact facial geometry", async () => {
   const { characterIdentityLockInstruction } = await loadReferenceModule();
   const instruction = characterIdentityLockInstruction("苏梨", "夜间居家服", true);
-  assert.match(instruction, /PERMANENT CANONICAL FACE ANCHOR/);
+  assert.match(instruction, /TASK-SCOPED CANONICAL IDENTITY BASELINE/);
+  assert.match(instruction, /not a claim of permanent engine-level identity locking/);
   assert.match(instruction, /same person, not a similar casting/);
   assert.match(instruction, /Change only the episode look to 夜间居家服/);
 });

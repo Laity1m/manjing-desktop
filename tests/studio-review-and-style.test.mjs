@@ -39,14 +39,33 @@ test("imported scripts create editable asset skeletons before any image generati
 });
 
 test("all character generation paths use the concise default aesthetic director", () => {
-  assert.match(source, /CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v4"/);
+  assert.match(source, /CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v5"/);
   assert.match(source, /const CURATED_FACE_DESIGNS = \[/);
   assert.match(source, /one memorable primary feature and two quieter supporting features/);
   assert.match(source, /harmonious large-medium-small shape rhythm/);
   assert.match(source, /SCREEN-APPEAL CONTRACT/);
-  assert.match(source, /clean two-view casting sheet/);
+  assert.match(source, /FIXED FOUR-ZONE LAYOUT/);
+  assert.match(source, /left 35%-40%/);
+  assert.match(source, /top = front full-body, middle = 45-degree side full-body, bottom = back full-body/);
+  assert.match(source, /evaluateCharacterReferenceCard/);
   assert.match(source, /negative_prompt", CHARACTER_IMAGE_NEGATIVE_PROMPT/);
   assert.doesNotMatch(source, /Enabled Image Agent Skill/);
+});
+
+test("four-zone cards receive multi-angle checks and video continuity remains user-selectable", () => {
+  assert.match(source, /frontalFace: number \| null/);
+  assert.match(source, /profileSilhouette: number \| null/);
+  assert.match(source, /backSilhouette: number \| null/);
+  assert.match(source, /facialFeatures: number \| null/);
+  assert.match(source, /bodyProportion: number \| null/);
+  assert.match(source, /costumeConsistency: number \| null/);
+  assert.match(source, /正面全身、45度侧面全身、背面全身/);
+  assert.match(source, /A · 身份优先（默认）/);
+  assert.match(source, /B · 可控尾帧继承/);
+  assert.match(source, /frameContinuityMode === "controlled-frame"/);
+  assert.match(source, /continuityReferenceDecision: sceneIndex > 0 \? \(frameContinuityMode === "controlled-frame" \? "tail-frame"/);
+  assert.match(source, /const pendingCharacterCards = cast\.filter/);
+  assert.match(source, /四区角色卡等待用户批准，未提交视频任务/);
 });
 
 test("pairs existing assets before image generation and opens review videos in a large preview", () => {
@@ -77,7 +96,7 @@ test("splits episode character looks and binds exactly one look to each shot", (
   assert.match(source, /人物身份与人物造型必须分层/);
   assert.match(source, /每镜必须用 characterLooks 显式指定/);
   assert.match(source, /人物造型资产 · \{character\.episodeScope/);
-  assert.match(source, /Canonical 人物造型：\$\{characterAssetNaming\(character\)\.displayName\}/);
+  assert.match(source, /当前任务 Canonical 人物四区角色卡：\$\{characterAssetNaming\(character\)\.displayName\}/);
 });
 
 test("creates user-selectable canonical scene images for omni-reference-only video", () => {
@@ -88,5 +107,6 @@ test("creates user-selectable canonical scene images for omni-reference-only vid
   assert.match(source, /approveSceneBlueprint/);
   assert.match(source, /category: "scene"/);
   assert.match(source, /Canonical 空场景：\$\{canonicalSceneAsset\.name\}/);
-  assert.match(source, /不用首尾帧时仍用场景 @Image 全能参考/);
+  assert.match(source, /抽取首尾帧只用于质检，不送入模型/);
+  assert.match(source, /可控继承仍以本任务 Canonical 人物卡优先/);
 });

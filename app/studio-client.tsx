@@ -17,7 +17,7 @@ import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/cust
 import { createCanvasFromStudio } from "./lib/production-canvas";
 import { attachLibraryFileToPlaceholder, deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, saveLibraryPlaceholder, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
 import { findReusableLibraryAsset, normalizeAssetIdentity, normalizeAssetLook } from "./lib/asset-reuse";
-import { characterIdentityLockInstruction, selectCharacterIdentityReference, selectLibraryCharacterIdentityAnchor } from "./lib/character-identity-reference";
+import { CHARACTER_REFERENCE_POLICY, characterIdentityLockInstruction, selectCharacterIdentityReference, selectTaskScopedLibraryCharacterIdentityAnchor, shouldReanchorCharacterIdentity, shouldReanchorSpatialLayout, taskIdentityAnchorKey } from "./lib/character-identity-reference";
 import { videoConsistencyAccepted } from "./lib/consistency-gate";
 import { planSequentialVideo } from "./lib/sequential-video-flow";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
@@ -67,6 +67,11 @@ type MotionPreset = "push" | "pull" | "pan-left" | "pan-right" | "float";
 type TransitionPreset = "fade" | "cut" | "flash";
 type VisualFilter = "none" | "warm" | "cool" | "mono";
 type SubtitlePosition = "top" | "center" | "bottom";
+type FrameContinuityMode = "identity-first" | "controlled-frame";
+
+function characterSheetVersionFromLibrary(asset: Pick<LibraryAsset, "tags">): 2 | 3 {
+  return asset.tags.some((tag) => /四区角色卡|大头照|正侧背三视图|character-card-v3/i.test(tag)) ? 3 : 2;
+}
 type ActivityState = "running" | "done" | "warning" | "error";
 type ActivityEvent = { id: string; role: AgentRole; state: ActivityState; message: string; time: string };
 type BridgeHealth = { state: "idle" | "testing" | "ready" | "partial" | "error"; message: string; nodes?: Record<string, boolean>; workflows?: Record<string, boolean> };
@@ -75,6 +80,8 @@ type AgentPreset = { id: string; adapter: AgentAdapter; name: string; model: str
 type QuickModelDraft = { name: string; adapter: DiscoverableApiMode; model: string; endpoint: string; apiKey: string; note: string };
 type RoleSaveState = { role: AgentRole | null; state: "idle" | "saving" | "saved" | "error"; message: string };
 type SceneAction = { id: string; type: "image" | "video" };
+type CharacterReferenceScores = { frontalFace: number | null; profileSilhouette: number | null; backSilhouette: number | null; facialFeatures: number | null; bodyProportion: number | null; costumeConsistency: number | null };
+type CharacterReferenceReport = { scores: CharacterReferenceScores; overall: number; decision: "pass" | "review" | "reject"; mode: "vision" | "structural"; findings: string[]; checkedAt: string };
 type CharacterAsset = {
   id: string;
   libraryAssetId?: string;
@@ -94,7 +101,8 @@ type CharacterAsset = {
   remoteUrl?: string;
   arkAssetId?: string;
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
-  sheetVersion?: 2;
+  sheetVersion?: 2 | 3;
+  referenceCardReport?: CharacterReferenceReport;
   reviewDecision?: UserReviewDecision;
   assetMatchKind?: "exact" | "look-candidate";
   status: "queued" | "generating" | "ready" | "error";
@@ -189,6 +197,7 @@ type StudioSession = {
   style: string;
   targetDuration: number;
   aspect: "9:16" | "16:9";
+  frameContinuityMode?: FrameContinuityMode;
   characters: CharacterAsset[];
   propAssets: PropAsset[];
   sceneAssets: SceneAsset[];
@@ -296,8 +305,8 @@ function voiceReuseIdentity(scene: Scene, voiceName: string) {
   return `voice:${stableReuseToken([scene.speaker, voiceName, scene.emotion, scene.dialogue].join("|"))}`;
 }
 
-const CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v4";
-const CHARACTER_IMAGE_NEGATIVE_PROMPT = "low quality, ugly or uncanny face, incoherent facial proportions, generic cloned face, influencer same-face, pointed V-line jaw, oversized vacant eyes, swollen lips, waxy plastic skin, gray muddy skin, excessive beauty filter, stiff smile, crossed eyes, deformed iris, bad anatomy, bad hands, extra fingers, duplicate body, cropped feet, random jewelry, text, logo, watermark";
+const CHARACTER_AESTHETIC_VERSION = "manjing-character-art-direction-v5";
+const CHARACTER_IMAGE_NEGATIVE_PROMPT = "multiple people, different identities across card views, low quality, ugly or uncanny face, deformed profile, inconsistent left-right facial geometry, incoherent facial proportions, generic cloned face, influencer same-face, pointed V-line jaw, oversized vacant eyes, swollen lips, waxy plastic skin, gray muddy skin, excessive beauty filter, stiff smile, crossed eyes, deformed iris, bad anatomy, bad hands, missing hands, missing feet, extra fingers, duplicate body, cropped limbs, perspective distortion, complex background, heavy shadow, random jewelry or props, exaggerated action pose, chibi proportions, blur, text, logo, watermark, border decoration";
 
 const CURATED_FACE_DESIGNS = [
   "a refined oval facial structure with softly defined cheekbones; the primary memory feature is calm almond-shaped eyes, supported by a natural straight nose and a balanced relaxed mouth; a subtle beauty mark below one eye",
@@ -598,9 +607,9 @@ function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset,
   const look = characterAssetNaming(character).lookName;
   const aesthetic = configuredImageSkillPrompt("character");
   if (aesthetic.ids.length) markContextUsed(aesthetic.ids);
-  return `Create one polished 16:9 production character reference for ${identity}, role: ${character.role}. Current episode look: ${look}. Script facts: ${character.appearance}. Visual medium: ${characterVisualPrompt(styleName)}. ${screenCastingBeautyContract(styleName)} ${characterAestheticDirection(styleName)}. Curated facial design ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. ${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"}
+  return `Create one polished 16:9 production Canonical character card for ${identity}, role: ${character.role}. Current episode look: ${look}. Script facts: ${character.appearance}. Visual medium: ${characterVisualPrompt(styleName)}. ${screenCastingBeautyContract(styleName)} ${characterAestheticDirection(styleName)}. Curated facial design ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. ${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"}
 
-Composition: a clean two-view casting sheet on a seamless warm light-gray studio background. On the left, one large eye-level strict frontal head-and-shoulders portrait with neutral relaxed expression, direct focused gaze, both eyes and both jaw sides fully visible, soft 30-degree key light and small natural catchlights. On the right, one head-to-toe front view in the exact ${look} costume, relaxed posture and empty hands. Both views are unquestionably the same person with identical facial geometry, age, skin tone, hairline and hairstyle. Keep the face large, sharp and unobstructed. Use clean value hierarchy, refined color harmony, believable materials and natural anatomy. No side/back face, alternate face, head tilt, hair over an eye, hand near face, props, scenery, furniture, text, labels, decorative frame or cropped feet. Different cast members must differ in skull silhouette, eyes, nose, mouth, brows, age rhythm and primary memory feature; this same identity must never change face between outfits.`;
+FIXED FOUR-ZONE LAYOUT: pure white seamless background, flat even studio illumination, no cast shadow and no environmental distraction. The left 35%-40% of the canvas is one large eye-level strict frontal head-and-shoulders portrait: complete clear facial features, direct focused gaze, relaxed neutral expression, both eyes and both jaw sides visible, face sharp and unobstructed. The right 60%-65% is a vertically ordered three-view turnaround of the exact same person: top = front full-body, middle = 45-degree side full-body, bottom = back full-body. Every full-body view uses the same natural slight T-pose, same height and head-to-body ratio, complete hands and feet, no cropping, no action pose and no perspective distortion. All four zones must depict one identity with identical age, skin tone, skull and hair silhouette, hairline, hairstyle and exact ${look} costume construction, colors, materials and accessories. The frontal close-up is the facial identity authority; relative face attention priority 1.2. The three-view turnaround is the body, hair and costume authority; relative multiview attention priority 1.05. Provider guidance must remain at or below 1.5; these are relative workflow priorities and must not be serialized as unsupported API fields. Use refined color harmony, believable materials and natural anatomy. No extra person, alternate face, left-right inconsistency, head tilt, hair over an eye, hand near face, props, scenery, furniture, text, watermark, labels, border decoration, chibi proportions or cropped limbs. Different cast members must differ in skull silhouette, eyes, nose, mouth, brows, age rhythm and primary memory feature. Extreme high/low-angle or rear three-quarter shots still require an additional matching-angle user reference; this card reduces drift but cannot guarantee engine-level identity invariance.`;
 }
 
 function isVisualCharacterAsset(character: Pick<CharacterAsset, "name" | "role" | "appearance">) {
@@ -1098,10 +1107,10 @@ function drawCover(
   ctx.restore();
 }
 
-async function normalizeImageBlobForAspect(blob: Blob, aspect: "9:16" | "16:9") {
+async function normalizeImageBlobForAspect(blob: Blob, aspect: "9:16" | "16:9", purpose: "standard" | "character-card" = "standard") {
   const bitmap = await createImageBitmap(blob);
-  const width = aspect === "9:16" ? 720 : 1280;
-  const height = aspect === "9:16" ? 1280 : 720;
+  const width = purpose === "character-card" ? 1792 : aspect === "9:16" ? 720 : 1280;
+  const height = purpose === "character-card" ? 1024 : aspect === "9:16" ? 1280 : 720;
   const targetRatio = width / height;
   const sourceRatio = bitmap.width / bitmap.height;
   let sourceX = 0;
@@ -1259,6 +1268,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [seedanceApiKey, setSeedanceApiKey] = useState("");
   const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-2-0-260128");
   const [videoResolution, setVideoResolution] = useState<"480p" | "720p" | "1080p">("720p");
+  const [frameContinuityMode, setFrameContinuityMode] = useState<FrameContinuityMode>("identity-first");
   const [importMessage, setImportMessage] = useState("可按需导入，已具备的环节会自动跳过");
   const [scriptImported, setScriptImported] = useState(false);
   const [scriptMemory, setScriptMemory] = useState<ScriptNarrativeMemory>({ synopsis: "", background: "", updatedAt: "" });
@@ -1281,12 +1291,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const videoAssetPreflightRef = useRef(new Set<string>());
   const sceneReviewPatchesRef = useRef(new Map<string, Partial<Scene>>());
   const characterReviewPatchesRef = useRef(new Map<string, Partial<CharacterAsset>>());
+  const taskCharacterIdentityAnchorsRef = useRef(new Map<string, string>());
 
   function activeAssetProjectId() {
     try {
       const active = JSON.parse(window.localStorage.getItem("manjing-active-series-context-v1") || "{}") as { projectId?: string };
       return active.projectId || editorProjectIdRef.current;
     } catch { return editorProjectIdRef.current; }
+  }
+
+  function activeGenerationTaskId() {
+    try {
+      const active = JSON.parse(window.localStorage.getItem("manjing-active-series-context-v1") || "{}") as { projectId?: string; episodeId?: string; activatedAt?: string };
+      return [active.projectId || editorProjectIdRef.current, active.episodeId || "standalone", active.activatedAt || "current-session"].join(":");
+    } catch { return `${editorProjectIdRef.current}:standalone:current-session`; }
   }
 
   async function loadReusableBlueprintAsset(category: "character" | "scene" | "prop", identityKey: string, lookName?: string) {
@@ -1309,24 +1327,36 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function loadCharacterIdentityReference(character: CharacterAsset, workingCharacters = characters) {
     const identity = characterIdentity(character);
-    const inMemory = selectCharacterIdentityReference(character, workingCharacters);
+    const taskId = activeGenerationTaskId();
+    const bindingKey = taskIdentityAnchorKey(taskId, identity);
+    const boundId = taskCharacterIdentityAnchorsRef.current.get(bindingKey);
+    const boundInMemory = boundId ? workingCharacters.find((candidate) => candidate.id === boundId && candidate.reviewDecision === "approved" && Boolean(candidate.remoteUrl || candidate.imageUrl)) : undefined;
+    if (boundInMemory) {
+      const url = await prepareCharacterIdentityReference(boundInMemory.remoteUrl || boundInMemory.imageUrl || "", identity);
+      if (url) return { url, source: characterAssetNaming(boundInMemory).displayName, taskId };
+    }
+    const approvedCandidates = workingCharacters.filter((candidate) => candidate.reviewDecision === "approved");
+    const inMemory = selectCharacterIdentityReference(character, approvedCandidates);
     if (inMemory) {
       const url = await prepareCharacterIdentityReference(inMemory.remoteUrl || inMemory.imageUrl || "", identity);
-      if (url) return { url, source: characterAssetNaming(inMemory).displayName };
+      if (url) {
+        taskCharacterIdentityAnchorsRef.current.set(bindingKey, inMemory.id);
+        return { url, source: characterAssetNaming(inMemory).displayName, taskId };
+      }
     }
     const library = await listLibraryAssets({ allProjects: true });
-    const match = selectLibraryCharacterIdentityAnchor(identity, library);
+    const match = selectTaskScopedLibraryCharacterIdentityAnchor(taskId, identity, library, taskCharacterIdentityAnchorsRef.current);
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
     if (!loaded?.url) return null;
     await markLibraryAssetUsed(match.id);
-    return { url: await prepareCharacterIdentityReference(loaded.url, identity), source: match.name };
+    return { url: await prepareCharacterIdentityReference(loaded.url, identity), source: match.name, taskId };
   }
 
   async function characterGenerationRequest(character: CharacterAsset, workingCharacters = characters) {
     const identityReference = await loadCharacterIdentityReference(character, workingCharacters);
     const prompt = `${characterSheetPrompt(style, character)}${identityReference ? `\n${characterIdentityLockInstruction(characterIdentity(character), characterLook(character), true)}` : ""}`;
-    if (identityReference) recordActivity("image", `人物“${characterIdentity(character)}”的新造型已锁定参考“${identityReference.source}”的同一张脸`, "done");
+    if (identityReference) recordActivity("image", `人物“${characterIdentity(character)}”已在当前任务内绑定单一 Canonical 基准“${identityReference.source}”；新任务会重新选择，不声明引擎永久锁脸`, "done");
     return { prompt, references: identityReference ? [identityReference.url] : [] };
   }
 
@@ -1367,7 +1397,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const match = characterMatches.get(character.id);
       const asset = match ? byId.get(match.id) : undefined;
       const lookCandidate = characterLookCandidates.has(character.id);
-      return !character.imageUrl && asset?.url ? { ...character, libraryAssetId: lookCandidate ? character.libraryAssetId : asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : character.remoteUrl, arkAssetId: asset.arkAssetId, portraitAuthorizationStatus: asset.portraitAuthorizationStatus, sheetVersion: 2 as const, assetMatchKind: lookCandidate ? "look-candidate" as const : "exact" as const, reviewDecision: lookCandidate || asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : character;
+      return !character.imageUrl && asset?.url ? { ...character, libraryAssetId: lookCandidate ? character.libraryAssetId : asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : character.remoteUrl, arkAssetId: asset.arkAssetId, portraitAuthorizationStatus: asset.portraitAuthorizationStatus, sheetVersion: characterSheetVersionFromLibrary(asset), assetMatchKind: lookCandidate ? "look-candidate" as const : "exact" as const, reviewDecision: lookCandidate || asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : character;
     }));
     const nextProps = propItems.map((prop) => { const match = propMatches.get(prop.id); const asset = match ? byId.get(match.id) : undefined; return !prop.imageUrl && asset?.url ? { ...prop, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : prop.remoteUrl, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : prop; });
     const nextScenes = sceneItems.map((sceneAsset) => { const match = sceneMatches.get(sceneAsset.id); const asset = match ? byId.get(match.id) : undefined; return !sceneAsset.imageUrl && asset?.url ? { ...sceneAsset, libraryAssetId: asset.id, imageUrl: asset.url, remoteUrl: asset.url.startsWith("https://") ? asset.url : sceneAsset.remoteUrl, reviewDecision: asset.assetState === "review" ? "pending" as const : "approved" as const, status: "ready" as const } : sceneAsset; });
@@ -1451,7 +1481,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           pollinationsKey?: string;
           bridge?: { url?: string; token?: string; lipsync?: boolean };
           cloudEngines?: { libtvKey?: string; libtvSessionId?: string; libtvProjectUrl?: string; seedanceKey?: string; seedanceModel?: string; videoResolution?: "480p" | "720p" | "1080p" };
-          workspace?: { projectTitle?: string; story?: string; style?: string; targetDuration?: number; aspect?: "9:16" | "16:9"; voiceEnabled?: boolean; bgmEnabled?: boolean; subtitleEnabled?: boolean; voice?: string; musicPrompt?: string; subtitleScale?: number; subtitleColor?: string; musicVolume?: number; scriptImported?: boolean };
+          workspace?: { projectTitle?: string; story?: string; style?: string; targetDuration?: number; aspect?: "9:16" | "16:9"; frameContinuityMode?: FrameContinuityMode; voiceEnabled?: boolean; bgmEnabled?: boolean; subtitleEnabled?: boolean; voice?: string; musicPrompt?: string; subtitleScale?: number; subtitleColor?: string; musicVolume?: number; scriptImported?: boolean };
         };
         const startingFresh = window.localStorage.getItem(NEW_STUDIO_KEY) === "1";
         const requestedProjectId = window.localStorage.getItem(OPEN_STUDIO_PROJECT_KEY) || "";
@@ -1522,6 +1552,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           if (savedWorkspace.style && STYLE_PROMPTS[savedWorkspace.style]) setStyle(savedWorkspace.style);
           if (typeof savedWorkspace.targetDuration === "number") setTargetDuration(savedWorkspace.targetDuration);
           if (savedWorkspace.aspect === "9:16" || savedWorkspace.aspect === "16:9") setAspect(savedWorkspace.aspect);
+          if (savedWorkspace.frameContinuityMode === "identity-first" || savedWorkspace.frameContinuityMode === "controlled-frame") setFrameContinuityMode(savedWorkspace.frameContinuityMode);
           if (typeof savedWorkspace.voiceEnabled === "boolean") setVoiceEnabled(savedWorkspace.voiceEnabled);
           if (typeof savedWorkspace.bgmEnabled === "boolean") setBgmEnabled(savedWorkspace.bgmEnabled);
           if (typeof savedWorkspace.subtitleEnabled === "boolean") setSubtitleEnabled(savedWorkspace.subtitleEnabled);
@@ -1562,6 +1593,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           if (snapshot.style && STYLE_PROMPTS[snapshot.style]) setStyle(snapshot.style);
           if (typeof snapshot.targetDuration === "number") setTargetDuration(snapshot.targetDuration);
           if (snapshot.aspect === "9:16" || snapshot.aspect === "16:9") setAspect(snapshot.aspect);
+          if (snapshot.frameContinuityMode === "identity-first" || snapshot.frameContinuityMode === "controlled-frame") setFrameContinuityMode(snapshot.frameContinuityMode);
           if (Array.isArray(snapshot.characters)) setCharacters(deduplicateCharacterAssets(snapshot.characters as CharacterAsset[]));
           if (Array.isArray(snapshot.propAssets)) { setPropAssets(snapshot.propAssets as PropAsset[]); setAssetAnalysisState("ready"); }
           if (Array.isArray(snapshot.sceneAssets)) {
@@ -1812,11 +1844,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   useEffect(() => {
     if (!agentTeamLoaded) return;
-    const workspace = { projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported };
+    const workspace = { projectTitle, story, style, targetDuration, aspect, frameContinuityMode, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported };
     window.localStorage.setItem("manjing-workspace", JSON.stringify(workspace));
     const timer = window.setTimeout(() => { void persistDesktopSettings().catch(() => undefined); }, 300);
     return () => window.clearTimeout(timer);
-  }, [agentTeamLoaded, agentConfigs, customModels, apiKey, bridgeUrl, bridgeToken, lipsyncEnabled, libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported]);
+  }, [agentTeamLoaded, agentConfigs, customModels, apiKey, bridgeUrl, bridgeToken, lipsyncEnabled, libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, projectTitle, story, style, targetDuration, aspect, frameContinuityMode, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, scriptImported]);
 
   useEffect(() => {
     if (!agentTeamLoaded) return;
@@ -1828,6 +1860,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       style,
       targetDuration,
       aspect,
+      frameContinuityMode,
       characters: characters.map(serializableCharacter),
       propAssets: propAssets.map(serializableProp),
       sceneAssets: sceneAssets.map(serializableSceneAsset),
@@ -1853,7 +1886,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         window.localStorage.setItem("manjing-projects", JSON.stringify([card, ...saved.filter((item) => item.id !== card.id)].slice(0, 30)));
       } catch { /* a private browsing quota should not interrupt production */ }
     }
-  }, [agentTeamLoaded, projectTitle, story, style, targetDuration, aspect, characters, propAssets, sceneAssets, scenes, selected, phase, progress, statusText, activityLog, musicPrompt, musicUrl, exportUrl]);
+  }, [agentTeamLoaded, projectTitle, story, style, targetDuration, aspect, frameContinuityMode, characters, propAssets, sceneAssets, scenes, selected, phase, progress, statusText, activityLog, musicPrompt, musicUrl, exportUrl]);
 
   useEffect(() => {
     if (!playing || !totalDuration) return;
@@ -1940,7 +1973,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function approveCharacterAsset(character: CharacterAsset) {
     if (!character.imageUrl) return;
     const naming = characterAssetNaming(character);
-    patchCharacterReview(character.id, { reviewDecision: "approved", assetMatchKind: character.assetMatchKind === "look-candidate" ? "exact" : character.assetMatchKind, status: "ready" });
     if (character.libraryAssetId) {
       try {
         const response = await fetch(character.imageUrl);
@@ -1948,15 +1980,23 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const blob = await response.blob();
         const sourceChoice = character.assetMatchKind === "look-candidate" ? "upload" : "ai";
         await attachLibraryFileToPlaceholder(character.libraryAssetId, new File([blob], `${naming.displayName}.png`, { type: blob.type || "image/png" }), sourceChoice);
-        await updateLibraryAsset(character.libraryAssetId, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice });
+        const [stored] = character.sheetVersion === 3 ? await loadLibraryAssets([character.libraryAssetId]) : [];
+        await updateLibraryAsset(character.libraryAssetId, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice, ...(character.sheetVersion === 3 ? { tags: [...new Set([...(stored?.tags || []), "四区角色卡", "大头照", "正侧背三视图", "character-card-v3"])] } : {}) });
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : "人物资产入库失败");
         return;
       }
     } else {
-      autoArchive(character.imageUrl, naming.displayName, "character", 5, ["用户批准", "人物", character.name, `造型:${naming.lookName}`, character.id, `asset:character:${stableReuseToken(`${character.name}|${character.appearance}`)}`], { ...naming, entityId: naming.identityKey });
+      try {
+        await archiveGeneratedAsset(character.imageUrl, naming.displayName, "character", 5, ["用户批准", "人物", character.name, `造型:${naming.lookName}`, ...(character.sheetVersion === 3 ? ["四区角色卡", "大头照", "正侧背三视图", "character-card-v3"] : []), character.id, `asset:character:${stableReuseToken(`${character.name}|${character.appearance}`)}`], { ...naming, entityId: naming.identityKey });
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "人物资产入库失败");
+        return;
+      }
     }
-    recordActivity("director", `角色“${character.name}”已由用户逐项批准并进入资产库`, "done");
+    patchCharacterReview(character.id, { reviewDecision: "approved", assetMatchKind: character.assetMatchKind === "look-candidate" ? "exact" : character.assetMatchKind, status: "ready" });
+    taskCharacterIdentityAnchorsRef.current.set(taskIdentityAnchorKey(activeGenerationTaskId(), characterIdentity(character)), character.libraryAssetId || character.id);
+    recordActivity("director", `角色“${character.name}”已由用户逐项批准并绑定到当前任务；新任务不会沿用内存绑定`, "done");
   }
 
   function rejectCharacterAsset(character: CharacterAsset) {
@@ -2983,7 +3023,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         : stylePreset.category === "艺术"
           ? "Absolutely no live action, photographic realism or replacement with a generic digital illustration style."
           : "Absolutely no animation, anime, comic rendering or plastic CGI skin.";
-    const styleBible = `STYLE LOCK (${style}): ${stylePreset.base}; ${stylePreset.frame}; ${stylePreset.motion}. Every frame must use this exact rendering language, line treatment, material shading, facial design language, color palette, contrast and lighting model. ${styleExclusions}\n${spatialContinuityContract(scene)}`;
+    const styleBible = `STYLE CONSISTENCY CONSTRAINT (${style}): ${stylePreset.base}; ${stylePreset.frame}; ${stylePreset.motion}. Keep the rendering language, line treatment, material shading, facial design language, color palette, contrast and lighting model as consistent as the model permits. ${styleExclusions}\n${spatialContinuityContract(scene)}`;
     const styleNegative = westernAnimation ? "anime, manga, donghua, manhua, live action, photorealistic skin, generic children's clip-art, wrong animation technique, style drift, character redesign, costume redesign" : style === "国漫电影感" || style === "半写实3D国漫" ? "live action, photorealistic person, photographic skin, skin pores, real actress, television drama, costume redesign, generic realistic face, style drift" : "wrong rendering style, style drift, costume redesign";
     const priorFailureConstraints = scene.consistencyDecision === "reject" && scene.consistencyReport?.findings.length
       ? `REPAIR THE PREVIOUS REJECTED CANDIDATE: ${scene.consistencyReport.findings.join("; ")}. Correct these failures without changing the script, cast, costume, environment or camera intent.`
@@ -2996,15 +3036,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           ? `Play “${voiceover.script}” as an off-screen voice-over by ${voiceover.speaker}; do not create a narrator image or animate visible lips.`
           : "No spoken dialogue or narration; retain appropriate ambience and action sounds.";
     const physicalContinuity = "At frame zero, every visible person and every important prop must already exist in a physically plausible position. If the script explicitly requires a later entrance, keep that subject off-screen at frame zero and show a complete physical entrance from a frame edge, doorway, behind an occluder, or through a motivated camera pan/dolly reveal. People and objects must never materialize, fade in, grow out of a screen, morph into existence, teleport, duplicate, swap identity, or disappear without a visible exit or an intentional cut. Props may enter only through a visible hand, container, doorway, or continuous physical movement. Preserve exact person count, hand occupancy, left/right screen position, depth layer and prop ownership until the scripted action visibly changes them.";
-    const performanceLock = "IDENTITY AND PERFORMANCE LOCK: canonical character images are the only identity source. Preserve exact skull silhouette, facial landmarks, eye spacing, eyelid shape, nose bridge, mouth width, jawline, ears, hairstyle, age, body proportions and costume. The previous-shot frame controls blocking and pose only and must never override canonical identity. Use subtle continuous micro-expressions, one primary body action at a time, realistic weight shift, stable shoulders and neck, anatomically plausible hands, limited head rotation, smooth acceleration and deceleration. Keep facial features temporally stable during speech and movement. No beauty-filter face, generic AI face, face replacement, identity blending, face melting, asymmetrical eyes, warped teeth, rubber lips, stiff mannequin pose, twitching, floating limbs or impossible joints.";
+    const performanceLock = "IDENTITY AND PERFORMANCE CONSTRAINT: current-task canonical character cards are the only identity sources. Preserve skull silhouette, facial landmarks, eye spacing, eyelid shape, nose bridge, mouth width, jawline, ears, hairstyle, age, body proportions and costume as closely as the model permits. Previous approved video and textual state control blocking and pose only; they must not override the task-scoped identity baseline. Use subtle continuous micro-expressions, one primary body action at a time, realistic weight shift, stable shoulders and neck, anatomically plausible hands, limited head rotation, smooth acceleration and deceleration. Reduce temporal facial drift during speech and movement. No beauty-filter face, generic AI face, face replacement, identity blending, face melting, asymmetrical eyes, warped teeth, rubber lips, stiff mannequin pose, twitching, floating limbs or impossible joints.";
+    const identityReanchor = shouldReanchorCharacterIdentity(sceneIndex)
+      ? `TASK IDENTITY RE-ANCHOR CHECKPOINT (shot ${sceneIndex + 1}): re-read each supplied Canonical four-zone card. Give the left 35%-40% frontal close-up relative identity priority ${CHARACTER_REFERENCE_POLICY.faceRelativePriority} and the right front/45-degree-side/back turnaround relative body-costume priority ${CHARACTER_REFERENCE_POLICY.multiviewRelativePriority}; keep provider guidance at or below ${CHARACTER_REFERENCE_POLICY.providerGuidanceCap}. This periodic re-attachment reduces long-sequence drift but does not guarantee permanent identity.`
+      : "Continue from the current task-scoped Canonical identity baseline; do not introduce an alternate historical face reference.";
+    const spatialReanchor = shouldReanchorSpatialLayout(sceneIndex)
+      ? `SPATIAL RE-ANCHOR CHECKPOINT (shot ${sceneIndex + 1}): reconstruct the written screen-left/right order, foreground/midground/background depth, facing, hand occupancy and prop ownership before starting the action. These are strong prompt constraints, not absolute geometry locks.`
+      : "Preserve the written spatial state as a strong prompt constraint; generative drift remains possible and must be caught by review.";
+    const frameContinuityTradeoff = frameContinuityMode === "controlled-frame"
+      ? "CONTROLLED FRAME INHERITANCE MODE: when an approved previous-shot QA end frame is available, use it only as a composition and state handoff reference. The current-task Canonical character card remains the higher-priority identity authority. This can improve shot-to-shot visual continuity but may increase identity-drift risk."
+      : "IDENTITY-FIRST MODE: do not submit extracted first/end-frame images to the generation model; extraction is for QA only. This reduces frame-driven identity drift but may make shot-to-shot visual handoff less smooth.";
     const assetBindings = {
       characters: cast.map((character) => ({ name: characterIdentity(character), lookName: characterLook(character), displayName: characterAssetNaming(character).displayName, assetId: character.arkAssetId || character.id, appearance: character.appearance })),
       scene: { id: scene.environmentKey || scene.title, bible: scene.environmentBible || scene.visual },
       props,
+      frameContinuityMode,
       continuityReference: scene.remoteImageUrl || "",
       previousApprovedVideoReference: previousScene?.videoReviewDecision === "approved" ? previousScene.remoteVideoUrl || "" : "",
     };
-    const deterministic = `${styleBible} ${performanceLock} ${priorFailureConstraints} Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue blocking and physical state from the previous shot end frame: ${previousScene.endState || previousScene.action}. Preserve screen position, depth, facing direction, hand occupancy and prop position unless the action visibly changes it.` : "This is the opening shot."} Continuity rule: ${continuityRule} Current action: ${scene.action}. Camera choreography: ${cameraPlan}. Execute the action in three readable phases: settle, one motivated action, settle. Use restrained breathing, stable hair and cloth amplitude, smooth camera speed, matching exposure, contrast, saturation and light direction. Locked props: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state for the next shot"}. ${vocalDirection} One continuous cinematic shot, no unintended cuts, no subtitles. ${physicalContinuity} Avoid: ${styleNegative}.`;
+    const deterministic = `${styleBible} ${performanceLock} ${identityReanchor} ${spatialReanchor} ${frameContinuityTradeoff} ${priorFailureConstraints} Environment ${scene.environmentKey || "current scene"}: ${scene.environmentBible || scene.visual}. Start state: ${scene.startState || previousScene?.endState || "establish the initial state from the canonical assets"}. ${previousScene ? `Continue blocking and physical state from the previous shot's approved video/text state: ${previousScene.endState || previousScene.action}. Strongly preserve screen position, depth, facing direction, hand occupancy and prop position unless the action visibly changes it; this reduces drift but cannot absolutely lock a generative model.` : "This is the opening shot."} Continuity rule: ${continuityRule} Current action: ${scene.action}. Camera choreography: ${cameraPlan}. Execute the action in three readable phases: stable hold, one motivated action, stable hold. Avoid complex chained actions; split them into short shots. Use restrained breathing, stable hair and cloth amplitude, smooth camera speed, matching exposure, contrast, saturation and light direction. Canonical props: ${props.join(", ") || "none"}. End state: ${scene.endState || "finish in a stable state for the next shot"}. ${vocalDirection} One continuous cinematic shot, no unintended cuts, no subtitles. ${physicalContinuity} Avoid: ${styleNegative}.`;
     const config = agentConfigs.prompt;
     if (config.adapter === "browser") {
       recordActivity("prompt", `镜头 ${sceneIndex + 1} 已由本地镜头总控完成资产绑定与提示词编译`, "done");
@@ -3012,7 +3062,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const learned = agentContext("prompt").slice(0, 6);
     const system = `你是漫镜的镜头总控 Agent，位于导演与视频 Agent 之间。你不改写剧情，只负责绑定 Canonical 资产、继承 Start/End State、整合表演与运镜，并针对目标视频模型编译最终提示词。只返回 JSON：{"prompt":"最终视频提示词","negativePrompt":"必须避免的问题","assetBindings":["实际使用的资产ID"],"continuityCheck":"状态继承检查"}。提示词必须是一个连续镜头，禁止虚构未提供的资产。${learned.length ? `\n已启用技能：\n${learned.map((item) => `- ${item.title}：${item.content.slice(0, 900)}`).join("\n")}` : ""}`;
-    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, styleBible, productionStandard: { transitionRule: continuityRule, physicalContinuity, performanceLock, motionTreatment: cameraPlan, colorContinuity: "exact style, exposure, white balance, contrast and saturation lock", stateHandoffSeconds: 0.5 }, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: cameraPlan, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, dialogue: scene.dialogue, voiceMode: voiceover.mode, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
+    const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, styleBible, productionStandard: { transitionRule: continuityRule, physicalContinuity, performanceLock, identityReanchor, spatialReanchor, frameContinuityMode, frameContinuityTradeoff, motionTreatment: cameraPlan, colorContinuity: "strongly preserve style, exposure, white balance, contrast and saturation; verify drift during review", stateHandoffSeconds: 0.5 }, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: cameraPlan, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, dialogue: scene.dialogue, voiceMode: voiceover.mode, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
     try {
       setStatusText(`${agentName("prompt")}正在为镜头 ${sceneIndex + 1} 绑定资产并编译最终提示词`);
       const raw = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
@@ -3024,14 +3074,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (!compiled) throw new Error("镜头总控没有返回最终提示词");
       markContextUsed(learned.map((item) => item.id));
       recordActivity("prompt", `镜头 ${sceneIndex + 1} 的资产、状态和运镜提示词已编译`, "done");
-      return `${styleBible} ${performanceLock} ${priorFailureConstraints} ${compiled}${parsed.negativePrompt ? ` Avoid: ${parsed.negativePrompt}` : ""} Avoid: ${styleNegative}. Voice direction: ${vocalDirection}. Hard physical continuity constraints: ${physicalContinuity}`;
+      return `${styleBible} ${performanceLock} ${identityReanchor} ${spatialReanchor} ${frameContinuityTradeoff} ${priorFailureConstraints} ${compiled}${parsed.negativePrompt ? ` Avoid: ${parsed.negativePrompt}` : ""} Avoid: ${styleNegative}. Voice direction: ${vocalDirection}. Physical continuity constraints: ${physicalContinuity}`;
     } catch (reason) {
       recordActivity("prompt", `镜头总控接口未完成，已安全降级到本地提示词编译：${reason instanceof Error ? reason.message : "未知错误"}`, "warning");
       return `${deterministic} Voice direction: ${vocalDirection}`;
     }
   }
 
-  async function videoReferences(scene: Scene, previousScene?: Scene, castOverride = characters, propOverride = propAssets): Promise<VideoReference[]> {
+  async function videoReferences(scene: Scene, previousScene?: Scene, castOverride = characters, propOverride = propAssets, sceneIndex = scenes.findIndex((item) => item.id === scene.id)): Promise<VideoReference[]> {
     const cast = charactersForScene(castOverride, scene).filter(isVisualCharacterAsset);
     const propNames = labeledVisualAssets(`${scene.visual} ${scene.action} ${scene.environmentBible || ""}`, "道具");
     const references: VideoReference[] = [];
@@ -3080,6 +3130,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     else if (previousScene?.videoReviewDecision === "approved" && agentConfigs.video.adapter === "seedance") {
       recordActivity("video", `上一镜“${previousScene.title}”只有本机视频、没有仍可访问的公网 HTTPS 地址；方舟不接受本机/data 视频作为 @Video，已自动跳过该项并继续使用人物、场景、道具和状态提示生成`, "warning");
     }
+    if (frameContinuityMode === "controlled-frame" && previousScene?.videoReviewDecision === "approved" && previousScene.videoEndFrameUrl) {
+      const controlledFrameUrl = await usableReferenceUrl(previousScene.videoEndFrameUrl, true, "image");
+      if (controlledFrameUrl) pushReference({ kind: "image", role: "reference_image", url: controlledFrameUrl, name: `可控继承模式：上一镜质检尾帧构图（只继承构图；当前任务 Canonical 人物卡优先压制变脸）` });
+    }
     if (!previousScene) {
       const previousEpisodeVideo = await previousEpisodeVideoReference();
       const crossEpisodeUrl = agentConfigs.video.adapter === "seedance" && !/^https:\/\//i.test(previousEpisodeVideo?.url || "") ? "" : await usableReferenceUrl(previousEpisodeVideo?.url, false, "video");
@@ -3087,13 +3141,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
 
     for (const character of cast) {
+      const reanchorLabel = shouldReanchorCharacterIdentity(sceneIndex) ? `；第 ${sceneIndex + 1} 镜任务内周期重锚` : "";
       if (agentConfigs.video.adapter === "seedance" && character.arkAssetId && character.portraitAuthorizationStatus === "authorized") {
-        pushReference({ kind: "image", role: "reference_image", url: `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`, name: `Canonical 人物造型：${characterAssetNaming(character).displayName}` });
+        pushReference({ kind: "image", role: "reference_image", url: `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`, name: `当前任务 Canonical 人物四区角色卡：${characterAssetNaming(character).displayName}${reanchorLabel}` });
+      } else {
+        const characterUrl = await usableReferenceUrl(character.remoteUrl || character.imageUrl);
+        if (!characterUrl) continue;
+        pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `当前任务 Canonical 人物四区角色卡：${characterAssetNaming(character).displayName}${reanchorLabel}` });
       }
-      const characterUrl = await usableReferenceUrl(character.remoteUrl || character.imageUrl);
-      if (characterUrl) {
-        pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `Canonical 人物造型：${characterAssetNaming(character).displayName}` });
-      }
+    }
+
+    if (scene.imageReviewDecision === "approved" && scene.imageUrl) {
+      const compositionUrl = await usableReferenceUrl(scene.remoteImageUrl || scene.imageUrl);
+      if (compositionUrl) pushReference({ kind: "image", role: "reference_image", url: compositionUrl, name: `用户批准的重要镜头构图参考：${scene.title}（仅作 @Image 全能参考，不作为首帧）` });
     }
 
     for (const prop of propOverride.filter((item) => propNames.includes(item.name))) {
@@ -3236,7 +3296,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const firstFrameCount = task.acceptedReferences.filter((reference) => reference.role === "first_frame").length;
         if (firstFrameCount) throw new Error("Seedance 返回了首帧模式确认；漫镜已中止该请求，避免按首帧生成视频");
         const lockedAssetCount = task.acceptedReferences.filter((reference) => reference.role === "reference_image").length;
-        recordActivity("video", `Seedance 已按无首帧全能参考模式接收 ${task.acceptedReferences.length} 项素材：${lockedAssetCount} 项人物/场景/道具资产已绑定`, "done");
+        recordActivity("video", `Seedance 已按${frameContinuityMode === "controlled-frame" ? "可控尾帧构图继承" : "身份优先、不送首尾帧"}模式接收 ${task.acceptedReferences.length} 项素材：${lockedAssetCount} 项人物/场景/道具/构图参考已绑定`, "done");
       }
       if (task.referenceFallback) recordActivity("video", "上一镜视频或音色公网地址已失效；方舟明确拒绝后，漫镜仅重提一次人物、场景、道具 Canonical 图片与完整状态提示词，当前镜头继续生成", "warning");
       taskId = task.id;
@@ -3280,7 +3340,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     kind: "image" | "audio" | "video",
     prompt: string,
     index = 0,
-    options: { references?: MediaReference[]; voiceName?: string; duration?: number; music?: boolean; resumeKey?: string; imageAspect?: "9:16" | "16:9"; voiceover?: SceneVoiceover; referenceText?: string; variationSeed?: number } = {},
+    options: { references?: MediaReference[]; voiceName?: string; duration?: number; music?: boolean; resumeKey?: string; imageAspect?: "9:16" | "16:9"; imagePurpose?: "standard" | "character-card"; voiceover?: SceneVoiceover; referenceText?: string; variationSeed?: number } = {},
   ) {
     const role: "image" | "video" | "voice" = kind === "image" ? "image" : kind === "video" ? "video" : "voice";
     const config = agentConfigs[role];
@@ -3324,7 +3384,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (!response.ok) throw new Error(await responseError(response));
       const data = await response.json() as { dataUrl?: string };
       if (!data.dataUrl?.startsWith("data:image/")) throw new Error("OpenAI 兼容生图接口没有返回图片");
-      const blob = await normalizeImageBlobForAspect(await (await fetch(data.dataUrl)).blob(), mediaAspect);
+      const blob = await normalizeImageBlobForAspect(await (await fetch(data.dataUrl)).blob(), mediaAspect, options.imagePurpose);
       return { url: URL.createObjectURL(blob), blob };
     }
     if (config.adapter === "seedance") {
@@ -3339,7 +3399,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (config.adapter === "webhook") {
       const media = await webhookMedia(role, { task: kind, prompt, index, aspect: mediaAspect, resolution: kind === "video" ? videoResolution : undefined, responseFormat: kind === "audio" ? "mp3" : undefined, ...options, references: transferableMediaReferences });
       if (kind !== "image") return media;
-      const blob = await normalizeImageBlobForAspect(media.blob, mediaAspect);
+      const blob = await normalizeImageBlobForAspect(media.blob, mediaAspect, options.imagePurpose);
       return { url: URL.createObjectURL(blob), blob, remoteUrl: "" };
     }
     if (config.adapter !== "pollinations") throw new Error(`${agentName(role)}不支持当前云端媒体任务`);
@@ -3351,8 +3411,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const imageModel = options.references?.length ? config.model || "kontext" : config.model === "kontext" ? "zimage" : config.model || "zimage";
       const params = new URLSearchParams({
         model: imageModel,
-        width: mediaAspect === "9:16" ? "720" : "1280",
-        height: mediaAspect === "9:16" ? "1280" : "720",
+        width: options.imagePurpose === "character-card" ? "1792" : mediaAspect === "9:16" ? "720" : "1280",
+        height: options.imagePurpose === "character-card" ? "1024" : mediaAspect === "9:16" ? "1280" : "720",
         seed: String(options.variationSeed ?? Math.abs(story.length * 97 + index * 7919)),
         enhance: "true",
         safe: "true",
@@ -3391,7 +3451,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const receivedBlob = await response.blob();
     const expected = kind === "image" ? "image/" : kind === "audio" ? "audio/" : "video/";
     if (!receivedBlob.type.startsWith(expected)) throw new Error(`${kind === "image" ? "图片" : kind === "audio" ? "配音" : "视频"}服务返回了无效文件`);
-    const blob = kind === "image" ? await normalizeImageBlobForAspect(receivedBlob, mediaAspect) : receivedBlob;
+    const blob = kind === "image" ? await normalizeImageBlobForAspect(receivedBlob, mediaAspect, options.imagePurpose) : receivedBlob;
     return { url: URL.createObjectURL(blob), blob };
   }
 
@@ -3414,9 +3474,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return data.url;
   }
 
-  async function makeImage(scene: Scene, index: number, run: number, characterGuide = "", outputAspect: "9:16" | "16:9" = aspect, promptOverride = "", references: MediaReference[] = []) {
+  async function makeImage(scene: Scene, index: number, run: number, characterGuide = "", outputAspect: "9:16" | "16:9" = aspect, promptOverride = "", references: MediaReference[] = [], imagePurpose: "standard" | "character-card" = "standard") {
     const prompt = promptOverride || `${frameVisualPrompt(style)}, one coherent scene rather than a comic page, ${scene.shot}, ${scene.visual}, ${scene.action}, ${characterGuide}, preserve the exact same faces, hair and costumes across every shot, correct anatomy and natural hands, layered foreground middle ground and background for camera motion, no typography, no speech bubbles, no panel borders`;
-    if (["openai", "pollinations", "webhook"].includes(agentConfigs.image.adapter)) return (await pollinationsMedia("image", prompt, index, { imageAspect: outputAspect, references })).url;
+    if (["openai", "pollinations", "webhook"].includes(agentConfigs.image.adapter)) return (await pollinationsMedia("image", prompt, index, { imageAspect: outputAspect, imagePurpose, references })).url;
     const referenceUrl = references.map((reference) => typeof reference === "string" ? reference : reference.url).find(Boolean) || "";
     let sourceImage = "";
     if (referenceUrl) {
@@ -3430,7 +3490,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const remote = String(result.imageUrl || "");
     const response = await fetch(`/api/media?url=${encodeURIComponent(remote)}`);
     if (!response.ok) throw new Error(await responseError(response));
-    return URL.createObjectURL(await normalizeImageBlobForAspect(await response.blob(), outputAspect));
+    return URL.createObjectURL(await normalizeImageBlobForAspect(await response.blob(), outputAspect, imagePurpose));
   }
 
   async function consistencyImage(url: string, label: string) {
@@ -3441,6 +3501,40 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (!blob.type.startsWith("image/")) return null;
       return { url: await blobToDataUrl(blob), label };
     } catch { return null; }
+  }
+
+  async function evaluateCharacterReferenceCard(character: CharacterAsset, imageUrl: string): Promise<CharacterReferenceReport> {
+    const emptyScores: CharacterReferenceScores = { frontalFace: null, profileSilhouette: null, backSilhouette: null, facialFeatures: null, bodyProportion: null, costumeConsistency: null };
+    const fallback: CharacterReferenceReport = {
+      scores: emptyScores,
+      overall: 0,
+      decision: "review",
+      mode: "structural",
+      findings: ["当前导演模型未执行多角度视觉识别；请人工确认左侧大头照与右侧正面、45°侧面、背面全身属于同一人物。"],
+      checkedAt: new Date().toISOString(),
+    };
+    const config = agentConfigs.director;
+    if (!["openai", "pollinations"].includes(config.adapter)) return fallback;
+    const card = await consistencyImage(imageUrl, `角色标准卡：${characterAssetNaming(character).displayName}`);
+    if (!card) return { ...fallback, findings: ["角色标准卡无法读取，未执行多角度视觉校验。"] };
+    try {
+      const system = "你是角色标准参考卡的多角度视觉质检员。只根据实际可见内容评分，不得因为提示词声称合格就给高分。标准布局是左侧35%-40%大正脸特写，右侧从上到下依次为正面全身、45度侧面全身、背面全身；纯白背景、均匀平光、自然轻微T-pose、手脚完整。分别检查正脸、侧面轮廓、背面轮廓、五官身份、头身比、三视图服装的一致性。任何区域缺失、出现不同人物、侧脸畸变、背面发型或服装结构冲突、肢体截断、左右翻转冲突都必须明确指出。只返回JSON。";
+      const prompt = `审核这张 ${characterAssetNaming(character).displayName} Canonical 角色卡。人物事实：${character.appearance}。当前造型：${characterLook(character)}。返回：{"scores":{"frontalFace":0,"profileSilhouette":0,"backSilhouette":0,"facialFeatures":0,"bodyProportion":0,"costumeConsistency":0},"findings":["只写可见且可修复的问题"]}`;
+      const response = await fetchWithHardTimeout("/api/desktop/invoke", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: config.adapter, endpoint: config.endpoint, apiKey: config.apiKey, model: config.model, role: "director", task: "character_reference_card_check", system, prompt, images: [card] }) }, 90000, "角色多角度质检等待超过 90 秒");
+      if (!response.ok) return { ...fallback, findings: [`角色多角度视觉质检接口不可用（${response.status}），请人工审核。`] };
+      const data = await response.json() as { text?: string };
+      const clean = String(data.text || "").replace(/```json/gi, "").replace(/```/g, "");
+      const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)) as { scores?: Partial<Record<keyof CharacterReferenceScores, number | null>>; findings?: string[] };
+      const score = (key: keyof CharacterReferenceScores) => typeof parsed.scores?.[key] === "number" ? Math.max(0, Math.min(100, Math.round(parsed.scores[key] as number))) : null;
+      const scores: CharacterReferenceScores = { frontalFace: score("frontalFace"), profileSilhouette: score("profileSilhouette"), backSilhouette: score("backSilhouette"), facialFeatures: score("facialFeatures"), bodyProportion: score("bodyProportion"), costumeConsistency: score("costumeConsistency") };
+      const values = Object.values(scores).filter((value): value is number => typeof value === "number");
+      const overall = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : 0;
+      const required = [scores.frontalFace, scores.profileSilhouette, scores.backSilhouette, scores.facialFeatures, scores.bodyProportion, scores.costumeConsistency];
+      const pass = overall >= 90 && required.every((value) => typeof value === "number" && value >= 86) && Number(scores.frontalFace) >= 92 && Number(scores.facialFeatures) >= 92;
+      return { scores, overall, decision: pass ? "pass" : overall >= 82 ? "review" : "reject", mode: "vision", findings: Array.isArray(parsed.findings) ? parsed.findings.map(String).slice(0, 8) : [], checkedAt: new Date().toISOString() };
+    } catch (reason) {
+      return { ...fallback, findings: [`角色多角度视觉质检未完成：${reason instanceof Error ? reason.message : "返回格式不可解析"}`] };
+    }
   }
 
   async function reusableSceneResult(scene: Scene) {
@@ -3578,7 +3672,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         finalVideo: finalVideoUrl ? { url: finalVideoUrl } : undefined,
         editorNote: `${agentName("editor")}已完成镜头顺序、节奏、字幕与混音方案，可继续人工精剪。`,
         studioSnapshot: {
-          version: 2, projectId: editorProjectIdRef.current, projectTitle, story, style, targetDuration, aspect,
+          version: 2, projectId: editorProjectIdRef.current, projectTitle, story, style, targetDuration, aspect, frameContinuityMode,
           characters: characters.map(serializableCharacter), propAssets: propAssets.map(serializableProp), sceneAssets: sceneAssets.map(serializableSceneAsset), scenes: sourceScenes.map(serializableScene), selected,
           phase: finalVideoUrl ? "ready" : phase, progress: finalVideoUrl ? 100 : progress, statusText,
           activityLog: activityLog.slice(0, 120), musicPrompt, updatedAt: new Date().toISOString(),
@@ -3937,7 +4031,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               const response = await fetch(loaded.url);
               const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
               const remoteUrl = response.ok ? (uploadKey ? await uploadPollinationsMedia(await response.blob(), `canonical-character-${existing.id}.png`, uploadKey) : await blobToDataUrl(await response.blob())) : "";
-              cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: loaded.url, remoteUrl, sheetVersion: 2 as const, status: "ready" as const } : item);
+              cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: loaded.url, remoteUrl, sheetVersion: characterSheetVersionFromLibrary(loaded), status: "ready" as const } : item);
               await markLibraryAssetUsed(existing.id);
               recordActivity("image", `人物造型“${characterAssetNaming(character).displayName}”未变化，已直接复用资产`, "done");
             }
@@ -3956,22 +4050,38 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const characterRequest = await characterGenerationRequest(character, cast);
         const characterPrompt = characterRequest.prompt;
         if (agentConfigs.image.adapter !== "horde") {
-          const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9", references: characterRequest.references });
+          const asset = await pollinationsMedia("image", characterPrompt, 50 + index, { imageAspect: "16:9", imagePurpose: "character-card", references: characterRequest.references });
           const assetUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
           const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : assetUploadKey ? await uploadPollinationsMedia(asset.blob, `character-${index + 1}.png`, assetUploadKey) : "";
           characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
-          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
+          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 3 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
         } else {
           const referenceScene: Scene = { id: uid(), title: character.name, visual: characterPrompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-          const imageUrl = await makeImage(referenceScene, 50 + index, run, "", "16:9", characterPrompt, characterRequest.references);
+          const imageUrl = await makeImage(referenceScene, 50 + index, run, "", "16:9", characterPrompt, characterRequest.references, "character-card");
           characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
-          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
+          cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 3 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
+        }
+        const generatedCharacter = cast.find((item) => item.id === character.id);
+        if (generatedCharacter?.imageUrl) {
+          const referenceCardReport = await evaluateCharacterReferenceCard(generatedCharacter, generatedCharacter.imageUrl);
+          characterReviewPatchesRef.current.set(character.id, { ...(characterReviewPatchesRef.current.get(character.id) || {}), referenceCardReport, reviewDecision: "pending" });
+          cast = cast.map((item) => item.id === character.id ? { ...item, referenceCardReport } : item);
+          recordActivity("director", `人物“${characterAssetNaming(generatedCharacter).displayName}”角色卡已完成正脸、侧脸、背面轮廓、五官、头身比和服装一致性${referenceCardReport.mode === "vision" ? `视觉校验（${referenceCardReport.overall}分）` : "结构登记，等待人工视觉确认"}`, referenceCardReport.decision === "pass" ? "done" : "warning");
         }
         generatedCharacters += 1;
         publishCharacters(cast);
         setProgress(10 + Math.round(((index + 1) / cast.length) * 16));
       }
       recordActivity("image", `${cast.length - generatedCharacters} 个用户角色资产已复用，${generatedCharacters} 个缺失角色已补齐；开始检查连续分镜`);
+      const pendingCharacterCards = cast.filter((character) => isVisualCharacterAsset(character) && character.imageUrl && character.reviewDecision === "pending");
+      if (pendingCharacterCards.length) {
+        publishCharacters(cast);
+        setPhase("ready");
+        setProgress(26);
+        setStatusText(`已生成 ${pendingCharacterCards.length} 张四区角色卡；请先逐项检查正脸、侧面、背面、头身比和服装并批准，再继续视频生产`);
+        recordActivity("director", `生产暂停：${pendingCharacterCards.map((item) => characterAssetNaming(item).displayName).join("、")} 的四区角色卡等待用户批准，未提交视频任务`, "warning");
+        return;
+      }
 
       const videoPropAssets = propAssets.map((item) => ({ ...item }));
       const directVideoWorkflow = agentConfigs.video.adapter !== "browser";
@@ -4042,13 +4152,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (missingSceneAssets.length) throw new Error(`直接生成视频前仍缺少场景资产：${missingSceneAssets.map((item) => item.name).join("、")}`);
         const previousEpisodeVideo = await previousEpisodeVideoReference();
         if (previousEpisodeVideo && work[0]) {
-          work = work.map((scene, index) => index === 0 ? { ...scene, continuityReferenceDecision: "cross-episode-video" as const, startState: `${scene.startState || ""}；参考上一集最后一个已批准分镜视频的人物位置、服装、道具和场景状态，但不锁定其首尾帧` } : scene);
+          work = work.map((scene, index) => index === 0 ? { ...scene, continuityReferenceDecision: "cross-episode-video" as const, startState: `${scene.startState || ""}；参考上一集最后一个已批准分镜视频的人物位置、服装、道具和场景状态；${frameContinuityMode === "controlled-frame" ? "可控继承仍以本任务 Canonical 人物卡优先" : "身份优先模式不提交抽取首尾帧"}` } : scene);
           recordActivity("video", "已找到上一集最后一个已批准分镜视频，本集首镜将把它作为 @Video 全能参考", "done");
         } else if ((activeSeriesContext().episodeNumber || 1) > 1) {
           recordActivity("video", "本集不是第一集，但资产库中没有上一集已批准分镜视频；首镜将只引用人物、道具、场景和音色资产", "warning");
         }
         publishScenes(work);
-        recordActivity("image", `已锁定 ${cast.filter(isVisualCharacterAsset).length} 个人物、${sceneAssets.filter((item) => item.imageUrl || item.remoteUrl).length} 个 Canonical 场景和 ${videoPropAssets.filter((item) => item.imageUrl).length} 个道具资产；跳过分镜图，直接进入全能参考视频；不用首尾帧时仍用场景 @Image 全能参考`, "done");
+        recordActivity("image", `已为当前任务绑定 ${cast.filter(isVisualCharacterAsset).length} 个人物、${sceneAssets.filter((item) => item.imageUrl || item.remoteUrl).length} 个 Canonical 场景和 ${videoPropAssets.filter((item) => item.imageUrl).length} 个道具资产；跳过分镜首帧图，直接进入全能参考视频；${frameContinuityMode === "controlled-frame" ? "仅在有已批准上一镜尾帧时继承构图，并保持 Canonical 人物卡优先" : "抽取首尾帧只用于质检，不送入模型"}`, "done");
       } else {
       setPhase("images");
       const sceneAssetReferences = new Map<string, string>();
@@ -4226,7 +4336,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         await preflightReusableVideoAssets(work, cast);
         setPhase("video");
         activeRole = "video";
-        recordActivity("video", `${agentName("video")}开始使用人物、道具、场景、音色和上一镜已批准视频进行全能参考生成；不使用首尾帧图片`);
+        recordActivity("video", `${agentName("video")}开始使用人物、道具、场景、音色和上一镜已批准视频进行全能参考生成；${frameContinuityMode === "controlled-frame" ? "可用上一镜质检尾帧做构图继承，当前任务 Canonical 身份优先" : "抽帧只用于质检，不作为生成输入"}`);
         let generatedClips = 0;
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
@@ -4249,7 +4359,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           try {
             const visibleCast = charactersForScene(cast, scene).filter(isVisualCharacterAsset);
             const motionPrompt = await compileShotMotionPrompt(scene, index, previousScene);
-            const clip = await pollinationsMedia("video", motionPrompt, index, { references: await videoReferences(scene, previousScene, cast, videoPropAssets), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
+            const clip = await pollinationsMedia("video", motionPrompt, index, { references: await videoReferences(scene, previousScene, cast, videoPropAssets, index), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
             const durableCandidate = await persistSceneVideoAsset(scene, clip.url, "candidate");
             const inspection = await withStageTimeout(inspectGeneratedVideo(scene, durableCandidate.url, visibleCast, previousScene), 120000, "视频已生成，但一致性检查等待超过 120 秒；请重试该镜头");
             if (!inspection.accepted) {
@@ -4265,7 +4375,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               return;
             }
 	            sceneReviewPatchesRef.current.set(scene.id, { ...(sceneReviewPatchesRef.current.get(scene.id) || {}), videoReviewDecision: "pending" });
-	            work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: index > 0 ? "previous-video" as const : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
+	            work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: index > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" as const : "previous-video" as const) : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
             generatedClips += 1;
           publishScenes(work);
             setSelected(index);
@@ -4520,17 +4630,23 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const characterRequest = await characterGenerationRequest(character, cast);
           const prompt = characterRequest.prompt;
           if (agentConfigs.image.adapter !== "horde") {
-            const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9", references: characterRequest.references });
+            const asset = await pollinationsMedia("image", prompt, 50 + targetIndex, { imageAspect: "16:9", imagePurpose: "character-card", references: characterRequest.references });
             const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
             const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-retry-${targetIndex + 1}.png`, uploadKey) : "";
 	            characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
-	            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
+	            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl: asset.url, remoteUrl, sheetVersion: 3 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
           } else {
             const referenceScene: Scene = { id: uid(), title: character.name, visual: prompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-            const imageUrl = await makeImage(referenceScene, 50 + targetIndex, run, "", "16:9", prompt, characterRequest.references);
+            const imageUrl = await makeImage(referenceScene, 50 + targetIndex, run, "", "16:9", prompt, characterRequest.references, "character-card");
 	            characterReviewPatchesRef.current.set(character.id, { reviewDecision: "pending" });
-	            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 2 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
+	            cast = cast.map((item) => item.id === character.id ? { ...item, imageUrl, sheetVersion: 3 as const, reviewDecision: "pending" as const, status: "ready" as const } : item);
           }
+	          const generatedCharacter = cast.find((item) => item.id === character.id);
+	          if (generatedCharacter?.imageUrl) {
+	            const referenceCardReport = await evaluateCharacterReferenceCard(generatedCharacter, generatedCharacter.imageUrl);
+	            characterReviewPatchesRef.current.set(character.id, { ...(characterReviewPatchesRef.current.get(character.id) || {}), referenceCardReport, reviewDecision: "pending" });
+	            cast = cast.map((item) => item.id === character.id ? { ...item, referenceCardReport } : item);
+	          }
 	          publishCharacters(cast);
         }
         let targets = agentConfigs.video.adapter === "browser" ? work.filter((scene) => !scene.imageUrl || scene.status === "error").map((scene) => scene.id) : [];
@@ -4565,8 +4681,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setProgress(26 + Math.round(((targetIndex + 1) / targets.length) * 18));
         }
         invalidateExport();
-        recordActivity("image", agentConfigs.video.adapter === "browser" ? `生图岗位补跑完成：${missingCharacters.length} 个角色、${targets.length} 个分镜` : `生图岗位只补齐了 ${missingCharacters.length} 个人物资产；原生视频流程保持无首帧直出`, "done");
-        setStatusText(agentConfigs.video.adapter === "browser" ? "生图岗位重新运行完成，其他已完成素材保持不变" : "人物资产检查完成；未生成任何镜头首帧");
+        recordActivity("image", agentConfigs.video.adapter === "browser" ? `生图岗位补跑完成：${missingCharacters.length} 个角色、${targets.length} 个分镜` : `生图岗位只补齐了 ${missingCharacters.length} 个人物资产；原生视频流程保持${frameContinuityMode === "controlled-frame" ? "可控尾帧构图继承" : "身份优先、不送首尾帧"}`, "done");
+        setStatusText(agentConfigs.video.adapter === "browser" ? "生图岗位重新运行完成，其他已完成素材保持不变" : `人物资产检查完成；${frameContinuityMode === "controlled-frame" ? "不会生成分镜首帧，仅复用已批准上一镜质检尾帧的构图" : "未生成任何镜头首帧"}`);
         setPhase("ready");
         return;
       }
@@ -4603,7 +4719,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           const previousScene = sceneIndex > 0 ? work[sceneIndex - 1] : undefined;
           const visibleCast = charactersForScene(characters, scene).filter(isVisualCharacterAsset);
           const prompt = await compileShotMotionPrompt(scene, sceneIndex, previousScene);
-          const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene, previousScene), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
+          const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene, previousScene, characters, propAssets, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
           const durableCandidate = await persistSceneVideoAsset(scene, clip.url, "candidate");
           const inspection = await withStageTimeout(inspectGeneratedVideo(scene, durableCandidate.url, visibleCast, previousScene), 120000, "视频已生成，但一致性检查等待超过 120 秒；请重试该镜头");
           if (!inspection.accepted) {
@@ -4620,7 +4736,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
           if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
 	          sceneReviewPatchesRef.current.set(scene.id, { ...(sceneReviewPatchesRef.current.get(scene.id) || {}), videoReviewDecision: "pending" });
-	          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? "previous-video" as const : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
+	          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" as const : "previous-video" as const) : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
           publishScenes(work);
           setSelected(sceneIndex);
           setStatusText(`“${scene.title}”已生成，请审核后再继续下一镜`);
@@ -4799,7 +4915,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const previousScene = sceneIndex > 0 ? scenes[sceneIndex - 1] : undefined;
       const visibleCast = charactersForScene(characters, scene).filter(isVisualCharacterAsset);
       const prompt = await compileShotMotionPrompt(scene, Math.max(0, sceneIndex), previousScene);
-      const clip = await pollinationsMedia("video", prompt, Math.max(0, sceneIndex), { references: await videoReferences(scene, previousScene), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
+      const clip = await pollinationsMedia("video", prompt, Math.max(0, sceneIndex), { references: await videoReferences(scene, previousScene, characters, propAssets, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
       const durableCandidate = await persistSceneVideoAsset(scene, clip.url, "candidate");
       const inspection = await withStageTimeout(inspectGeneratedVideo(scene, durableCandidate.url, visibleCast, previousScene), 120000, "新视频已返回，但一致性检查等待超过 120 秒；旧候选仍已保留，请再次重做");
       if (!inspection.accepted) {
@@ -4808,7 +4924,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         throw new Error(`五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，结果未进入资产库和成片`);
       }
       if (scene.videoUrl) URL.revokeObjectURL(scene.videoUrl);
-      patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending", videoPosterUrl: inspection.frames.middle || scene.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? "previous-video" : "asset-only", consistencyReport: inspection.report, consistencyDecision: "pass", status: "ready", duration: Math.max(4, Math.min(15, scene.duration)) });
+      patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending", videoPosterUrl: inspection.frames.middle || scene.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" : "previous-video") : "asset-only", consistencyReport: inspection.report, consistencyDecision: "pass", status: "ready", duration: Math.max(4, Math.min(15, scene.duration)) });
       if (previousCandidateUrl?.startsWith("blob:") && previousCandidateUrl !== durableCandidate.url) URL.revokeObjectURL(previousCandidateUrl);
       recordActivity("video", `“${scene.title}”的原生动态镜头已生成，正在等待你的逐项批准`, "done");
     } catch (reason) {
@@ -4831,6 +4947,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setSceneAction({ id: scene.id, type: "video" });
     setError("");
     try {
+      const approvedSceneIndex = scenes.findIndex((item) => item.id === scene.id);
       let frames = { start: scene.videoStartFrameUrl || "", middle: scene.videoPosterUrl || "", end: scene.videoEndFrameUrl || "" };
       if (!frames.start && !frames.middle && !frames.end) {
         try {
@@ -4858,7 +4975,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         videoStartFrameUrl: frames.start,
         videoEndFrameUrl: frames.end,
         tailFrameAssetId: undefined,
-        continuityReferenceDecision: "previous-video",
+        continuityReferenceDecision: approvedSceneIndex > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" : "previous-video") : "asset-only",
         consistencyDecision: "review",
         videoReviewDecision: "approved",
         status: "ready",
@@ -5092,7 +5209,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         episodeId,
       });
       const [loaded] = saved.assetState !== "placeholder" ? await loadLibraryAssets([saved.id]) : [];
-      return loaded?.url ? { ...character, libraryAssetId: saved.id, imageUrl: loaded.url, remoteUrl: loaded.url.startsWith("https://") ? loaded.url : character.remoteUrl, arkAssetId: loaded.arkAssetId, portraitAuthorizationStatus: loaded.portraitAuthorizationStatus, reviewDecision: loaded.assetState === "review" ? "pending" as const : "approved" as const, sheetVersion: 2 as const, status: "ready" as const } : { ...character, libraryAssetId: saved.id };
+      return loaded?.url ? { ...character, libraryAssetId: saved.id, imageUrl: loaded.url, remoteUrl: loaded.url.startsWith("https://") ? loaded.url : character.remoteUrl, arkAssetId: loaded.arkAssetId, portraitAuthorizationStatus: loaded.portraitAuthorizationStatus, reviewDecision: loaded.assetState === "review" ? "pending" as const : "approved" as const, sheetVersion: characterSheetVersionFromLibrary(loaded), status: "ready" as const } : { ...character, libraryAssetId: saved.id };
     }));
     const savedProps = await Promise.all(propItems.map(async (prop) => {
       const saved = await saveLibraryPlaceholder({
@@ -5246,8 +5363,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         ? await attachLibraryFileToPlaceholder(character.libraryAssetId, file, "upload")
         : await saveLibraryFile(file, { name: naming.displayName, category: "character", duration: 5, tags: ["用户上传", "人物", character.name, `造型:${naming.lookName}`], identityKey: naming.identityKey, lookName: naming.lookName, entityId: naming.identityKey, variantName: naming.variantName, locked: true });
       await updateLibraryAsset(saved.id, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice: "upload" });
-      updateCharacterAsset(character.id, { imageUrl: saved.url, sheetVersion: 2, reviewDecision: "approved", status: "ready" });
-      recordActivity("image", `人物“${character.name}”已绑定用户上传资产`, "done");
+      const referenceCardReport = await evaluateCharacterReferenceCard(character, saved.url);
+      updateCharacterAsset(character.id, { imageUrl: saved.url, sheetVersion: referenceCardReport.mode === "vision" && referenceCardReport.decision === "pass" ? 3 : 2, referenceCardReport, reviewDecision: "approved", status: "ready" });
+      recordActivity("image", `人物“${character.name}”已绑定用户上传资产；${referenceCardReport.mode === "vision" ? `多角度角色卡校验 ${referenceCardReport.overall} 分` : "未声明为标准三视图，极端角度镜头仍需补充参考"}`, referenceCardReport.decision === "reject" ? "warning" : "done");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "人物资产上传失败");
     } finally { setAssetAction(""); }
@@ -5270,7 +5388,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const naming = characterAssetNaming(character);
         const reused = await loadReusableBlueprintAsset("character", naming.identityKey, naming.lookName);
         if (reused?.url) {
-          updateCharacterAsset(character.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : character.remoteUrl, arkAssetId: reused.arkAssetId, portraitAuthorizationStatus: reused.portraitAuthorizationStatus, sheetVersion: 2, reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
+          updateCharacterAsset(character.id, { libraryAssetId: reused.id, imageUrl: reused.url, remoteUrl: reused.url.startsWith("https://") ? reused.url : character.remoteUrl, arkAssetId: reused.arkAssetId, portraitAuthorizationStatus: reused.portraitAuthorizationStatus, sheetVersion: characterSheetVersionFromLibrary(reused), reviewDecision: reused.assetState === "review" ? "pending" : "approved", status: "ready" });
           recordActivity("image", `生图前二次检索命中“${naming.displayName}”，已复用资产库图片并取消重复生图`, "done");
           return true;
         }
@@ -5281,7 +5399,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       let generatedBlob: Blob | null = null;
       let generatedRemoteUrl = "";
       if (agentConfigs.image.adapter !== "horde") {
-        const asset = await pollinationsMedia("image", prompt, 700 + characters.findIndex((item) => item.id === character.id), { imageAspect: "16:9", references: characterRequest.references, variationSeed });
+        const asset = await pollinationsMedia("image", prompt, 700 + characters.findIndex((item) => item.id === character.id), { imageAspect: "16:9", imagePurpose: "character-card", references: characterRequest.references, variationSeed });
         const uploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
         const remoteUrl = "remoteUrl" in asset && asset.remoteUrl ? asset.remoteUrl : uploadKey ? await uploadPollinationsMedia(asset.blob, `character-blueprint-${character.id}.png`, uploadKey) : "";
         generatedUrl = asset.url;
@@ -5289,22 +5407,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         generatedRemoteUrl = remoteUrl;
       } else {
         const referenceScene: Scene = { id: uid(), title: character.name, visual: prompt, action: "静态角色设定", shot: "角色设定图", camera: "固定镜头", dialogue: "", speaker: character.name, emotion: "中性", sfx: "", characters: [character.name], duration: 4, status: "painting" };
-        generatedUrl = await makeImage(referenceScene, 700 + characters.findIndex((item) => item.id === character.id), run, "", "16:9", prompt, characterRequest.references);
+        generatedUrl = await makeImage(referenceScene, 700 + characters.findIndex((item) => item.id === character.id), run, "", "16:9", prompt, characterRequest.references, "character-card");
         const response = await fetch(generatedUrl);
         if (response.ok) generatedBlob = await response.blob();
       }
+      const referenceCardReport = await evaluateCharacterReferenceCard(character, generatedUrl);
+      const visualCardPass = referenceCardReport.mode === "vision" && referenceCardReport.decision === "pass";
       if (autoAdopt && generatedBlob) {
         const naming = characterAssetNaming(character);
         const file = new File([generatedBlob], `${naming.displayName}.png`, { type: generatedBlob.type || "image/png" });
         const saved = character.libraryAssetId
           ? await attachLibraryFileToPlaceholder(character.libraryAssetId, file, "ai")
-          : await saveLibraryFile(file, { name: naming.displayName, category: "character", tags: ["AI生成", "人物", character.name], identityKey: naming.identityKey, lookName: naming.lookName, locked: true, reusable: true });
-        await updateLibraryAsset(saved.id, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice: "ai" });
-        updateCharacterAsset(character.id, { libraryAssetId: saved.id, imageUrl: saved.url || generatedUrl, remoteUrl: generatedRemoteUrl, sheetVersion: 2, reviewDecision: "approved", status: "ready" });
-        recordActivity("image", `人物“${character.name}”已一键生成并入库；不满意可直接上传图片替换`, "done");
+          : await saveLibraryFile(file, { name: naming.displayName, category: "character", tags: ["AI生成", "人物", character.name, "四区角色卡", "大头照", "正侧背三视图", "character-card-v3"], identityKey: naming.identityKey, lookName: naming.lookName, locked: true, reusable: true });
+        const [stored] = await loadLibraryAssets([saved.id]);
+        await updateLibraryAsset(saved.id, { canonical: visualCardPass, reusable: visualCardPass, locked: true, assetState: visualCardPass ? "ready" : "review", sourceChoice: "ai", tags: [...new Set([...(stored?.tags || []), "四区角色卡", "大头照", "正侧背三视图", "character-card-v3"])] });
+        updateCharacterAsset(character.id, { libraryAssetId: saved.id, imageUrl: saved.url || generatedUrl, remoteUrl: generatedRemoteUrl, sheetVersion: 3, referenceCardReport, reviewDecision: visualCardPass ? "approved" : "pending", status: "ready" });
+        recordActivity("image", visualCardPass ? `人物“${character.name}”四区角色卡已通过多角度视觉校验并入库` : `人物“${character.name}”四区角色卡已生成，但多角度校验未自动通过，等待用户采用或重做`, visualCardPass ? "done" : "warning");
       } else {
-        updateCharacterAsset(character.id, { imageUrl: generatedUrl, remoteUrl: generatedRemoteUrl, sheetVersion: 2, reviewDecision: "pending", status: "ready" });
-        recordActivity("image", `人物“${character.name}”资产图已生成，等待用户采用或上传替换`, "done");
+        updateCharacterAsset(character.id, { imageUrl: generatedUrl, remoteUrl: generatedRemoteUrl, sheetVersion: 3, referenceCardReport, reviewDecision: "pending", status: "ready" });
+        recordActivity("image", `人物“${character.name}”四区角色卡已生成，等待用户结合多角度质检结果采用或上传替换`, referenceCardReport.decision === "pass" ? "done" : "warning");
       }
       return true;
     } catch (reason) {
@@ -5800,7 +5921,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   function downloadProject() {
-    const payload = { format: "manjing-project", version: 2, savedAt: new Date().toISOString(), projectTitle, story, style, targetDuration, aspect, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, assetAnalysisState, characters: characters.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), propAssets: propAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), sceneAssets: sceneAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), scenes: scenes.map(({ imageUrl, videoUrl, audioUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined, videoUrl: videoUrl?.startsWith("http") ? videoUrl : undefined, audioUrl: audioUrl?.startsWith("http") ? audioUrl : undefined })) };
+    const payload = { format: "manjing-project", version: 2, savedAt: new Date().toISOString(), projectTitle, story, style, targetDuration, aspect, frameContinuityMode, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, assetAnalysisState, characters: characters.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), propAssets: propAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), sceneAssets: sceneAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), scenes: scenes.map(({ imageUrl, videoUrl, audioUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined, videoUrl: videoUrl?.startsWith("http") ? videoUrl : undefined, audioUrl: audioUrl?.startsWith("http") ? audioUrl : undefined })) };
     saveBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" }), `${safeFilename(projectTitle)}-漫镜工程.json`);
   }
 
@@ -5815,6 +5936,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setScriptImported(true);
       if (typeof payload.style === "string" && STYLE_PROMPTS[payload.style]) setStyle(payload.style);
       if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
+      if (payload.frameContinuityMode === "identity-first" || payload.frameContinuityMode === "controlled-frame") setFrameContinuityMode(payload.frameContinuityMode);
       setTargetDuration(Number(payload.targetDuration) || 0);
       setScenes(importedScenes);
       const importedCharacters = deduplicateCharacterAssets(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
@@ -6189,6 +6311,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             </div>
             <div className="aspect-setting"><label>画面比例</label><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")}><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option></select></div>
             <div className="aspect-setting"><label>视频清晰度</label><select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value as "480p" | "720p" | "1080p")}><option value="480p">流畅 480P</option><option value="720p">高清 720P</option><option value="1080p">全高清 1080P</option></select></div>
+            <div className="aspect-setting"><label>分镜画面继承</label><select value={frameContinuityMode} onChange={(event) => setFrameContinuityMode(event.target.value as FrameContinuityMode)}><option value="identity-first">A · 身份优先（默认）</option><option value="controlled-frame">B · 可控尾帧继承</option></select><small>{frameContinuityMode === "controlled-frame" ? "继承已批准上一镜质检尾帧的构图，并叠加当前任务 Canonical 人物卡；衔接更顺，但变脸风险略高。" : "抽取首尾帧只用于质检、不送入模型；身份漂移较少，但镜头之间可能更跳。"}</small></div>
             <div className="voice-row"><div><label>背景音乐</label><small>独立控制无歌词 BGM；关闭人物配音后仍保留环境音效</small></div><button className={`toggle ${bgmEnabled ? "on" : ""}`} aria-label="切换背景音乐" onClick={() => setBgmEnabled((value) => !value)}><i /></button></div>
             <div className="voice-row subtitle-master-row"><div><label>成片字幕</label><small>独立控制预览、时间轴和最终视频字幕，不影响配音与原声</small></div><button className={`toggle ${subtitleEnabled ? "on" : ""}`} aria-label="切换成片字幕" aria-pressed={subtitleEnabled} onClick={() => setSubtitleEnabled((value) => !value)}><i /></button></div>
           </div>
@@ -6213,8 +6336,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               {characters.map((character) => <article key={character.id} className={`asset-blueprint-card ${character.status}`}>
                 <div className="asset-blueprint-preview">{character.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: character.imageUrl as string, name: characterAssetNaming(character).displayName })} aria-label={`预览${characterAssetNaming(character).displayName}大图`}><img src={character.imageUrl} alt={characterAssetNaming(character).displayName} /><i>点击预览</i></button> : <span><i>人</i><small>仅框架<br />尚无图片</small></span>}</div>
                 <div className="asset-blueprint-fields"><em>人物造型资产 · {character.episodeScope || "当前集"}</em><input value={characterIdentity(character)} aria-label="人物身份名" placeholder="例如：男主" onChange={(event) => updateCharacterAsset(character.id, { name: event.target.value, identityName: event.target.value })} /><input value={characterLook(character)} aria-label="服装或状态造型名" placeholder="例如：白衣版" onChange={(event) => updateCharacterAsset(character.id, { lookName: event.target.value })} /><input value={character.role} aria-label="人物身份" placeholder="身份或人物关系" onChange={(event) => updateCharacterAsset(character.id, { role: event.target.value })} /><textarea value={character.appearance} aria-label="人物视觉描述" placeholder="不变的身份特征 + 当前造型的服装、妆发和状态" onChange={(event) => updateCharacterAsset(character.id, { appearance: event.target.value })} /><small>{character.visualEvidence ? `出镜依据：${character.visualEvidence}` : character.sceneHints?.length ? `使用镜头：${character.sceneHints.join("、")}` : "未指定镜头时，将按分镜文字匹配此造型"}</small></div>
-                <p>{character.imageUrl ? character.assetMatchKind === "look-candidate" ? `资产库中找到同一人物候选；请确认是否符合“${characterLook(character)}”` : character.reviewDecision === "pending" ? "AI 图片待采用" : "已有可用人物资产" : "等待用户选择资产来源"}</p>
-                <footer>{character.reviewDecision === "pending" && character.imageUrl ? <><button onClick={() => approveCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "确认造型并配对" : "采用并入库"}</button><label className={assetAction ? "disabled" : ""}>上传图片替换<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="danger" onClick={() => rejectCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "不匹配，移除候选" : "删除图片"}</button></> : <><label className={assetAction ? "disabled" : ""}>上传已有图片<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => void generateCharacterBlueprint(character)} disabled={Boolean(assetAction)}>{assetAction === `character-generate:${character.id}` ? "生成中…" : character.imageUrl ? "让 AI 重做" : "让 AI 生成"}</button></>}<button className="plain-danger" onClick={() => setCharacters((items) => items.filter((item) => item.id !== character.id))} disabled={Boolean(assetAction)}>删除框架</button></footer>
+                <p>{character.imageUrl ? character.assetMatchKind === "look-candidate" ? `资产库中找到同一人物候选；请确认是否符合“${characterLook(character)}”` : character.reviewDecision === "pending" ? "AI 四区角色卡待采用" : "已有可用人物资产" : "等待用户选择资产来源"}{character.referenceCardReport && <><br /><strong>{character.referenceCardReport.mode === "vision" ? `多角度质检 ${character.referenceCardReport.overall} 分` : "待人工多角度质检"} · 正脸 / 45°侧面 / 背面轮廓 / 五官 / 头身比 / 服装{character.referenceCardReport.findings[0] ? ` · ${character.referenceCardReport.findings[0]}` : ""}</strong></>}</p>
+                <footer>{character.reviewDecision === "pending" && character.imageUrl ? <><button onClick={() => approveCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "确认造型并配对" : "采用并入库"}</button><label className={assetAction ? "disabled" : ""}>上传图片替换<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button className="danger" onClick={() => rejectCharacterAsset(character)}>{character.assetMatchKind === "look-candidate" ? "不匹配，移除候选" : "删除图片"}</button></> : <><label className={assetAction ? "disabled" : ""}>上传已有角色卡<input type="file" accept="image/*" disabled={Boolean(assetAction)} onChange={(event) => { void uploadCharacterBlueprint(character, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => void generateCharacterBlueprint(character)} disabled={Boolean(assetAction)}>{assetAction === `character-generate:${character.id}` ? "生成中…" : character.imageUrl ? "让 AI 重做四区角色卡" : "生成大头照＋正侧背三视图"}</button></>}<button className="plain-danger" onClick={() => setCharacters((items) => items.filter((item) => item.id !== character.id))} disabled={Boolean(assetAction)}>删除框架</button></footer>
               </article>)}
               {sceneAssets.map((sceneAsset, index) => <article key={sceneAsset.id} className={`asset-blueprint-card scene ${sceneAsset.status}`}>
                 <div className="asset-blueprint-preview">{sceneAsset.imageUrl ? <button type="button" onClick={() => setAssetImagePreview({ url: sceneAsset.imageUrl as string, name: sceneAsset.name })} aria-label={`预览${sceneAsset.name}场景大图`}><img src={sceneAsset.imageUrl} alt={sceneAsset.name} /><i>点击预览</i></button> : <span><i>景</i><small>仅框架<br />尚无图片</small></span>}</div>
@@ -6462,7 +6585,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={15} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(15, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
               <div className="subtitle-switch"><div><b>显示本镜字幕</b><span>关闭后对白仍保留在剧本中</span></div><button className={`toggle ${selectedScene.subtitleEnabled !== false ? "on" : ""}`} onClick={() => updateScene(selectedScene.id, { subtitleEnabled: selectedScene.subtitleEnabled === false })}><i /></button></div>
               <label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label>
-              <div className="editor-actions">{!nativeVideoEnabled && <button onClick={() => void regenerateImage(selectedScene, selected)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "image" ? "生图 AI 正在重做…" : "让生图 AI 重做"}</button>}<button className="video-action" onClick={() => void generateVideo(selectedScene)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "video" ? "视频 AI 正在重做…" : nativeVideoEnabled ? "无首帧重做视频" : "配置视频 AI"}</button></div>
+              <div className="editor-actions">{!nativeVideoEnabled && <button onClick={() => void regenerateImage(selectedScene, selected)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "image" ? "生图 AI 正在重做…" : "让生图 AI 重做"}</button>}<button className="video-action" onClick={() => void generateVideo(selectedScene)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "video" ? "视频 AI 正在重做…" : nativeVideoEnabled ? frameContinuityMode === "controlled-frame" ? "可控尾帧重做视频" : "身份优先重做视频" : "配置视频 AI"}</button></div>
             </div>}
           </div>
         </div>
