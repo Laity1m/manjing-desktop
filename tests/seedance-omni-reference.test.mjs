@@ -77,3 +77,29 @@ test("legacy model requests never silently promote an image to first frame", asy
   assert.equal(result.acceptedReferences.length, 0);
   assert.equal(result.ignoredReferences, 1);
 });
+
+test("Seedance drops local video/audio references that Ark cannot fetch as web URLs", async () => {
+  let createBody = null;
+  const result = await invokeSeedance({
+    action: "create",
+    requestId: "omni-public-media-url-test",
+    apiKey: "test-seedance-key",
+    model: "doubao-seedance-2-0-260128",
+    prompt: "继续上一镜动作，但本机视频不可提交时仍然生成当前镜头",
+    references: [
+      { kind: "video", role: "reference_video", url: "data:video/mp4;base64,AAAA", name: "本机上一镜" },
+      { kind: "audio", role: "reference_audio", url: "data:audio/wav;base64,AAAA", name: "本机音色" },
+      { kind: "video", role: "reference_video", url: "https://media.volces.com/approved-previous.mp4", name: "公网上一镜" },
+      { kind: "image", role: "reference_image", url: "https://media.volces.com/character.jpg", name: "人物" },
+    ],
+  }, async (_url, init) => {
+    createBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ id: "cgt-publicmedia1" }), { status: 200 });
+  });
+
+  assert.equal(result.id, "cgt-publicmedia1");
+  const media = createBody.content.filter((item) => item.type !== "text");
+  assert.deepEqual(media.map((item) => item.role), ["reference_video", "reference_image"]);
+  assert.equal(media.some((item) => String(item.video_url?.url || "").startsWith("data:")), false);
+  assert.equal(result.ignoredReferences, 2);
+});

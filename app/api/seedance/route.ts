@@ -80,15 +80,17 @@ export async function POST(request: Request) {
       const rawReferences = Array.isArray(body.references) ? body.references as OmniReference[] : [];
       const counts = { image: 0, video: 0, audio: 0 };
       const accepted: Array<{ kind: string; role: string; token?: string; name: string }> = [];
-      const referenceUrl = (value: unknown) => {
+      const referenceUrl = (value: unknown, kind: "image" | "video" | "audio") => {
         const raw = String(value || "").trim();
-        return /^(?:https:\/\/|data:(?:image|video|audio)\/|asset:\/\/)/i.test(raw) ? raw : "";
+        if (kind === "image" && /^asset:\/\//i.test(raw)) return raw;
+        if (/^https:\/\//i.test(raw)) return raw;
+        return kind === "image" && /^data:image\//i.test(raw) ? raw : "";
       };
       if (isOmniModel) {
         for (const reference of rawReferences) {
           const kind = ["image", "video", "audio"].includes(String(reference.kind)) ? String(reference.kind) as "image" | "video" | "audio" : "image";
           const limit = kind === "image" ? 9 : 3;
-          const url = referenceUrl(reference.url);
+          const url = referenceUrl(reference.url, kind);
           if (!url || accepted.length >= 15 || counts[kind] >= limit) continue;
           counts[kind] += 1;
           // Seedance 2.0 first/last-frame control is mutually exclusive with

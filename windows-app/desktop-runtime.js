@@ -765,10 +765,14 @@ function seedanceErrorMessage(data, fallback = "Seedance 方舟接口暂时不�
   return String(data?.error?.message || data?.error || data?.message || data?.detail || fallback).slice(0, 300);
 }
 
-function seedanceReferenceUrl(value) {
+function seedanceReferenceUrl(value, kind = "image") {
   const raw = String(value || "").trim();
-  if (/^asset:\/\/[a-z0-9][a-z0-9._:-]{5,179}$/i.test(raw)) return raw;
-  return /^(?:https:\/\/|data:(?:image|video|audio)\/)/i.test(raw) ? raw : "";
+  // Ark accepts image references from its trusted asset library, but video and
+  // audio references must be fetchable web URLs. Sending a renderer blob/data
+  // URL produces HTTP 400: "reference_video must be provided as a web url".
+  if (kind === "image" && /^asset:\/\/[a-z0-9][a-z0-9._:-]{5,179}$/i.test(raw)) return raw;
+  if (/^https:\/\//i.test(raw)) return raw;
+  return kind === "image" && /^data:image\//i.test(raw) ? raw : "";
 }
 
 function seedancePermissionError(data, status) {
@@ -870,7 +874,7 @@ async function invokeSeedance(input, fetchImpl = fetch) {
       for (const reference of rawReferences) {
         const kind = ["image", "video", "audio"].includes(String(reference?.kind)) ? String(reference.kind) : "image";
         const limit = kind === "image" ? 9 : 3;
-        const url = seedanceReferenceUrl(reference?.url);
+        const url = seedanceReferenceUrl(reference?.url, kind);
         if (!url || acceptedReferences.length >= 15 || counts[kind] >= limit) continue;
         counts[kind] += 1;
         // Seedance 2.0 cannot mix first/last-frame control with omni reference

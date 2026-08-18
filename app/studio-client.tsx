@@ -3134,13 +3134,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (audioUrl) pushReference({ ...canonicalVoiceReference, url: audioUrl });
     }
 
+    const previousVideoSource = agentConfigs.video.adapter === "seedance" ? previousScene?.remoteVideoUrl : previousScene?.remoteVideoUrl || previousScene?.videoUrl;
     const previousVideoUrl = previousScene?.videoReviewDecision === "approved"
-      ? await usableReferenceUrl(previousScene.remoteVideoUrl || previousScene.videoUrl, false, "video")
+      ? await usableReferenceUrl(previousVideoSource, false, "video")
       : "";
     if (previousVideoUrl) pushReference({ kind: "video", role: "reference_video", url: previousVideoUrl, name: `上一镜已批准视频连续性：${previousScene?.title || "前镜"}（仅作 @Video 全能参考，不锁首尾帧）` });
+    else if (previousScene?.videoReviewDecision === "approved" && agentConfigs.video.adapter === "seedance") {
+      recordActivity("video", `上一镜“${previousScene.title}”只有本机视频、没有仍可访问的公网 HTTPS 地址；方舟不接受本机/data 视频作为 @Video，已自动跳过该项并继续使用人物、场景、道具和状态提示生成`, "warning");
+    }
     if (!previousScene) {
       const previousEpisodeVideo = await previousEpisodeVideoReference();
-      const crossEpisodeUrl = await usableReferenceUrl(previousEpisodeVideo?.url, false, "video");
+      const crossEpisodeUrl = agentConfigs.video.adapter === "seedance" && !/^https:\/\//i.test(previousEpisodeVideo?.url || "") ? "" : await usableReferenceUrl(previousEpisodeVideo?.url, false, "video");
       if (crossEpisodeUrl) pushReference({ kind: "video", role: "reference_video", url: crossEpisodeUrl, name: "上一集最后一个已批准分镜视频（@Video 全能参考，不锁首尾帧）" });
     }
 
@@ -5742,27 +5746,50 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function extractVoiceProfileFromScene(scene: Scene) {
     if (!scene.videoUrl || !scene.speaker.trim()) return;
-    if (!validAgentEndpoint(bridgeUrl)) {
-      setError("从视频摘取 MP3 音色需要先在开源节点中心配置并启动漫镜本地桥接与 FFmpeg");
-      return;
-    }
     setAssetAction(`voice-extract:${scene.id}`);
+    setError("");
+    setStatusText(`正在从“${scene.title}”的视频中摘取 ${scene.speaker} 音色`);
     try {
       const videoResponse = await fetch(scene.videoUrl);
       if (!videoResponse.ok) throw new Error("无法读取当前镜头视频");
       const videoBlob = await videoResponse.blob();
-      const form = new FormData();
-      form.append("video", new File([videoBlob], `${scene.title || "scene"}.mp4`, { type: videoBlob.type || "video/mp4" }));
-      form.append("speaker", scene.speaker);
-      form.append("start", "0");
-      form.append("duration", String(Math.max(2, Math.min(30, scene.duration))));
-      const response = await fetch(`${bridgeUrl.replace(/\/+$/, "")}/v1/voice-profiles/extract`, { method: "POST", headers: bridgeToken ? { Authorization: `Bearer ${bridgeToken}` } : {}, body: form });
-      if (!response.ok) throw new Error(await responseError(response));
-      const data = await response.json() as { url?: string };
-      if (!data.url) throw new Error("本地桥接没有返回 MP3 音色");
-      const audioResponse = await fetch(data.url);
-      if (!audioResponse.ok) throw new Error("MP3 音色已提取但无法读取");
-      await persistCanonicalVoiceProfile(scene, await audioResponse.blob(), Math.max(2, Math.min(30, scene.duration)), characters.find((item) => item.name === scene.speaker)?.voice || voice, "video-extracted");
+      const duration = Math.max(2, Math.min(14, scene.duration));
+      let audioBlob: Blob | null = null;
+      if (validAgentEndpoint(bridgeUrl)) {
+        try {
+          const form = new FormData();
+          form.append("video", new File([videoBlob], `${scene.title || "scene"}.mp4`, { type: videoBlob.type || "video/mp4" }));
+          form.append("speaker", scene.speaker);
+          form.append("start", "0");
+          form.append("duration", String(duration));
+          const response = await fetch(`${bridgeUrl.replace(/\/+$/, "")}/v1/voice-profiles/extract`, { method: "POST", headers: bridgeToken ? { Authorization: `Bearer ${bridgeToken}` } : {}, body: form });
+          if (response.ok) {
+            const data = await response.json() as { url?: string };
+            if (data.url) {
+              const extracted = await fetch(data.url);
+              if (extracted.ok) audioBlob = await extracted.blob();
+            }
+          }
+        } catch {
+          recordActivity("voice", "本地桥接摘取不可用，正在自动改用软件内置音轨解码", "warning");
+        }
+      }
+      if (!audioBlob) {
+        const context = new AudioContext();
+        try {
+          const decoded = await context.decodeAudioData(await videoBlob.arrayBuffer());
+          audioBlob = audioBufferToWav(decoded, duration);
+        } catch {
+          const recorded = await recordVideoAudioTrack(videoBlob, duration);
+          audioBlob = recorded.blob;
+        } finally {
+          await context.close().catch(() => undefined);
+        }
+      }
+      const saved = await persistCanonicalVoiceProfile(scene, audioBlob, duration, characters.find((item) => item.name === scene.speaker)?.voice || voice, "video-extracted");
+      if (!saved) throw new Error("当前视频没有可保存的人物音轨，或该人物已有 Canonical 音色");
+      setImportMessage(`已摘取“${scene.speaker}”音色并保存到项目音色库，可在音色库试听和确认授权`);
+      setStatusText(`“${scene.speaker}”音色摘取完成`);
       setError("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "从视频提取人物音色失败");
@@ -6468,7 +6495,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             <div className="scene-list">{scenes.map((scene, index) => <button key={scene.id} className={`scene-card ${selected === index ? "selected" : ""}`} onClick={() => { setSelected(index); setTime(offsets[index]); setPlaying(false); setShowFilm(false); }}><div className="scene-thumb">{scene.videoUrl || scene.candidateVideoUrl ? <span className="video-thumbnail-placeholder">▶</span> : !nativeVideoEnabled && scene.imageUrl ? <img src={scene.imageUrl} alt="" loading="lazy" /> : <span>{["painting", "animating"].includes(scene.status) ? "生成中" : String(index + 1).padStart(2, "0")}</span>}</div><div><b>{scene.title}</b><p>{scene.action}</p><small>{scene.duration} 秒 · {scene.videoUrl ? "AI 动态表演" : scene.candidateVideoUrl ? "视频待审核" : !nativeVideoEnabled && scene.imageUrl ? "导入图片镜头" : nativeVideoEnabled ? "待直接生成视频" : "待生成"} · {scene.camera}</small></div><i className={`scene-state ${scene.status}`} /></button>)}</div>
             {selectedScene && <div className="scene-editor">
               <div className="editor-heading"><b>镜头 {String(selected + 1).padStart(2, "0")} · 属性检查器</b><div><button onClick={() => moveScene(selected, -1)} disabled={selected === 0}>↑</button><button onClick={() => moveScene(selected, 1)} disabled={selected === scenes.length - 1}>↓</button><button onClick={() => duplicateScene(selected)}>复制</button><button className="danger" onClick={() => deleteScene(selected)}>删除</button></div></div>
-              <div className="local-media-tools">{!nativeVideoEnabled && <label>替换图片<input type="file" accept="image/*" onChange={(event) => { replaceSceneMedia(selectedScene, "image", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>}<label>导入视频<input type="file" accept="video/*" onChange={(event) => { replaceSceneMedia(selectedScene, "video", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>导入配音<input type="file" accept="audio/*" onChange={(event) => { replaceSceneMedia(selectedScene, "audio", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>{selectedScene.videoUrl && selectedScene.speaker && <button type="button" onClick={() => void extractVoiceProfileFromScene(selectedScene)} disabled={Boolean(assetAction)}>{assetAction === `voice-extract:${selectedScene.id}` ? "正在摘取 MP3…" : `摘取${selectedScene.speaker}音色`}</button>}</div>
+              <div className="local-media-tools">{!nativeVideoEnabled && <label>替换图片<input type="file" accept="image/*" onChange={(event) => { replaceSceneMedia(selectedScene, "image", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>}<label>导入视频<input type="file" accept="video/*" onChange={(event) => { replaceSceneMedia(selectedScene, "video", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>导入配音<input type="file" accept="audio/*" onChange={(event) => { replaceSceneMedia(selectedScene, "audio", event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>{selectedScene.videoUrl && selectedScene.speaker && <button type="button" onClick={() => void extractVoiceProfileFromScene(selectedScene)} disabled={Boolean(assetAction)}>{assetAction === `voice-extract:${selectedScene.id}` ? "正在摘取音色…" : `摘取${selectedScene.speaker}音色`}</button>}</div>
               <label>镜头标题<input value={selectedScene.title} onChange={(event) => updateScene(selectedScene.id, { title: event.target.value })} /></label>
               <div className="editor-grid"><label>景别<input value={selectedScene.shot} onChange={(event) => updateScene(selectedScene.id, { shot: event.target.value })} /></label><label>文字运镜描述<input value={selectedScene.camera} onChange={(event) => updateScene(selectedScene.id, { camera: event.target.value })} /></label><label>说话角色<input value={selectedScene.speaker} onChange={(event) => updateScene(selectedScene.id, { speaker: event.target.value })} /></label><label>表演情绪<input value={selectedScene.emotion} onChange={(event) => updateScene(selectedScene.id, { emotion: event.target.value })} /></label></div>
               <label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label>

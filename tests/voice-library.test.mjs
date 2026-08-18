@@ -55,6 +55,9 @@ test("ships an auditable voice library and optional video-to-MP3 extraction", ()
   assert.match(bridge, /@app\.post\("\/v1\/voice-profiles\/extract"\)/);
   assert.match(bridge, /inference_zero_shot/);
   assert.match(bridge, /"-b:a", "128k"/);
+  assert.match(studio, /本地桥接摘取不可用，正在自动改用软件内置音轨解码/);
+  assert.match(studio, /audioBufferToWav\(decoded, duration\)/);
+  assert.doesNotMatch(studio, /从视频摘取 MP3 音色需要先在开源节点中心配置/);
 });
 
 test("creates project voice placeholders from speaking script characters", () => {
@@ -68,7 +71,8 @@ test("creates project voice placeholders from speaking script characters", () =>
 test("preflights reusable assets before every Seedance video path", () => {
   assert.match(studio, /preflightReusableVideoAssets/);
   assert.match(studio, /资产预检完成/);
-  assert.match(studio, /previousScene\.remoteVideoUrl \|\| previousScene\.videoUrl/);
+  assert.match(studio, /agentConfigs\.video\.adapter === "seedance" \? previousScene\?\.remoteVideoUrl/);
+  assert.match(studio, /方舟不接受本机\/data 视频作为 @Video/);
   assert.match(studio, /role: "reference_video"/);
 });
 
