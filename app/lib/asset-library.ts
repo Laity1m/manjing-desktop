@@ -1,5 +1,6 @@
 import { characterAssetDisplayName } from "./character-asset-naming";
 import { findReusableLibraryAsset } from "./asset-reuse";
+import { DUPLICATE_CHARACTER_ARCHIVE_TAG, planCharacterAssetDeduplication } from "./character-asset-deduplication";
 
 export type LibraryAssetCategory = "character" | "scene" | "prop" | "video" | "audio" | "other";
 export type LibraryMediaType = "image" | "video" | "audio";
@@ -33,6 +34,7 @@ export type LibraryAsset = {
   arkAssetId?: string;
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
   referenceText?: string;
+  referenceMediaUrl?: string;
   voiceSource?: "generated-dialogue" | "video-extracted" | "user-uploaded";
   voiceConsent?: "pending" | "confirmed" | "revoked";
   assetState?: "placeholder" | "generating" | "review" | "ready";
@@ -150,7 +152,7 @@ function transactionDone(transaction: IDBTransaction, message: string) {
   });
 }
 
-export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; entityId?: string; variantName?: string; purposes?: AssetReferencePurpose[]; semanticDescription?: string; semanticRegions?: AssetSemanticRegion[]; recognitionStatus?: "pending" | "recognized" | "confirmed" | "rejected"; recognitionConfidence?: number; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global"; referenceText?: string; voiceSource?: "generated-dialogue" | "video-extracted" | "user-uploaded"; voiceConsent?: "pending" | "confirmed" | "revoked" } = {}) {
+export async function saveLibraryFile(file: File, options: { name?: string; category?: LibraryAssetCategory; duration?: number; tags?: string[]; reusable?: boolean; locked?: boolean; identityKey?: string; lookName?: string; entityId?: string; variantName?: string; purposes?: AssetReferencePurpose[]; semanticDescription?: string; semanticRegions?: AssetSemanticRegion[]; recognitionStatus?: "pending" | "recognized" | "confirmed" | "rejected"; recognitionConfidence?: number; parentAssetId?: string; projectId?: string; episodeId?: string; scope?: "project" | "global"; referenceText?: string; referenceMediaUrl?: string; voiceSource?: "generated-dialogue" | "video-extracted" | "user-uploaded"; voiceConsent?: "pending" | "confirmed" | "revoked" } = {}) {
   if (file.size > MAX_ASSET_BYTES) throw new Error("单个资产不能超过 512MB");
   const mediaType = assetMediaType(file);
   if (!mediaType) throw new Error(`“${file.name}”不是支持的图片、视频或音频`);
@@ -198,6 +200,7 @@ export async function saveLibraryFile(file: File, options: { name?: string; cate
     recognizedAt: generated || options.recognitionStatus === "recognized" || options.recognitionStatus === "confirmed" ? new Date().toISOString() : undefined,
     parentAssetId: options.parentAssetId?.trim() || undefined,
     referenceText: options.referenceText?.trim().slice(0, 500) || undefined,
+    referenceMediaUrl: /^https:\/\//i.test(options.referenceMediaUrl || "") ? options.referenceMediaUrl?.trim().slice(0, 2000) : undefined,
     voiceSource: category === "audio" ? options.voiceSource || (generated ? "generated-dialogue" : "user-uploaded") : undefined,
     voiceConsent: category === "audio" ? options.voiceConsent || (generated ? "confirmed" : "pending") : undefined,
     assetState: "ready",
@@ -235,7 +238,7 @@ export async function saveLibraryPlaceholder(input: LibraryPlaceholderInput) {
     lookName: input.lookName,
     projectId,
     mediaType: input.category === "audio" ? "audio" : "image",
-    allowCrossProject: true,
+    allowCrossProject: false,
     // A base portrait may lock identity, but it must never silently satisfy a
     // different costume/state blueprint (for example 白衣版 vs 黑衣版).
     allowLookFallback: false,
@@ -347,7 +350,7 @@ export async function attachLibraryFileToPlaceholder(id: string, file: File, sou
   }
 }
 
-export async function listLibraryAssets(options: { allProjects?: boolean } = {}) {
+export async function listLibraryAssets(options: { allProjects?: boolean; includeArchived?: boolean } = {}) {
   const database = await openLibraryDatabase();
   try {
     const assets = await new Promise<LibraryAsset[]>((resolve, reject) => {
@@ -357,7 +360,38 @@ export async function listLibraryAssets(options: { allProjects?: boolean } = {})
     });
     let activeProjectId = "";
     try { activeProjectId = String(JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}").projectId || ""); } catch { activeProjectId = ""; }
-    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata).filter((item) => options.allProjects || !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return assets.filter((item) => item?.id && item?.mediaId).map(normalizedAssetMetadata)
+      .filter((item) => options.includeArchived || !item.tags.includes(DUPLICATE_CHARACTER_ARCHIVE_TAG))
+      .filter((item) => options.allProjects || !activeProjectId || !item.projectId || item.projectId === activeProjectId || item.scope === "global")
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  } finally {
+    database.close();
+  }
+}
+
+export async function consolidateDuplicateCharacterAssets() {
+  const assets = await listLibraryAssets({ allProjects: true, includeArchived: true });
+  const plan = planCharacterAssetDeduplication(assets);
+  if (!plan.length) return { archived: 0, groups: 0 };
+  const database = await openLibraryDatabase();
+  try {
+    const transaction = database.transaction(ASSET_STORE_NAME, "readwrite");
+    const store = transaction.objectStore(ASSET_STORE_NAME);
+    let archived = 0;
+    for (const group of plan) {
+      for (const duplicate of group.archive) {
+        store.put({
+          ...duplicate,
+          parentAssetId: group.keep.id,
+          reusable: false,
+          canonical: false,
+          tags: [...new Set([...duplicate.tags.filter((tag) => tag !== DUPLICATE_CHARACTER_ARCHIVE_TAG), DUPLICATE_CHARACTER_ARCHIVE_TAG])].slice(0, 24),
+        }, duplicate.id);
+        archived += 1;
+      }
+    }
+    await transactionDone(transaction, "重复人物资产整理失败");
+    return { archived, groups: plan.length };
   } finally {
     database.close();
   }
@@ -394,7 +428,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "referenceText" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "referenceText" | "referenceMediaUrl" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -425,6 +459,7 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...(typeof patch.arkAssetId === "string" ? { arkAssetId: patch.arkAssetId.trim().replace(/^asset:\/\//i, "").slice(0, 180) || undefined } : {}),
       ...(patch.portraitAuthorizationStatus ? { portraitAuthorizationStatus: patch.portraitAuthorizationStatus } : {}),
       ...(typeof patch.referenceText === "string" ? { referenceText: patch.referenceText.trim().slice(0, 500) || undefined } : {}),
+      ...(typeof patch.referenceMediaUrl === "string" ? { referenceMediaUrl: /^https:\/\//i.test(patch.referenceMediaUrl) ? patch.referenceMediaUrl.trim().slice(0, 2000) : undefined } : {}),
       ...(patch.voiceSource ? { voiceSource: patch.voiceSource } : {}),
       ...(patch.voiceConsent ? { voiceConsent: patch.voiceConsent } : {}),
       ...(patch.assetState ? { assetState: patch.assetState } : {}),

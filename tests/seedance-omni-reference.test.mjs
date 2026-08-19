@@ -5,7 +5,7 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const { invokeSeedance } = require("../windows-app/desktop-runtime.js");
 
-test("desktop Seedance converts continuity frames to omni image references", async () => {
+test("desktop Seedance rejects first/last-frame inputs and keeps only omni references", async () => {
   let createBody = null;
   const result = await invokeSeedance({
     action: "create",
@@ -26,9 +26,27 @@ test("desktop Seedance converts continuity frames to omni image references", asy
 
   assert.equal(result.id, "cgt-omnimedia1");
   const mediaRoles = createBody.content.filter((item) => item.type !== "text").map((item) => item.role);
-  assert.deepEqual(mediaRoles, ["reference_image", "reference_image", "reference_image", "reference_audio"]);
+  assert.deepEqual(mediaRoles, ["reference_image", "reference_audio"]);
   assert.equal(mediaRoles.includes("first_frame"), false);
   assert.equal(mediaRoles.includes("last_frame"), false);
+});
+
+test("trusted Ark audio assets can be submitted as @Audio without a public URL", async () => {
+  let createBody = null;
+  const result = await invokeSeedance({
+    action: "create",
+    requestId: "omni-trusted-audio-asset",
+    apiKey: "test-seedance-key",
+    model: "doubao-seedance-2-0-260128",
+    prompt: "保持角色音色并生成下一镜自然对白",
+    references: [{ kind: "audio", role: "reference_audio", url: "asset://voice-canonical-001", name: "苏梨标准音色" }],
+  }, async (_url, init) => {
+    createBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ id: "cgt-trustedaudio1" }), { status: 200 });
+  });
+  assert.equal(result.id, "cgt-trustedaudio1");
+  assert.equal(createBody.content[1].role, "reference_audio");
+  assert.equal(createBody.content[1].audio_url.url, "asset://voice-canonical-001");
 });
 
 test("endpoint IDs stay in explicit omni mode and never become first-frame video", async () => {
@@ -52,7 +70,7 @@ test("endpoint IDs stay in explicit omni mode and never become first-frame video
 
   assert.equal(result.id, "cgt-endpointomni1");
   const media = createBody.content.filter((item) => item.type !== "text");
-  assert.deepEqual(media.map((item) => item.role), ["reference_image", "reference_image"]);
+  assert.deepEqual(media.map((item) => item.role), ["reference_image"]);
   assert.equal(media.some((item) => item.image_url?.url.includes("forbidden-first-frame")), false);
   assert.match(createBody.content[0].text, /绝不作为首帧控制/);
 });

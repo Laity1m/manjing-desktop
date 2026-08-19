@@ -2,7 +2,7 @@
 "use strict";
 
 const path = require("node:path");
-const { app, BrowserWindow, dialog, ipcMain, protocol, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, protocol, safeStorage, session, shell } = require("electron");
 const { createDesktopRuntime, invokeImageModel, volcengineSdkStatus } = require("./desktop-runtime");
 
 const APP_SCHEME = "manjing";
@@ -799,7 +799,17 @@ app.whenReady().then(async () => {
         throw new Error(`火山引擎 SDK 内置自检失败：${volcengineSdk.note}`);
       }
     }
-    const runtime = await createDesktopRuntime({ dataRoot: app.getPath("userData") });
+    const settingsCodec = {
+      async encrypt(value) {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 凭据保护暂不可用，已拒绝明文保存 API Key");
+        return safeStorage.encryptString(String(value)).toString("base64");
+      },
+      async decrypt(value) {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 凭据保护暂不可用，无法读取已加密设置");
+        return safeStorage.decryptString(Buffer.from(String(value), "base64"));
+      }
+    };
+    const runtime = await createDesktopRuntime({ dataRoot: app.getPath("userData"), settingsCodec });
     protocol.handle(APP_SCHEME, runtime.handle);
 
     const healthResponse = await runtime.handle(new Request("manjing://app/studio", {

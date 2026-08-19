@@ -19,7 +19,7 @@
   "dependencies": {
     "drizzle-orm": "0.45.2",
     "mammoth": "^1.12.1",
-    "next": "16.2.6",
+    "next": "16.2.11",
     "pdfjs-dist": "^6.2.108",
     "react": "19.2.6",
     "react-dom": "19.2.6"
@@ -33,6 +33,7 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
+    "esbuild": "0.28.1",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",

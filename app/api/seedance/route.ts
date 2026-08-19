@@ -82,12 +82,13 @@ export async function POST(request: Request) {
       const accepted: Array<{ kind: string; role: string; token?: string; name: string }> = [];
       const referenceUrl = (value: unknown, kind: "image" | "video" | "audio") => {
         const raw = String(value || "").trim();
-        if (kind === "image" && /^asset:\/\//i.test(raw)) return raw;
+        if (/^asset:\/\//i.test(raw)) return raw;
         if (/^https:\/\//i.test(raw)) return raw;
         return kind === "image" && /^data:image\//i.test(raw) ? raw : "";
       };
       if (isOmniModel) {
         for (const reference of rawReferences) {
+          if (["first_frame", "last_frame"].includes(String(reference.role))) continue;
           const kind = ["image", "video", "audio"].includes(String(reference.kind)) ? String(reference.kind) as "image" | "video" | "audio" : "image";
           const limit = kind === "image" ? 9 : 3;
           const url = referenceUrl(reference.url, kind);

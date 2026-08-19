@@ -52,7 +52,7 @@ test("all character generation paths use the concise default aesthetic director"
   assert.doesNotMatch(source, /Enabled Image Agent Skill/);
 });
 
-test("four-zone cards receive multi-angle checks and video continuity remains user-selectable", () => {
+test("four-zone cards receive multi-angle checks and video continuity stays omni-only", () => {
   assert.match(source, /frontalFace: number \| null/);
   assert.match(source, /profileSilhouette: number \| null/);
   assert.match(source, /backSilhouette: number \| null/);
@@ -60,10 +60,9 @@ test("four-zone cards receive multi-angle checks and video continuity remains us
   assert.match(source, /bodyProportion: number \| null/);
   assert.match(source, /costumeConsistency: number \| null/);
   assert.match(source, /正面全身、45度侧面全身、背面全身/);
-  assert.match(source, /A · 身份优先（默认）/);
-  assert.match(source, /B · 可控尾帧继承/);
-  assert.match(source, /frameContinuityMode === "controlled-frame"/);
-  assert.match(source, /continuityReferenceDecision: sceneIndex > 0 \? \(frameContinuityMode === "controlled-frame" \? "tail-frame"/);
+  assert.match(source, /全能参考连续性（已锁定）/);
+  assert.match(source, /抽取首尾帧仅用于本地质检，绝不送入模型/);
+  assert.doesNotMatch(source, /pushReference\(\{ kind: "image"[^\n]+videoEndFrameUrl/);
   assert.match(source, /const pendingCharacterCards = cast\.filter/);
   assert.match(source, /四区角色卡等待用户批准，未提交视频任务/);
 });
@@ -108,5 +107,5 @@ test("creates user-selectable canonical scene images for omni-reference-only vid
   assert.match(source, /category: "scene"/);
   assert.match(source, /Canonical 空场景：\$\{canonicalSceneAsset\.name\}/);
   assert.match(source, /抽取首尾帧只用于质检，不送入模型/);
-  assert.match(source, /可控继承仍以本任务 Canonical 人物卡优先/);
+  assert.match(source, /禁止提交首帧或尾帧图片/);
 });

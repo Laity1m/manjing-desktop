@@ -36,6 +36,14 @@ test("prefers the current project and ignores similarly named people", async () 
   assert.equal(match?.id, "current");
 });
 
+test("project assets never auto-pair into an unrelated project unless cross-project reuse is explicit", async () => {
+  const { findReusableLibraryAsset } = await loadReuseModule();
+  const unrelated = asset({ id: "unrelated", projectId: "series-b", scope: "project" });
+  const request = { category: "character", identityKey: "ADRIAN", lookName: "基础版", projectId: "series-a", mediaType: "image" };
+  assert.equal(findReusableLibraryAsset([unrelated], request), undefined);
+  assert.equal(findReusableLibraryAsset([unrelated], { ...request, allowCrossProject: true })?.id, "unrelated");
+});
+
 test("reuses scene and prop assets by exact normalized entity identity", async () => {
   const { findReusableLibraryAsset } = await loadReuseModule();
   const scene = asset({ id: "scene", category: "scene", identityKey: "scene:wooden ship deck", entityId: "Wooden Ship Deck", name: "Wooden Ship Deck 场景设定", lookName: undefined });

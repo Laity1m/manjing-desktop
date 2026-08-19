@@ -767,10 +767,9 @@ function seedanceErrorMessage(data, fallback = "Seedance 方舟接口暂时不�
 
 function seedanceReferenceUrl(value, kind = "image") {
   const raw = String(value || "").trim();
-  // Ark accepts image references from its trusted asset library, but video and
-  // audio references must be fetchable web URLs. Sending a renderer blob/data
-  // URL produces HTTP 400: "reference_video must be provided as a web url".
-  if (kind === "image" && /^asset:\/\/[a-z0-9][a-z0-9._:-]{5,179}$/i.test(raw)) return raw;
+  // Ark trusted-library asset IDs are valid for supported image/video/audio
+  // references. Raw renderer blob/data video or audio URLs are never valid.
+  if (/^asset:\/\/[a-z0-9][a-z0-9._:-]{5,179}$/i.test(raw)) return raw;
   if (/^https:\/\//i.test(raw)) return raw;
   return kind === "image" && /^data:image\//i.test(raw) ? raw : "";
 }
@@ -877,6 +876,7 @@ async function invokeSeedance(input, fetchImpl = fetch) {
     const acceptedReferences = [];
     if (isOmniModel) {
       for (const reference of rawReferences) {
+        if (["first_frame", "last_frame"].includes(String(reference?.role))) continue;
         const kind = ["image", "video", "audio"].includes(String(reference?.kind)) ? String(reference.kind) : "image";
         const limit = kind === "image" ? 9 : 3;
         const url = seedanceReferenceUrl(reference?.url, kind);
@@ -1013,28 +1013,34 @@ function localFileDeadline(promise, message, timeoutMs = 4000) {
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
-async function readDesktopSettings(dataRoot) {
+async function readDesktopSettings(dataRoot, settingsCodec) {
   const filePath = settingsFile(dataRoot);
   if (!filePath || !fs.existsSync(filePath)) return {};
   try {
     const raw = await localFileDeadline(fs.promises.readFile(filePath, "utf8"), "读取本机设置超过 4 秒");
-    const parsed = JSON.parse(raw);
+    const envelope = JSON.parse(raw);
+    const parsed = envelope?.format === "manjing-secure-settings-v1" && typeof envelope.payload === "string"
+      ? JSON.parse(await settingsCodec?.decrypt?.(envelope.payload) || "{}")
+      : envelope;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }
 }
 
-function writeDesktopSettings(dataRoot, value) {
+function writeDesktopSettings(dataRoot, value, settingsCodec) {
   const filePath = settingsFile(dataRoot);
   if (!filePath) throw Object.assign(new Error("独立版设置目录不可用"), { statusCode: 500 });
   if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("设置内容格式无效"), { statusCode: 400 });
   const save = async () => {
     await localFileDeadline(fs.promises.mkdir(dataRoot, { recursive: true }), "创建本机设置目录超过 4 秒");
-    const current = await readDesktopSettings(dataRoot);
+    const current = await readDesktopSettings(dataRoot, settingsCodec);
     const merged = { ...current, ...value };
     const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    const serialized = JSON.stringify(merged, null, 2);
+    const plain = JSON.stringify(merged);
+    const serialized = settingsCodec?.encrypt
+      ? JSON.stringify({ format: "manjing-secure-settings-v1", payload: await settingsCodec.encrypt(plain) }, null, 2)
+      : JSON.stringify(merged, null, 2);
     if (Buffer.byteLength(serialized, "utf8") > 2 * 1024 * 1024) throw Object.assign(new Error("本机设置异常过大，已拒绝写入以避免界面卡死"), { statusCode: 413, retryable: false });
     await localFileDeadline(fs.promises.writeFile(temporary, serialized, "utf8"), "写入本机设置超过 4 秒");
     await localFileDeadline(fs.promises.rename(temporary, filePath), "应用本机设置超过 4 秒");
@@ -1045,9 +1051,9 @@ function writeDesktopSettings(dataRoot, value) {
   return pending;
 }
 
-async function desktopApiResponse(request, url, dataRoot) {
+async function desktopApiResponse(request, url, dataRoot, settingsCodec) {
   try {
-    if (url.pathname === "/api/desktop/settings" && request.method === "GET") return jsonResponse(await readDesktopSettings(dataRoot));
+    if (url.pathname === "/api/desktop/settings" && request.method === "GET") return jsonResponse(await readDesktopSettings(dataRoot, settingsCodec));
     if (url.pathname === "/api/desktop/volcengine-sdk" && request.method === "GET") return jsonResponse(volcengineSdkStatus());
     if (url.pathname === "/api/desktop/seedance" && request.method === "GET") {
       const media = await downloadSeedanceMedia(url.searchParams.get("url"));
@@ -1083,7 +1089,7 @@ async function desktopApiResponse(request, url, dataRoot) {
     if (url.pathname === "/api/desktop/image") return jsonResponse(await invokeImageModel(input));
     if (url.pathname === "/api/desktop/video") return jsonResponse(await invokeVideoModel(input));
     if (url.pathname === "/api/desktop/seedance") return jsonResponse(await invokeSeedance(input), input?.action === "create" ? 202 : 200);
-    if (url.pathname === "/api/desktop/settings") return jsonResponse(await writeDesktopSettings(dataRoot, input));
+    if (url.pathname === "/api/desktop/settings") return jsonResponse(await writeDesktopSettings(dataRoot, input, settingsCodec));
     return null;
   } catch (error) {
     return jsonResponse({ error: String(error?.message || "自定义 API 调用失败"), retryable: error?.retryable !== false, done: error?.done === true }, Number(error?.statusCode) || 500);
@@ -1142,6 +1148,7 @@ async function createDesktopRuntime(options = {}) {
   const appRoot = findAppRoot();
   const clientRoot = path.join(appRoot, "client");
   const dataRoot = String(options.dataRoot || "");
+  const settingsCodec = options.settingsCodec;
   const workerModule = await import(pathToFileURL(path.join(appRoot, "server", "index.js")).href);
   const worker = workerModule.default;
   if (!worker || typeof worker.fetch !== "function") throw new Error("漫镜内置应用入口无效，请重新安装。");
@@ -1152,7 +1159,7 @@ async function createDesktopRuntime(options = {}) {
         const url = new URL(request.url);
         if (url.protocol !== "manjing:" || url.hostname !== "app") return new Response("Not found", { status: 404 });
         if (url.pathname.startsWith("/api/desktop/")) {
-          const desktopApi = await desktopApiResponse(request, url, dataRoot);
+          const desktopApi = await desktopApiResponse(request, url, dataRoot, settingsCodec);
           if (desktopApi) return desktopApi;
         }
         const asset = await staticResponse(request, clientRoot, url);

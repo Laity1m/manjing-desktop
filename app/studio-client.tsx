@@ -15,13 +15,14 @@ import { API_MODE_DEFAULT_ENDPOINTS, API_MODE_LABELS, apiModesForRole, discoverA
 import { loadEditorProjectById, persistEditorProject, type EditorProjectClip } from "./lib/editor-project";
 import { loadCustomModels, saveCustomModels, type CustomModel } from "./lib/custom-models";
 import { createCanvasFromStudio } from "./lib/production-canvas";
-import { attachLibraryFileToPlaceholder, deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, saveLibraryPlaceholder, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
+import { attachLibraryFileToPlaceholder, consolidateDuplicateCharacterAssets, deleteLibraryAsset, listLibraryAssets, loadLibraryAssets, markLibraryAssetUsed, saveLibraryFile, saveLibraryPlaceholder, updateLibraryAsset, type LibraryAsset, type LibraryAssetCategory } from "./lib/asset-library";
 import { findReusableLibraryAsset, normalizeAssetIdentity, normalizeAssetLook } from "./lib/asset-reuse";
 import { CHARACTER_REFERENCE_POLICY, characterIdentityLockInstruction, selectCharacterIdentityReference, selectTaskScopedLibraryCharacterIdentityAnchor, shouldReanchorCharacterIdentity, shouldReanchorSpatialLayout, taskIdentityAnchorKey } from "./lib/character-identity-reference";
 import { videoConsistencyAccepted } from "./lib/consistency-gate";
 import { planSequentialVideo } from "./lib/sequential-video-flow";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
 import { fallbackScriptAssetManifest, localizedSceneDisplayName, parseScriptAssetManifest } from "./lib/script-asset-manifest";
+import { reconcileAnalyzedCharacterAssets } from "./lib/character-asset-reconciliation";
 
 type GeneratedAssetMetadata = { displayName?: string; identityKey?: string; lookName?: string; entityId?: string; variantName?: string };
 
@@ -38,8 +39,11 @@ async function archiveGeneratedAsset(url: string, name: string, category: Librar
   const identityTag = tags.find((tag) => tag.startsWith("asset:"));
   const identityKey = metadata.identityKey?.trim() || identityTag?.slice("asset:".length) || (category === "prop" ? tags.find((tag) => tag !== "自动生成" && tag !== "重要道具") : undefined);
   if (identityKey) {
-    const existing = (await listLibraryAssets()).find((asset) => asset.category === category && asset.identityKey === identityKey && asset.reusable !== false && (category !== "character" || characterAssetDisplayName(identityKey, asset.lookName) === characterAssetDisplayName(identityKey, metadata.lookName)));
-    if (existing) { await markLibraryAssetUsed(existing.id); return; }
+    const matching = existing.find((asset) => asset.category === category
+      && asset.reusable !== false
+      && normalizeAssetIdentity(asset.identityKey || asset.entityId || "") === normalizeAssetIdentity(identityKey)
+      && (category !== "character" || normalizeAssetLook(asset.lookName || asset.variantName || "基础版") === normalizeAssetLook(metadata.lookName || "基础版")));
+    if (matching) { await markLibraryAssetUsed(matching.id); return; }
   }
   const locked = Boolean(identityKey && ["character", "prop", "scene", "audio"].includes(category));
   const saved = await saveLibraryFile(file, { name: metadata.displayName, category, duration, tags: [...tags, archiveKey], identityKey, lookName: metadata.lookName, entityId: metadata.entityId, variantName: metadata.variantName, locked });
@@ -67,7 +71,7 @@ type MotionPreset = "push" | "pull" | "pan-left" | "pan-right" | "float";
 type TransitionPreset = "fade" | "cut" | "flash";
 type VisualFilter = "none" | "warm" | "cool" | "mono";
 type SubtitlePosition = "top" | "center" | "bottom";
-type FrameContinuityMode = "identity-first" | "controlled-frame";
+type FrameContinuityMode = "identity-first";
 
 function characterSheetVersionFromLibrary(asset: Pick<LibraryAsset, "tags">): 2 | 3 {
   return asset.tags.some((tag) => /四区角色卡|大头照|正侧背三视图|character-card-v3/i.test(tag)) ? 3 : 2;
@@ -105,6 +109,7 @@ type CharacterAsset = {
   referenceCardReport?: CharacterReferenceReport;
   reviewDecision?: UserReviewDecision;
   assetMatchKind?: "exact" | "look-candidate";
+  identityBaseline?: boolean;
   status: "queued" | "generating" | "ready" | "error";
 };
 type PropAsset = {
@@ -174,7 +179,7 @@ type Scene = {
   videoStartFrameUrl?: string;
   videoEndFrameUrl?: string;
   tailFrameAssetId?: string;
-  continuityReferenceDecision?: "previous-video" | "asset-only" | "cross-episode-video" | "tail-frame" | "cross-episode-tail";
+  continuityReferenceDecision?: "previous-video" | "asset-only" | "cross-episode-video";
   candidateVideoUrl?: string;
   videoRevisionRequest?: string;
   status: SceneStatus;
@@ -230,18 +235,21 @@ function characterAssetKey(character: CharacterAsset) {
 }
 
 function deduplicateCharacterAssets(items: CharacterAsset[]) {
-  const unique = new Map<string, CharacterAsset>();
+  const unique: CharacterAsset[] = [];
   for (const item of items) {
     if (!isVisualCharacterAsset(item)) continue;
     const key = characterAssetKey(item);
-    const existing = unique.get(key);
-    if (!existing) {
-      unique.set(key, item);
+    const existingIndex = unique.findIndex((candidate) => characterAssetKey(candidate) === key
+      || Boolean(item.libraryAssetId && candidate.libraryAssetId === item.libraryAssetId)
+      || Boolean(item.imageUrl && candidate.imageUrl === item.imageUrl));
+    if (existingIndex < 0) {
+      unique.push(item);
       continue;
     }
+    const existing = unique[existingIndex];
     const preferred = existing.imageUrl ? existing : item.imageUrl ? item : existing;
     const secondary = preferred === existing ? item : existing;
-    unique.set(key, {
+    unique[existingIndex] = {
       ...secondary,
       ...preferred,
       id: preferred.id || secondary.id,
@@ -254,9 +262,9 @@ function deduplicateCharacterAssets(items: CharacterAsset[]) {
       needsVoice: existing.needsVoice !== false || item.needsVoice !== false,
       firstDialogue: existing.firstDialogue || item.firstDialogue,
       status: preferred.imageUrl || secondary.imageUrl ? "ready" : preferred.status,
-    });
+    };
   }
-  return [...unique.values()];
+  return unique;
 }
 
 function charactersForScene(allCharacters: CharacterAsset[], scene: Scene) {
@@ -1288,6 +1296,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const runtimeShotReuseRef = useRef(new Map<string, string>());
   const runtimeVoiceReuseRef = useRef(new Map<string, { url: string; duration: number }>());
   const canonicalVoiceAudioRef = useRef(new Map<string, string>());
+  const canonicalVoiceVideoRef = useRef(new Map<string, string>());
   const videoAssetPreflightRef = useRef(new Set<string>());
   const sceneReviewPatchesRef = useRef(new Map<string, Partial<Scene>>());
   const characterReviewPatchesRef = useRef(new Map<string, Partial<CharacterAsset>>());
@@ -1310,7 +1319,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function loadReusableBlueprintAsset(category: "character" | "scene" | "prop", identityKey: string, lookName?: string) {
     const projectId = activeAssetProjectId();
     const library = await listLibraryAssets({ allProjects: true });
-    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
+    const match = findReusableLibraryAsset(library, { category, identityKey, lookName, projectId, mediaType: "image", allowCrossProject: false, allowLookFallback: false });
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
     if (!loaded?.url) return null;
@@ -1344,7 +1353,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         return { url, source: characterAssetNaming(inMemory).displayName, taskId };
       }
     }
-    const library = await listLibraryAssets({ allProjects: true });
+    const projectId = activeAssetProjectId();
+    const library = (await listLibraryAssets({ allProjects: true })).filter((asset) => !asset.projectId || asset.scope === "global" || asset.projectId === projectId);
     const match = selectTaskScopedLibraryCharacterIdentityAnchor(taskId, identity, library, taskCharacterIdentityAnchorsRef.current);
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
@@ -1371,9 +1381,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     for (const character of characterItems.filter(isVisualCharacterAsset)) {
       if (character.imageUrl) continue;
       const naming = characterAssetNaming(character);
-      const exact = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
+      const exact = findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: false, allowLookFallback: false });
       const candidate = exact || (options.allowCharacterLookCandidates
-        ? findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: true })
+        ? findReusableLibraryAsset(library, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: false, allowLookFallback: true })
         : undefined);
       if (candidate) {
         characterMatches.set(character.id, candidate);
@@ -1382,12 +1392,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     for (const prop of propItems) {
       if (prop.imageUrl) continue;
-      const match = findReusableLibraryAsset(library, { category: "prop", identityKey: prop.name, projectId, mediaType: "image", allowCrossProject: true });
+      const match = findReusableLibraryAsset(library, { category: "prop", identityKey: prop.name, projectId, mediaType: "image", allowCrossProject: false });
       if (match) propMatches.set(prop.id, match);
     }
     for (const sceneAsset of sceneItems) {
       if (sceneAsset.imageUrl) continue;
-      const match = findReusableLibraryAsset(library, { category: "scene", identityKey: sceneAsset.environmentKey || sceneAsset.name, projectId, mediaType: "image", allowCrossProject: true });
+      const match = findReusableLibraryAsset(library, { category: "scene", identityKey: sceneAsset.environmentKey || sceneAsset.name, projectId, mediaType: "image", allowCrossProject: false });
       if (match) sceneMatches.set(sceneAsset.id, match);
     }
     const matchedIds = [...new Set([...characterMatches.values(), ...propMatches.values(), ...sceneMatches.values()].map((asset) => asset.id))];
@@ -1552,7 +1562,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           if (savedWorkspace.style && STYLE_PROMPTS[savedWorkspace.style]) setStyle(savedWorkspace.style);
           if (typeof savedWorkspace.targetDuration === "number") setTargetDuration(savedWorkspace.targetDuration);
           if (savedWorkspace.aspect === "9:16" || savedWorkspace.aspect === "16:9") setAspect(savedWorkspace.aspect);
-          if (savedWorkspace.frameContinuityMode === "identity-first" || savedWorkspace.frameContinuityMode === "controlled-frame") setFrameContinuityMode(savedWorkspace.frameContinuityMode);
+          if (savedWorkspace.frameContinuityMode) setFrameContinuityMode("identity-first");
           if (typeof savedWorkspace.voiceEnabled === "boolean") setVoiceEnabled(savedWorkspace.voiceEnabled);
           if (typeof savedWorkspace.bgmEnabled === "boolean") setBgmEnabled(savedWorkspace.bgmEnabled);
           if (typeof savedWorkspace.subtitleEnabled === "boolean") setSubtitleEnabled(savedWorkspace.subtitleEnabled);
@@ -1593,7 +1603,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           if (snapshot.style && STYLE_PROMPTS[snapshot.style]) setStyle(snapshot.style);
           if (typeof snapshot.targetDuration === "number") setTargetDuration(snapshot.targetDuration);
           if (snapshot.aspect === "9:16" || snapshot.aspect === "16:9") setAspect(snapshot.aspect);
-          if (snapshot.frameContinuityMode === "identity-first" || snapshot.frameContinuityMode === "controlled-frame") setFrameContinuityMode(snapshot.frameContinuityMode);
+          if (snapshot.frameContinuityMode) setFrameContinuityMode("identity-first");
           if (Array.isArray(snapshot.characters)) setCharacters(deduplicateCharacterAssets(snapshot.characters as CharacterAsset[]));
           if (Array.isArray(snapshot.propAssets)) { setPropAssets(snapshot.propAssets as PropAsset[]); setAssetAnalysisState("ready"); }
           if (Array.isArray(snapshot.sceneAssets)) {
@@ -1758,11 +1768,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const sceneMatches = new Map<string, LibraryAsset>();
       for (const character of characters.filter((item) => isVisualCharacterAsset(item) && !item.imageUrl)) {
         const naming = characterAssetNaming(character);
-        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false });
+        const match = findReusableLibraryAsset(reusable, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId, mediaType: "image", allowCrossProject: false, allowLookFallback: false });
         if (match) { characterMatches.set(character.id, match); selectedIds.add(match.id); }
       }
       for (const scene of scenes.filter((item) => !item.imageUrl)) {
-        const match = findReusableLibraryAsset(reusable, { category: "scene", identityKey: scene.environmentKey || scene.title, projectId, mediaType: "image", allowCrossProject: true });
+        const match = findReusableLibraryAsset(reusable, { category: "scene", identityKey: scene.environmentKey || scene.title, projectId, mediaType: "image", allowCrossProject: false });
         if (match) { sceneMatches.set(scene.id, match); selectedIds.add(match.id); }
       }
       if (!selectedIds.size) return;
@@ -1787,6 +1797,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   useEffect(() => {
     if (!agentTeamLoaded) return;
     void removeMisclassifiedNarrativeAssets().catch((reason) => console.warn("[manjing invalid script assets]", reason));
+    void consolidateDuplicateCharacterAssets().then(({ archived, groups }) => {
+      if (!archived) return;
+      setImportMessage(`已把 ${archived} 张重复人物图收纳为 ${groups} 组历史版本；用户上传或已确认资产优先保留为主卡`);
+      recordActivity("image", `资产库去重完成：${archived} 张重复人物图已归入版本历史`, "done");
+    }).catch((reason) => console.warn("[manjing duplicate character assets]", reason));
     // This cleanup intentionally runs only once after the persisted agent team is restored.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentTeamLoaded]);
@@ -1814,19 +1829,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }, [story]);
 
   useEffect(() => {
-    if (apiKey.startsWith("pk_")) window.localStorage.setItem("manjing-pollinations-key", apiKey);
+    window.localStorage.removeItem("manjing-pollinations-key");
   }, [apiKey]);
 
   useEffect(() => {
-    if (agentTeamLoaded) window.localStorage.setItem("manjing-agent-team", JSON.stringify(agentConfigs));
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-agent-team", JSON.stringify(Object.fromEntries(Object.entries(agentConfigs).map(([role, config]) => [role, { ...config, apiKey: "" }]))));
   }, [agentConfigs, agentTeamLoaded]);
 
   useEffect(() => {
-    if (agentTeamLoaded) window.localStorage.setItem("manjing-local-bridge", JSON.stringify({ url: bridgeUrl, token: bridgeToken, lipsync: lipsyncEnabled }));
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-local-bridge", JSON.stringify({ url: bridgeUrl, token: "", lipsync: lipsyncEnabled }));
   }, [bridgeUrl, bridgeToken, lipsyncEnabled, agentTeamLoaded]);
 
   useEffect(() => {
-    if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceKey: seedanceApiKey, seedanceModel, videoResolution }));
+    if (agentTeamLoaded) window.localStorage.setItem("manjing-cloud-engines", JSON.stringify({ libtvKey: "", libtvSessionId, libtvProjectUrl, seedanceKey: "", seedanceModel, videoResolution }));
   }, [libtvAccessKey, libtvSessionId, libtvProjectUrl, seedanceApiKey, seedanceModel, videoResolution, agentTeamLoaded]);
 
   useEffect(() => {
@@ -2610,7 +2625,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       ? "The source screenplay is English. Preserve every character name and spoken line in English; never translate dialogue or proper names into Chinese. JSON keys must remain exactly as specified. Descriptive production fields may use concise English."
       : "源剧本为中文。角色名、对白和制作描述使用简体中文。";
     const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。" : "把故事改编为可拍摄短剧。"}${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，必须设计为一个连续完整镜头，禁止拆成多个镜头。` : `先分析剧情 Beat、场景/时空变化、视角变化、动作复杂度和情绪节奏，自主决定 ${minimumCount}–${maximumCount} 个镜头。每个镜头的时长由叙事需要独立决定，可以相同也可以不同，禁止机械平均；重要动作和情绪可更长，转场与反应可更短。`}每镜不得超过15秒，总时长必须精确等于目标时长。先为全剧建立场景身份：同一地点、时间、天气和布景必须复用同一个 environmentKey，并写出 environmentBible，固定空间布局、门窗方向、道具位置、主色调与光线方向。人物身份和本集造型必须分层：同一个 identityName 保持同一张脸；剧本中每一种实际出镜的服装、妆发、受伤或贫富状态都在 characters 中建立独立 lookName 资产，appearance 只描述该造型，禁止把白衣和黑衣等互斥造型揉成一张图。每镜必须用 characterLooks 显式指定每个出镜人物当前引用的 lookName，例如 {"男主":"白衣版"}，且只能引用 characters 已列出的对应造型。不同人物必须有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感、体型和辨识标记，禁止同脸。每镜必须写 continuity 说明如何承接上一镜，并用 endState 记录镜头结束时人物位置、朝向、手持道具和动作姿态；正式换景时明确说明。camera 必须根据动作从横向轨道、稳定器跟拍、肩后横移、弧形环绕、摇镜揭示、升降摇臂、受控手持、前景擦镜等技巧中选择，连续镜头不得重复只写推进或拉远，并写明缓入缓出和动作匹配点。${languageRule} 只返回 JSON。结构：{"title":"标题","music":"无歌词配乐描述","shotPlan":{"count":镜头数,"reason":"拆镜或不拆镜的简短理由"},"characters":[{"name":"角色身份名","identityName":"角色身份名","lookName":"本集服装/状态名","episodeScope":"当前集或集数","sceneHints":["使用镜头或剧情短语"],"role":"身份","appearance":"固定身份特征加当前造型，且与其他人物有明显差异","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","environmentKey":"场景身份","environmentBible":"固定背景和空间规则","continuity":"与上一镜的关系或换景说明","endState":"镜头结束状态","characters":["角色身份名"],"characterLooks":{"角色身份名":"该镜造型名"},"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"具体运镜轨迹、速度变化和衔接点","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色身份、当镜造型与场景背景必须一致；每镜都要推动剧情。`;
-    const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n已锁定剧本简介：${scriptMemory.synopsis || "未单独提供，以完整剧本为准"}\n已锁定背景故事/世界记忆：${scriptMemory.background || "未单独提供，以完整剧本为准"}\n已规划 Canonical 场景（environmentKey 必须逐字选用，禁止另起同义名称）：${sceneAssets.length ? JSON.stringify(sceneAssets.map((item) => ({ environmentKey: item.environmentKey, name: item.name, description: item.description, timeWeather: item.timeWeather, sceneHints: item.sceneHints }))) : "尚无预分析场景，以剧本实际地点建立稳定键"}\n资产规划要求：每个镜头的 visual 必须使用 [场景:场景身份] 标记固定场景，并用 [道具:道具1,道具2] 标记真正推动剧情或跨镜重复出现的重要道具；普通桌椅和无关装饰不要列为重要道具。后续将跳过分镜图片，视频模型必须直接组合已锁定的人物身份、当前造型、Canonical 场景图、道具、音色和按需尾帧；即使不用首尾帧也必须引用场景图，不得脱离资产重新设计。\n${scriptImported ? "用户定稿剧本" : "故事"}：${storyboardStory}`;
+  const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n已锁定剧本简介：${scriptMemory.synopsis || "未单独提供，以完整剧本为准"}\n已锁定背景故事/世界记忆：${scriptMemory.background || "未单独提供，以完整剧本为准"}\n已规划 Canonical 场景（environmentKey 必须逐字选用，禁止另起同义名称）：${sceneAssets.length ? JSON.stringify(sceneAssets.map((item) => ({ environmentKey: item.environmentKey, name: item.name, description: item.description, timeWeather: item.timeWeather, sceneHints: item.sceneHints }))) : "尚无预分析场景，以剧本实际地点建立稳定键"}\n资产规划要求：每个镜头的 visual 必须使用 [场景:场景身份] 标记固定场景，并用 [道具:道具1,道具2] 标记真正推动剧情或跨镜重复出现的重要道具；普通桌椅和无关装饰不要列为重要道具。后续跳过分镜图片，视频模型只通过全能参考组合已锁定的人物身份、当前造型、Canonical 场景图、道具、音色和上一镜已批准视频；禁止提交首帧或尾帧图片，不得脱离资产重新设计。\n${scriptImported ? "用户定稿剧本" : "故事"}：${storyboardStory}`;
     const storyboardTask = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
       ? customApiText("writer", { task: "storyboard", system, prompt: user, minimumCount, maximumCount, duration: productionDuration })
       : pollinationsText("writer", system, user);
@@ -2874,7 +2889,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
     }
     const voiceName = characters.find((item) => item.name === voiceover.speaker)?.voice || voice;
-    const saved = await persistCanonicalVoiceProfile(scene, audioBlob, Math.max(2, Math.min(12, scene.duration)), voiceName, "video-extracted");
+    const saved = await persistCanonicalVoiceProfile(scene, audioBlob, Math.max(2, Math.min(12, scene.duration)), voiceName, "video-extracted", scene.remoteVideoUrl);
     if (saved?.url) canonicalVoiceAudioRef.current.set(voiceover.speaker, saved.url);
     recordActivity("voice", `已从 ${voiceover.speaker} 的首条视频对白提取音色；本集后续镜头立即引用，跨项目复用前仍需在音色库确认`, "done");
     return saved;
@@ -2943,10 +2958,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const [loaded] = await loadLibraryAssets([match.id]);
     if (!loaded?.url) return null;
     canonicalVoiceAudioRef.current.set(speaker, loaded.url);
+    if (loaded.referenceMediaUrl) canonicalVoiceVideoRef.current.set(speaker, loaded.referenceMediaUrl);
     return { ...match, url: loaded.url };
   }
 
-  async function persistCanonicalVoiceProfile(scene: Scene, source: Blob | string, duration: number, voiceName: string, voiceSource: "generated-dialogue" | "video-extracted" | "user-uploaded" = "generated-dialogue") {
+  async function persistCanonicalVoiceProfile(scene: Scene, source: Blob | string, duration: number, voiceName: string, voiceSource: "generated-dialogue" | "video-extracted" | "user-uploaded" = "generated-dialogue", referenceMediaUrl = "") {
     const speaker = sceneVoiceover(scene).speaker.trim();
     const isCharacter = characters.some((character) => character.name.trim().toLocaleLowerCase("zh-CN") === speaker.toLocaleLowerCase("zh-CN")) || scene.characters.some((name) => name.trim().toLocaleLowerCase("zh-CN") === speaker.toLocaleLowerCase("zh-CN"));
     if (!speaker || !isCharacter) return null;
@@ -2973,6 +2989,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       purposes: ["voice"],
       semanticDescription: `${speaker} 的 Canonical 标准音色，供后续配音和全模态视频参考使用`,
       referenceText: scene.dialogue,
+      referenceMediaUrl,
       voiceSource,
       voiceConsent: voiceSource === "video-extracted" ? "pending" : "confirmed",
       projectId,
@@ -2987,6 +3004,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const approvedForProjectReuse = true;
     await updateLibraryAsset(saved.id, { canonical: approvedForProjectReuse, locked: true, reusable: approvedForProjectReuse, scope: "project", projectId });
     canonicalVoiceAudioRef.current.set(speaker, saved.url || URL.createObjectURL(blob));
+    if (/^https:\/\//i.test(referenceMediaUrl)) canonicalVoiceVideoRef.current.set(speaker, referenceMediaUrl);
     await refreshVoiceProfiles();
     recordActivity("voice", voiceSource === "video-extracted" ? `已从 ${speaker} 首次说话的分镜视频截取 ${Math.min(14, duration).toFixed(1)} 秒以内音色并放入项目音色库；后续镜头立即引用，转入公共库前仍需确认授权` : `已把 ${speaker} 的第一条独立对白保存为${isMp3 ? " MP3 " : ""}标准音色；后续配音与全模态视频将优先引用`, "done");
     return { ...saved, canonical: approvedForProjectReuse, reusable: approvedForProjectReuse, projectId, scope: "project" as const };
@@ -3043,9 +3061,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const spatialReanchor = shouldReanchorSpatialLayout(sceneIndex)
       ? `SPATIAL RE-ANCHOR CHECKPOINT (shot ${sceneIndex + 1}): reconstruct the written screen-left/right order, foreground/midground/background depth, facing, hand occupancy and prop ownership before starting the action. These are strong prompt constraints, not absolute geometry locks.`
       : "Preserve the written spatial state as a strong prompt constraint; generative drift remains possible and must be caught by review.";
-    const frameContinuityTradeoff = frameContinuityMode === "controlled-frame"
-      ? "CONTROLLED FRAME INHERITANCE MODE: when an approved previous-shot QA end frame is available, use it only as a composition and state handoff reference. The current-task Canonical character card remains the higher-priority identity authority. This can improve shot-to-shot visual continuity but may increase identity-drift risk."
-      : "IDENTITY-FIRST MODE: do not submit extracted first/end-frame images to the generation model; extraction is for QA only. This reduces frame-driven identity drift but may make shot-to-shot visual handoff less smooth.";
+    const frameContinuityTradeoff = "IDENTITY-FIRST MODE: do not submit extracted first/end-frame images to the generation model; extraction is for QA only. Preserve continuity through canonical assets, approved prior @Video and explicit physical state.";
     const assetBindings = {
       characters: cast.map((character) => ({ name: characterIdentity(character), lookName: characterLook(character), displayName: characterAssetNaming(character).displayName, assetId: character.arkAssetId || character.id, appearance: character.appearance })),
       scene: { id: scene.environmentKey || scene.title, bible: scene.environmentBible || scene.visual },
@@ -3119,7 +3135,17 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const canonicalVoiceReference = await voiceReferenceForScene(scene);
     if (canonicalVoiceReference) {
       const audioUrl = await usableReferenceUrl(canonicalVoiceReference.url, false, "audio");
-      if (audioUrl) pushReference({ ...canonicalVoiceReference, url: audioUrl });
+      if (audioUrl && (agentConfigs.video.adapter !== "seedance" || /^(?:https:\/\/|asset:\/\/)/i.test(audioUrl))) {
+        pushReference({ ...canonicalVoiceReference, url: audioUrl });
+      } else if (agentConfigs.video.adapter === "seedance") {
+        const voiceVideoUrl = canonicalVoiceVideoRef.current.get(voiceover.speaker) || "";
+        if (/^https:\/\//i.test(voiceVideoUrl)) {
+          pushReference({ kind: "video", role: "reference_video", url: voiceVideoUrl, name: `Canonical 人物音色来源视频：${voiceover.speaker}（只参考人声，不复制画面剧情）` });
+          recordActivity("video", `${voiceover.speaker} 的截取音色已保存在项目音色库；方舟不接收本机音频 URL，本镜改用其首条对白公网视频作为 @Video 全能参考锁定音色`, "done");
+        } else {
+          recordActivity("video", `${voiceover.speaker} 的音色已在本机音色库，但没有可供方舟读取的 HTTPS 音频或来源视频；本镜不会谎报 @Audio 已绑定`, "warning");
+        }
+      }
     }
 
     const previousVideoSource = agentConfigs.video.adapter === "seedance" ? previousScene?.remoteVideoUrl : previousScene?.remoteVideoUrl || previousScene?.videoUrl;
@@ -3130,10 +3156,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     else if (previousScene?.videoReviewDecision === "approved" && agentConfigs.video.adapter === "seedance") {
       recordActivity("video", `上一镜“${previousScene.title}”只有本机视频、没有仍可访问的公网 HTTPS 地址；方舟不接受本机/data 视频作为 @Video，已自动跳过该项并继续使用人物、场景、道具和状态提示生成`, "warning");
     }
-    if (frameContinuityMode === "controlled-frame" && previousScene?.videoReviewDecision === "approved" && previousScene.videoEndFrameUrl) {
-      const controlledFrameUrl = await usableReferenceUrl(previousScene.videoEndFrameUrl, true, "image");
-      if (controlledFrameUrl) pushReference({ kind: "image", role: "reference_image", url: controlledFrameUrl, name: `可控继承模式：上一镜质检尾帧构图（只继承构图；当前任务 Canonical 人物卡优先压制变脸）` });
-    }
+    // Extracted start/end frames are quality-inspection artifacts only. They
+    // are deliberately never submitted to Seedance; continuity uses approved
+    // @Video plus canonical character/scene/prop references exclusively.
     if (!previousScene) {
       const previousEpisodeVideo = await previousEpisodeVideoReference();
       const crossEpisodeUrl = agentConfigs.video.adapter === "seedance" && !/^https:\/\//i.test(previousEpisodeVideo?.url || "") ? "" : await usableReferenceUrl(previousEpisodeVideo?.url, false, "video");
@@ -3296,7 +3321,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const firstFrameCount = task.acceptedReferences.filter((reference) => reference.role === "first_frame").length;
         if (firstFrameCount) throw new Error("Seedance 返回了首帧模式确认；漫镜已中止该请求，避免按首帧生成视频");
         const lockedAssetCount = task.acceptedReferences.filter((reference) => reference.role === "reference_image").length;
-        recordActivity("video", `Seedance 已按${frameContinuityMode === "controlled-frame" ? "可控尾帧构图继承" : "身份优先、不送首尾帧"}模式接收 ${task.acceptedReferences.length} 项素材：${lockedAssetCount} 项人物/场景/道具/构图参考已绑定`, "done");
+        recordActivity("video", `Seedance 已按全能参考、不送首尾帧模式接收 ${task.acceptedReferences.length} 项素材：${lockedAssetCount} 项人物/场景/道具/构图参考已绑定`, "done");
       }
       if (task.referenceFallback) recordActivity("video", "上一镜视频或音色公网地址已失效；方舟明确拒绝后，漫镜仅重提一次人物、场景、道具 Canonical 图片与完整状态提示词，当前镜头继续生成", "warning");
       taskId = task.id;
@@ -3997,7 +4022,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const blueprintCharacters = new Map(characters.map((item) => [characterAssetKey(item), item]));
       let cast: CharacterAsset[] = storyboard.characters.map((item) => {
         const blueprint = blueprintCharacters.get(characterAssetKey(item));
-        return blueprint ? { ...item, id: blueprint.id, name: characterIdentity(blueprint), identityName: characterIdentity(blueprint), lookName: characterLook(blueprint), episodeScope: blueprint.episodeScope || item.episodeScope, sceneHints: blueprint.sceneHints?.length ? blueprint.sceneHints : item.sceneHints, role: blueprint.role || item.role, appearance: blueprint.appearance || item.appearance, voice: blueprint.voice || item.voice, imageUrl: blueprint.imageUrl, remoteUrl: blueprint.remoteUrl, sheetVersion: blueprint.sheetVersion, reviewDecision: blueprint.reviewDecision, status: blueprint.imageUrl ? "ready" as const : item.status } : item;
+        return blueprint ? { ...item, id: blueprint.id, libraryAssetId: blueprint.libraryAssetId, name: characterIdentity(blueprint), identityName: characterIdentity(blueprint), lookName: characterLook(blueprint), episodeScope: blueprint.episodeScope || item.episodeScope, sceneHints: blueprint.sceneHints?.length ? blueprint.sceneHints : item.sceneHints, role: blueprint.role || item.role, appearance: blueprint.appearance || item.appearance, voice: blueprint.voice || item.voice, imageUrl: blueprint.imageUrl, remoteUrl: blueprint.remoteUrl, arkAssetId: blueprint.arkAssetId, portraitAuthorizationStatus: blueprint.portraitAuthorizationStatus, sheetVersion: blueprint.sheetVersion, reviewDecision: blueprint.reviewDecision, identityBaseline: blueprint.identityBaseline, status: blueprint.imageUrl ? "ready" as const : item.status } : item;
       });
       const storyboardLooks = new Set(cast.map(characterAssetKey));
       cast.push(...characters.filter((item) => !storyboardLooks.has(characterAssetKey(item))).map((item) => ({ ...item })));
@@ -4023,7 +4048,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (!character.imageUrl) {
           const identity = `character:${stableReuseToken(`${character.name}|${character.appearance}`)}`;
           const naming = characterAssetNaming(character);
-          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: true, allowLookFallback: false })
+          const existing = findReusableLibraryAsset(reusableProductionAssets, { category: "character", identityKey: naming.identityKey, lookName: naming.lookName, projectId: productionProjectId, mediaType: "image", allowCrossProject: false, allowLookFallback: false })
             || reusableProductionAssets.find((asset) => asset.category === "character" && asset.mediaType === "image" && asset.tags.includes(`asset:${identity}`) && asset.assetState !== "placeholder");
           if (existing) {
             const [loaded] = await loadLibraryAssets([existing.id]);
@@ -4152,13 +4177,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         if (missingSceneAssets.length) throw new Error(`直接生成视频前仍缺少场景资产：${missingSceneAssets.map((item) => item.name).join("、")}`);
         const previousEpisodeVideo = await previousEpisodeVideoReference();
         if (previousEpisodeVideo && work[0]) {
-          work = work.map((scene, index) => index === 0 ? { ...scene, continuityReferenceDecision: "cross-episode-video" as const, startState: `${scene.startState || ""}；参考上一集最后一个已批准分镜视频的人物位置、服装、道具和场景状态；${frameContinuityMode === "controlled-frame" ? "可控继承仍以本任务 Canonical 人物卡优先" : "身份优先模式不提交抽取首尾帧"}` } : scene);
+          work = work.map((scene, index) => index === 0 ? { ...scene, continuityReferenceDecision: "cross-episode-video" as const, startState: `${scene.startState || ""}；参考上一集最后一个已批准分镜视频的人物位置、服装、道具和场景状态；身份优先模式不提交抽取首尾帧` } : scene);
           recordActivity("video", "已找到上一集最后一个已批准分镜视频，本集首镜将把它作为 @Video 全能参考", "done");
         } else if ((activeSeriesContext().episodeNumber || 1) > 1) {
           recordActivity("video", "本集不是第一集，但资产库中没有上一集已批准分镜视频；首镜将只引用人物、道具、场景和音色资产", "warning");
         }
         publishScenes(work);
-        recordActivity("image", `已为当前任务绑定 ${cast.filter(isVisualCharacterAsset).length} 个人物、${sceneAssets.filter((item) => item.imageUrl || item.remoteUrl).length} 个 Canonical 场景和 ${videoPropAssets.filter((item) => item.imageUrl).length} 个道具资产；跳过分镜首帧图，直接进入全能参考视频；${frameContinuityMode === "controlled-frame" ? "仅在有已批准上一镜尾帧时继承构图，并保持 Canonical 人物卡优先" : "抽取首尾帧只用于质检，不送入模型"}`, "done");
+        recordActivity("image", `已为当前任务绑定 ${cast.filter(isVisualCharacterAsset).length} 个人物、${sceneAssets.filter((item) => item.imageUrl || item.remoteUrl).length} 个 Canonical 场景和 ${videoPropAssets.filter((item) => item.imageUrl).length} 个道具资产；跳过分镜首帧图，直接进入全能参考视频；抽取首尾帧只用于质检，不送入模型`, "done");
       } else {
       setPhase("images");
       const sceneAssetReferences = new Map<string, string>();
@@ -4336,7 +4361,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         await preflightReusableVideoAssets(work, cast);
         setPhase("video");
         activeRole = "video";
-        recordActivity("video", `${agentName("video")}开始使用人物、道具、场景、音色和上一镜已批准视频进行全能参考生成；${frameContinuityMode === "controlled-frame" ? "可用上一镜质检尾帧做构图继承，当前任务 Canonical 身份优先" : "抽帧只用于质检，不作为生成输入"}`);
+        recordActivity("video", `${agentName("video")}开始使用人物、道具、场景、音色和上一镜已批准视频进行全能参考生成；抽帧只用于质检，不作为生成输入`);
         let generatedClips = 0;
         for (let index = 0; index < work.length; index += 1) {
           const scene = work[index];
@@ -4375,7 +4400,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               return;
             }
 	            sceneReviewPatchesRef.current.set(scene.id, { ...(sceneReviewPatchesRef.current.get(scene.id) || {}), videoReviewDecision: "pending" });
-	            work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: index > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" as const : "previous-video" as const) : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
+	            work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: index > 0 ? "previous-video" as const : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
             generatedClips += 1;
           publishScenes(work);
             setSelected(index);
@@ -4681,8 +4706,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           setProgress(26 + Math.round(((targetIndex + 1) / targets.length) * 18));
         }
         invalidateExport();
-        recordActivity("image", agentConfigs.video.adapter === "browser" ? `生图岗位补跑完成：${missingCharacters.length} 个角色、${targets.length} 个分镜` : `生图岗位只补齐了 ${missingCharacters.length} 个人物资产；原生视频流程保持${frameContinuityMode === "controlled-frame" ? "可控尾帧构图继承" : "身份优先、不送首尾帧"}`, "done");
-        setStatusText(agentConfigs.video.adapter === "browser" ? "生图岗位重新运行完成，其他已完成素材保持不变" : `人物资产检查完成；${frameContinuityMode === "controlled-frame" ? "不会生成分镜首帧，仅复用已批准上一镜质检尾帧的构图" : "未生成任何镜头首帧"}`);
+        recordActivity("image", agentConfigs.video.adapter === "browser" ? `生图岗位补跑完成：${missingCharacters.length} 个角色、${targets.length} 个分镜` : `生图岗位只补齐了 ${missingCharacters.length} 个人物资产；原生视频流程保持全能参考、不送首尾帧`, "done");
+        setStatusText(agentConfigs.video.adapter === "browser" ? "生图岗位重新运行完成，其他已完成素材保持不变" : "人物资产检查完成；未生成或提交任何镜头首尾帧");
         setPhase("ready");
         return;
       }
@@ -4736,13 +4761,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
           if (scene.videoUrl?.startsWith("blob:")) URL.revokeObjectURL(scene.videoUrl);
 	          sceneReviewPatchesRef.current.set(scene.id, { ...(sceneReviewPatchesRef.current.get(scene.id) || {}), videoReviewDecision: "pending" });
-	          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" as const : "previous-video" as const) : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
+	          work = work.map((item) => item.id === scene.id ? { ...item, videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending" as const, videoPosterUrl: inspection.frames.middle || item.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? "previous-video" as const : "asset-only" as const, consistencyReport: inspection.report, consistencyDecision: "pass" as const, duration: Math.max(4, Math.min(15, scene.duration)), status: "ready" as SceneStatus, errorMessage: undefined } : item);
           publishScenes(work);
           setSelected(sceneIndex);
           setStatusText(`“${scene.title}”已生成，请审核后再继续下一镜`);
+          setProgress(44 + Math.round(((targetIndex + 1) / targets.length) * 26));
           setPhase("ready");
           return;
-          setProgress(44 + Math.round(((targetIndex + 1) / targets.length) * 26));
         }
         invalidateExport();
         recordActivity("video", `视频岗位补跑完成：${targets.length} 个动态镜头`, "done");
@@ -4924,7 +4949,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         throw new Error(`五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，结果未进入资产库和成片`);
       }
       if (scene.videoUrl) URL.revokeObjectURL(scene.videoUrl);
-      patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending", videoPosterUrl: inspection.frames.middle || scene.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" : "previous-video") : "asset-only", consistencyReport: inspection.report, consistencyDecision: "pass", status: "ready", duration: Math.max(4, Math.min(15, scene.duration)) });
+      patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: "remoteUrl" in clip ? String(clip.remoteUrl || "") || undefined : undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending", videoPosterUrl: inspection.frames.middle || scene.videoPosterUrl, remoteImageUrl: undefined, videoStartFrameUrl: inspection.frames.start, videoEndFrameUrl: inspection.frames.end, tailFrameAssetId: undefined, continuityReferenceDecision: sceneIndex > 0 ? "previous-video" : "asset-only", consistencyReport: inspection.report, consistencyDecision: "pass", status: "ready", duration: Math.max(4, Math.min(15, scene.duration)) });
       if (previousCandidateUrl?.startsWith("blob:") && previousCandidateUrl !== durableCandidate.url) URL.revokeObjectURL(previousCandidateUrl);
       recordActivity("video", `“${scene.title}”的原生动态镜头已生成，正在等待你的逐项批准`, "done");
     } catch (reason) {
@@ -4975,7 +5000,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         videoStartFrameUrl: frames.start,
         videoEndFrameUrl: frames.end,
         tailFrameAssetId: undefined,
-        continuityReferenceDecision: approvedSceneIndex > 0 ? (frameContinuityMode === "controlled-frame" ? "tail-frame" : "previous-video") : "asset-only",
+        continuityReferenceDecision: approvedSceneIndex > 0 ? "previous-video" : "asset-only",
         consistencyDecision: "review",
         videoReviewDecision: "approved",
         status: "ready",
@@ -5118,11 +5143,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
       const looksLikeCharacter = asset.mediaType === "image" && (asset.category === "character" || /角色|人物|character|turnaround|三视图|四视图/i.test(asset.name));
       if (looksLikeCharacter) {
-        const exactIndex = nextCharacters.findIndex((item) => item.name.trim().toLocaleLowerCase() === normalizedAssetName);
+        const assetIdentity = normalizeAssetIdentity(asset.identityKey || asset.entityId || asset.name.replace(/\.[^.]+$/, ""));
+        const assetLook = normalizeAssetLook(asset.lookName || asset.variantName || "基础版");
+        const exactIndex = nextCharacters.findIndex((item) => normalizeAssetIdentity(characterIdentity(item)) === assetIdentity && normalizeAssetLook(characterLook(item)) === assetLook);
         const targetIndex = exactIndex >= 0 ? exactIndex : nextCharacters.findIndex((item) => !item.imageUrl);
         const existing = nextCharacters[targetIndex];
-        if (existing) nextCharacters[targetIndex] = { ...existing, imageUrl: asset.url, sheetVersion: 2, reviewDecision: "approved", status: "ready" };
-        else nextCharacters.push({ id: uid(), name: asset.name.replace(/\.[^.]+$/, "").slice(0, 30) || `角色 ${characterIndex + 1}`, role: "用户导入角色", appearance: "以用户导入的角色设定图为唯一外观参考", voice, imageUrl: asset.url, sheetVersion: 2, status: "ready" });
+        if (existing) nextCharacters[targetIndex] = { ...existing, libraryAssetId: asset.id, identityName: asset.identityKey || existing.identityName || existing.name, lookName: asset.lookName || existing.lookName, imageUrl: asset.url, sheetVersion: characterSheetVersionFromLibrary(asset), reviewDecision: "approved", status: "ready" };
+        else nextCharacters.push({ id: uid(), libraryAssetId: asset.id, name: asset.identityKey || asset.name.replace(/\.[^.]+$/, "").slice(0, 30) || `角色 ${characterIndex + 1}`, identityName: asset.identityKey, lookName: asset.lookName, role: "用户导入角色", appearance: "以用户导入的角色设定图为唯一外观参考", voice, imageUrl: asset.url, sheetVersion: characterSheetVersionFromLibrary(asset), reviewDecision: "approved", status: "ready" });
         characterIndex += 1;
         continue;
       }
@@ -5300,10 +5327,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const previousCharacters = new Map(characters.map((item) => [characterAssetKey(item), item]));
       const previousProps = new Map(propAssets.map((item) => [item.name.toLocaleLowerCase(), item]));
       const previousScenes = new Map(sceneAssets.map((item) => [item.environmentKey.toLocaleLowerCase("zh-CN"), item]));
-      const nextCharacters = manifest.characters.map((item) => {
+      const analyzedCharacters: CharacterAsset[] = manifest.characters.map((item) => {
         const previous = previousCharacters.get(`${normalizeAssetIdentity(item.identityName)}::${normalizedCharacterLook(item.lookName)}`);
-        return { id: previous?.id || uid(), libraryAssetId: previous?.libraryAssetId, name: item.identityName, identityName: item.identityName, lookName: item.lookName, episodeScope: item.episodeScope, sceneHints: item.sceneHints, role: item.role, appearance: item.appearance, visualEvidence: item.visualEvidence, requiresVisualAsset: item.requiresVisualAsset, voice: previous?.voice || voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, imageUrl: previous?.imageUrl, remoteUrl: previous?.remoteUrl, reviewDecision: previous?.reviewDecision, sheetVersion: previous?.sheetVersion, status: previous?.imageUrl ? "ready" as const : "queued" as const };
+        return { id: previous?.id || uid(), name: item.identityName, identityName: item.identityName, lookName: item.lookName, episodeScope: item.episodeScope, sceneHints: item.sceneHints, role: item.role, appearance: item.appearance, visualEvidence: item.visualEvidence, requiresVisualAsset: item.requiresVisualAsset, voice: previous?.voice || voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, status: "queued" as const };
       });
+      const nextCharacters = reconcileAnalyzedCharacterAssets(characters, analyzedCharacters);
       const nextProps = manifest.props.map((item) => {
         const previous = previousProps.get(item.name.toLocaleLowerCase());
         return { id: previous?.id || uid(), libraryAssetId: previous?.libraryAssetId, ...item, imageUrl: previous?.imageUrl, remoteUrl: previous?.remoteUrl, reviewDecision: previous?.reviewDecision, status: previous?.imageUrl ? "ready" as const : "queued" as const };
@@ -5325,7 +5353,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       usedFallback = true;
       const manifest = fallbackScriptAssetManifest(content);
       persistScriptMemory({ synopsis: manifest.synopsis, background: manifest.background });
-      const localCharacters = manifest.characters.map((item) => ({ id: uid(), name: item.name, role: item.role, appearance: item.appearance, visualEvidence: item.visualEvidence, requiresVisualAsset: item.requiresVisualAsset, voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, status: "queued" as const }));
+      const localCharacters = reconcileAnalyzedCharacterAssets(characters, manifest.characters.map((item) => ({ id: uid(), name: item.name, identityName: item.identityName || item.name, lookName: item.lookName || "基础版", role: item.role, appearance: item.appearance, visualEvidence: item.visualEvidence, requiresVisualAsset: item.requiresVisualAsset, voice, needsVoice: item.needsVoice, firstDialogue: item.firstDialogue, status: "queued" as const })));
       const localProps = manifest.props.map((item) => ({ id: uid(), ...item, status: "queued" as const }));
       const localScenes = manifest.scenes.map((item) => ({ id: uid(), ...item, status: "queued" as const }));
       const persisted = await persistScriptAssetBlueprint(localCharacters, localProps, localScenes, content);
@@ -5364,7 +5392,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         : await saveLibraryFile(file, { name: naming.displayName, category: "character", duration: 5, tags: ["用户上传", "人物", character.name, `造型:${naming.lookName}`], identityKey: naming.identityKey, lookName: naming.lookName, entityId: naming.identityKey, variantName: naming.variantName, locked: true });
       await updateLibraryAsset(saved.id, { canonical: true, reusable: true, locked: true, assetState: "ready", sourceChoice: "upload" });
       const referenceCardReport = await evaluateCharacterReferenceCard(character, saved.url);
-      updateCharacterAsset(character.id, { imageUrl: saved.url, sheetVersion: referenceCardReport.mode === "vision" && referenceCardReport.decision === "pass" ? 3 : 2, referenceCardReport, reviewDecision: "approved", status: "ready" });
+      updateCharacterAsset(character.id, { libraryAssetId: saved.id, imageUrl: saved.url, sheetVersion: referenceCardReport.mode === "vision" && referenceCardReport.decision === "pass" ? 3 : 2, referenceCardReport, reviewDecision: "approved", identityBaseline: character.identityBaseline, status: "ready" });
       recordActivity("image", `人物“${character.name}”已绑定用户上传资产；${referenceCardReport.mode === "vision" ? `多角度角色卡校验 ${referenceCardReport.overall} 分` : "未声明为标准三视图，极端角度镜头仍需补充参考"}`, referenceCardReport.decision === "reject" ? "warning" : "done");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "人物资产上传失败");
@@ -5936,7 +5964,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setScriptImported(true);
       if (typeof payload.style === "string" && STYLE_PROMPTS[payload.style]) setStyle(payload.style);
       if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
-      if (payload.frameContinuityMode === "identity-first" || payload.frameContinuityMode === "controlled-frame") setFrameContinuityMode(payload.frameContinuityMode);
+      if (payload.frameContinuityMode) setFrameContinuityMode("identity-first");
       setTargetDuration(Number(payload.targetDuration) || 0);
       setScenes(importedScenes);
       const importedCharacters = deduplicateCharacterAssets(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
@@ -6311,7 +6339,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             </div>
             <div className="aspect-setting"><label>画面比例</label><select value={aspect} onChange={(event) => setAspect(event.target.value as "9:16" | "16:9")}><option value="9:16">竖屏 9:16</option><option value="16:9">横屏 16:9</option></select></div>
             <div className="aspect-setting"><label>视频清晰度</label><select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value as "480p" | "720p" | "1080p")}><option value="480p">流畅 480P</option><option value="720p">高清 720P</option><option value="1080p">全高清 1080P</option></select></div>
-            <div className="aspect-setting"><label>分镜画面继承</label><select value={frameContinuityMode} onChange={(event) => setFrameContinuityMode(event.target.value as FrameContinuityMode)}><option value="identity-first">A · 身份优先（默认）</option><option value="controlled-frame">B · 可控尾帧继承</option></select><small>{frameContinuityMode === "controlled-frame" ? "继承已批准上一镜质检尾帧的构图，并叠加当前任务 Canonical 人物卡；衔接更顺，但变脸风险略高。" : "抽取首尾帧只用于质检、不送入模型；身份漂移较少，但镜头之间可能更跳。"}</small></div>
+            <div className="aspect-setting"><label>分镜画面继承</label><div className="locked-setting">全能参考连续性（已锁定）</div><small>只提交人物、场景、道具、音色和已批准上一镜视频作为全能参考；抽取首尾帧仅用于本地质检，绝不送入模型。</small></div>
             <div className="voice-row"><div><label>背景音乐</label><small>独立控制无歌词 BGM；关闭人物配音后仍保留环境音效</small></div><button className={`toggle ${bgmEnabled ? "on" : ""}`} aria-label="切换背景音乐" onClick={() => setBgmEnabled((value) => !value)}><i /></button></div>
             <div className="voice-row subtitle-master-row"><div><label>成片字幕</label><small>独立控制预览、时间轴和最终视频字幕，不影响配音与原声</small></div><button className={`toggle ${subtitleEnabled ? "on" : ""}`} aria-label="切换成片字幕" aria-pressed={subtitleEnabled} onClick={() => setSubtitleEnabled((value) => !value)}><i /></button></div>
           </div>
@@ -6441,11 +6469,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
             </article>
             <article className="cloud-engine-card seedance-card">
               <div className="engine-title"><i>舞</i><div><b>Seedance · 火山方舟</b><span>官方文生视频 / 图生视频异步接口</span></div><em>镜头级</em></div>
-              <p>应用到“视频 AI”岗位后，漫镜会跳过分镜图，直接把人物、道具、音色、场景描述和按需尾帧逐镜提交给火山方舟。</p>
+              <p>应用到“视频 AI”岗位后，漫镜会跳过分镜图，把人物、场景、道具、音色和上一镜已批准视频作为全能参考逐镜提交给火山方舟，绝不提交首尾帧图片。</p>
               <div className="seedance-reference-plan">
                 <b>生成前资产预检 → Seedance 全能参考</b>
                 <span><i>@人物</i><i>@场景</i><i>@道具</i><i>@音色</i><i>@上一镜视频</i></span>
-                <small>先匹配当前项目与公共库资产；同场景继承上一镜尾帧和动作/机位，最后以短时逐帧平滑混合消除硬接缝。</small>
+                <small>先匹配当前项目与公共库资产；同场景通过上一镜已批准视频和文字 End State 继承动作/机位，最后以短时逐帧平滑混合消除硬接缝。</small>
               </div>
               <label>火山方舟 API Key<input type="password" value={seedanceApiKey} onChange={(event) => setSeedanceApiKey(event.target.value.trim())} placeholder="填写 ARK_API_KEY" /></label>
               <label>模型 ID 或 Endpoint ID<input value={seedanceModel} onChange={(event) => setSeedanceModel(event.target.value.trim())} placeholder="doubao-seedance-… 或 ep-…" /></label>
@@ -6493,7 +6521,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <article><i>02</i><b>剧集拆解</b><small>场次、叙事节拍、对白、目标时长</small></article>
           <article><i>03</i><b>资产规划</b><small>角色身份、造型版本、地点、关键道具、角色声音</small></article>
           <article><i>04</i><b>镜头设计</b><small>只输出景别、机位、调度和起止状态，不生成分镜图</small></article>
-          <article><i>05</i><b>直接生成视频</b><small>首镜引用人物/道具，后续再叠加音色与按需尾帧</small></article>
+          <article><i>05</i><b>直接生成视频</b><small>每镜只走全能参考：人物、造型、场景、道具、音色和前序视频</small></article>
           <article><i>06</i><b>连续性审核</b><small>身份、造型、空间、道具、动作与光线质量门</small></article>
           <article><i>07</i><b>声音后期</b><small>角色音色、对白、口型、音效、配乐与字幕</small></article>
           <article><i>08</i><b>剪辑交付</b><small>节奏调整、失败镜头替换、混音与成片导出</small></article>
@@ -6505,7 +6533,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         <div className="production-standard-grid">
           <article><span>视觉锁</span><b>{style}</b><small>{aspect} 画幅 · 同项目统一画风、色调与光线逻辑</small></article>
           <article><span>节奏策略</span><b>{targetDuration === 0 ? "AI 自动判断" : `${targetDuration} 秒目标`}</b><small>由剧情节拍分配镜长，每个视频镜头不超过 15 秒</small></article>
-          <article><span>连续性锁</span><b>镜尾状态传递</b><small>身份、造型、轴线、位置、动作、道具和曝光逐镜继承</small></article>
+          <article><span>连续性锁</span><b>前序视频全能参考</b><small>不提交首尾帧；身份、造型、轴线、位置、动作、道具和曝光逐镜继承</small></article>
           <article><span>声音交付</span><b>{voiceEnabled ? "角色配音开启" : "保留原生声音"}</b><small>{bgmEnabled ? "连续 BGM" : "无 BGM"} · {subtitleEnabled ? "统一字幕" : "无字幕"}</small></article>
         </div>
       </section>
@@ -6536,7 +6564,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           </div>
         </div>}
         {!!scenes.length && <div className="delivery-center">
-          <div className="delivery-heading"><div><b>交付物与素材库</b><span>剧本、镜头计划、角色/道具图、逐镜视频、音色和成片均可独立管理；只有确实需要衔接的尾帧进入资产库</span></div><label className="project-import">导入漫镜工程<input type="file" accept="application/json,.json" onChange={(event) => { void importProject(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
+          <div className="delivery-heading"><div><b>交付物与素材库</b><span>剧本、镜头计划、角色/场景/道具图、逐镜视频、音色和成片均可独立管理；视频只使用全能参考，不建立首尾帧资产</span></div><label className="project-import">导入漫镜工程<input type="file" accept="application/json,.json" onChange={(event) => { void importProject(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></div>
           <div className="delivery-actions">
             <button onClick={downloadScript}><i>文</i><span><b>下载剧本</b><small>TXT · 含对白、动作和声音</small></span></button>
             <button onClick={downloadStoryboard}><i>镜</i><span><b>下载镜头计划</b><small>JSON · 不包含分镜图片资产</small></span></button>
@@ -6585,7 +6613,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={15} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(15, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
               <div className="subtitle-switch"><div><b>显示本镜字幕</b><span>关闭后对白仍保留在剧本中</span></div><button className={`toggle ${selectedScene.subtitleEnabled !== false ? "on" : ""}`} onClick={() => updateScene(selectedScene.id, { subtitleEnabled: selectedScene.subtitleEnabled === false })}><i /></button></div>
               <label>音效设计<input value={selectedScene.sfx} onChange={(event) => updateScene(selectedScene.id, { sfx: event.target.value })} /></label>
-              <div className="editor-actions">{!nativeVideoEnabled && <button onClick={() => void regenerateImage(selectedScene, selected)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "image" ? "生图 AI 正在重做…" : "让生图 AI 重做"}</button>}<button className="video-action" onClick={() => void generateVideo(selectedScene)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "video" ? "视频 AI 正在重做…" : nativeVideoEnabled ? frameContinuityMode === "controlled-frame" ? "可控尾帧重做视频" : "身份优先重做视频" : "配置视频 AI"}</button></div>
+              <div className="editor-actions">{!nativeVideoEnabled && <button onClick={() => void regenerateImage(selectedScene, selected)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "image" ? "生图 AI 正在重做…" : "让生图 AI 重做"}</button>}<button className="video-action" onClick={() => void generateVideo(selectedScene)} disabled={busy || Boolean(sceneAction)}>{sceneAction?.id === selectedScene.id && sceneAction.type === "video" ? "视频 AI 正在重做…" : nativeVideoEnabled ? "全能参考重做视频" : "配置视频 AI"}</button></div>
             </div>}
           </div>
         </div>
