@@ -40,7 +40,7 @@
 
 ## 下载
 
-请下载 Release 中的 `漫镜-1.5.2-企业可信人物自动接入-x64.exe`。
+请下载 Release 中的 `Manjing-1.5.2-Full-Script-Asset-Lock-x64.exe`（本机打包文件仍显示中文产品名“漫镜”）。
 
 - 大小：113.04 MiB（118,533,242 字节）
 - SHA256：`144D8B38D0A159A1C6A44D4E5FF3D76BED41071D9D44B1D70A91F96808591C96`
