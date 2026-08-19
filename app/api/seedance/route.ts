@@ -3,7 +3,8 @@ const TASK_PATTERN = /^cgt-[a-z0-9-]{8,100}$/i;
 const MODEL_PATTERN = /^(?:doubao-seedance-[a-z0-9-]+|ep-[a-z0-9-]+)$/i;
 const TRANSIENT_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const createCache = new Map<string, { expiresAt: number; payload: Record<string, unknown> }>();
-type OmniReference = { kind?: unknown; role?: unknown; url?: unknown; name?: unknown; weight?: unknown };
+type OmniReference = { kind?: unknown; role?: unknown; url?: unknown; name?: unknown; weight?: unknown; libraryAssetId?: unknown; identityKey?: unknown; lookName?: unknown };
+type AcceptedReference = { kind: string; role: string; token?: string; name: string; libraryAssetId?: string; identityKey?: string; lookName?: string };
 
 function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
@@ -13,6 +14,19 @@ function safeError(value: unknown) {
   if (!value || typeof value !== "object") return "Seedance 方舟接口暂时不可用";
   const data = value as { error?: { message?: unknown }; message?: unknown };
   return String(data.error?.message || data.message || "Seedance 方舟接口暂时不可用").slice(0, 300);
+}
+
+function isPortraitAuthorizationError(detail: string, status: number) {
+  return status === 400 && /(portrait|face|identity|consent|authorization|authorisation|trusted asset|real[ -]?person|may contain (?:a )?real person|人像|肖像|人脸|真人|实名|授权)/i.test(detail);
+}
+
+function blockedReferences(detail: string, accepted: AcceptedReference[]) {
+  const indexes = [...detail.matchAll(/content\s*\[\s*(\d+)\s*\]/gi)].map((match) => Number(match[1])).filter((index) => Number.isInteger(index) && index > 0);
+  const resolvedIndexes = indexes.length ? [...new Set(indexes)] : accepted.map((reference, index) => reference.kind === "image" ? index + 1 : 0).filter(Boolean);
+  return resolvedIndexes.map((contentIndex) => {
+    const reference = accepted[contentIndex - 1];
+    return reference ? { contentIndex, kind: reference.kind, role: reference.role, name: reference.name, libraryAssetId: reference.libraryAssetId || "", identityKey: reference.identityKey || "", lookName: reference.lookName || "" } : { contentIndex, kind: "unknown", name: `第 ${contentIndex} 项参考素材` };
+  });
 }
 
 function delay(ms: number) {
@@ -79,7 +93,7 @@ export async function POST(request: Request) {
       const content: Array<Record<string, unknown>> = [{ type: "text", text }];
       const rawReferences = Array.isArray(body.references) ? body.references as OmniReference[] : [];
       const counts = { image: 0, video: 0, audio: 0 };
-      const accepted: Array<{ kind: string; role: string; token?: string; name: string }> = [];
+      const accepted: AcceptedReference[] = [];
       const referenceUrl = (value: unknown, kind: "image" | "video" | "audio") => {
         const raw = String(value || "").trim();
         if (/^asset:\/\//i.test(raw)) return raw;
@@ -99,7 +113,7 @@ export async function POST(request: Request) {
           // extracted first/last frames are never submitted as generation references.
           const role = kind === "image" ? "reference_image" : kind === "video" ? "reference_video" : "reference_audio";
           content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
-          accepted.push({ kind, role, token: `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`, name: String(reference.name || `${kind}-${counts[kind]}`).slice(0, 120) });
+          accepted.push({ kind, role, token: `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`, name: String(reference.name || `${kind}-${counts[kind]}`).slice(0, 120), libraryAssetId: String(reference.libraryAssetId || "").slice(0, 160), identityKey: String(reference.identityKey || "").slice(0, 120), lookName: String(reference.lookName || "").slice(0, 120) });
         }
       }
       if (accepted.length) {
@@ -124,7 +138,13 @@ export async function POST(request: Request) {
         upstream = await fetchArk(ARK_API, { method: "POST", headers, body: JSON.stringify({ model, content: fallbackContent, resolution, ratio, duration, watermark: false, return_last_frame: false, generate_audio: audioEnabled }) }, "create");
         payload = await upstream.json().catch(() => ({ message: `Seedance 方舟接口返回了无法解析的内容（${upstream.status}）` }));
       }
-      if (!upstream.ok || !payload.id) return json({ error: safeError(payload) }, upstream.status || 502);
+      if (!upstream.ok || !payload.id) {
+        const detail = safeError(payload);
+        if (isPortraitAuthorizationError(detail, upstream.status)) {
+          return json({ error: `Seedance 检测到参考素材可能包含真人，必须先通过方舟可信人像授权并绑定 Asset ID：${detail}`, retryable: false, failureKind: "portrait_authorization", requestId, blockedReferences: blockedReferences(detail, submittedReferences) }, 422);
+        }
+        return json({ error: detail, retryable: TRANSIENT_STATUSES.has(upstream.status), failureKind: "provider", requestId }, upstream.status || 502);
+      }
       const result = { id: payload.id, status: "queued", acceptedReferences: submittedReferences, ignoredReferences: Math.max(0, rawReferences.length - submittedReferences.length), referenceFallback: submittedReferences.length < accepted.length };
       if (requestId && /^[a-z0-9-]{8,80}$/i.test(requestId)) {
         createCache.set(requestId, { expiresAt: Date.now() + 30 * 60 * 1000, payload: result });

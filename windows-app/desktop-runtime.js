@@ -776,12 +776,37 @@ function seedanceReferenceUrl(value, kind = "image") {
 
 function seedancePermissionError(data, status) {
   const detail = seedanceErrorMessage(data, "");
-  const portrait = /(portrait|face|identity|consent|authorization|authorisation|trusted asset|人像|肖像|人脸|实名|授权)/i.test(detail);
+  const portrait = /(portrait|face|identity|consent|authorization|authorisation|trusted asset|real[ -]?person|may contain (?:a )?real person|人像|肖像|人脸|真人|实名|授权)/i.test(detail);
   const safety = /(safety|moderation|risk|policy|违规|审核|安全|敏感)/i.test(detail);
   if (portrait) return `Seedance 可信人像未授权或 Asset ID 不可用：${detail || `接口返回 ${status}`}。请在火山方舟完成人像本人授权，并在漫镜资产库中填写对应 Asset ID、标记“已授权”`;
   if (safety) return `Seedance 内容安全审核未通过：${detail || `接口返回 ${status}`}。这不是网络中断，请检查人物、素材版权和提示词`;
   if ([401, 403].includes(status)) return `Seedance 权限校验失败：${detail || `接口返回 ${status}`}。请检查 API Key、模型权限以及可信人像授权`;
   return "";
+}
+
+function seedancePortraitAuthorizationError(data, status) {
+  const detail = seedanceErrorMessage(data, "");
+  return status === 400 && /(portrait|face|identity|consent|authorization|authorisation|trusted asset|real[ -]?person|may contain (?:a )?real person|人像|肖像|人脸|真人|实名|授权)/i.test(detail);
+}
+
+function seedanceBlockedReferences(detail, acceptedReferences) {
+  const indexes = [...String(detail || "").matchAll(/content\s*\[\s*(\d+)\s*\]/gi)]
+    .map((match) => Number(match[1]))
+    .filter((index) => Number.isInteger(index) && index > 0);
+  const resolvedIndexes = indexes.length ? [...new Set(indexes)] : acceptedReferences.map((reference, index) => reference.kind === "image" ? index + 1 : 0).filter(Boolean);
+  return resolvedIndexes.map((contentIndex) => {
+    const reference = acceptedReferences[contentIndex - 1];
+    if (!reference) return { contentIndex, name: `第 ${contentIndex} 项参考素材`, kind: "unknown" };
+    return {
+      contentIndex,
+      kind: reference.kind,
+      role: reference.role,
+      name: reference.name,
+      libraryAssetId: reference.libraryAssetId || "",
+      identityKey: reference.identityKey || "",
+      lookName: reference.lookName || ""
+    };
+  });
 }
 
 function seedanceParameterError(data, status) {
@@ -837,7 +862,7 @@ async function seedanceProviderJson(url, init, action, fetchImpl = fetch) {
       statusCode: TRANSIENT_PROVIDER_STATUSES.has(response.status) ? 503 : 502,
       providerStatus: response.status,
       retryable: TRANSIENT_PROVIDER_STATUSES.has(response.status),
-      failureKind: permissionMessage ? "authorization" : parameterMessage ? "invalid_parameter" : "provider"
+      failureKind: seedancePortraitAuthorizationError(data, response.status) ? "portrait_authorization" : permissionMessage ? "authorization" : parameterMessage ? "invalid_parameter" : "provider"
     });
   }
   return data;
@@ -887,7 +912,15 @@ async function invokeSeedance(input, fetchImpl = fetch) {
         const role = kind === "image" ? "reference_image" : kind === "video" ? "reference_video" : "reference_audio";
         const token = `@${kind === "image" ? "Image" : kind === "video" ? "Video" : "Audio"}${counts[kind]}`;
         content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role });
-        acceptedReferences.push({ kind, role, token, name: String(reference?.name || `${kind}-${counts[kind]}`).slice(0, 120) });
+        acceptedReferences.push({
+          kind,
+          role,
+          token,
+          name: String(reference?.name || `${kind}-${counts[kind]}`).slice(0, 120),
+          libraryAssetId: String(reference?.libraryAssetId || "").slice(0, 160),
+          identityKey: String(reference?.identityKey || "").slice(0, 120),
+          lookName: String(reference?.lookName || "").slice(0, 120)
+        });
       }
     }
     if (acceptedReferences.length && content[0]?.type === "text") {
@@ -927,6 +960,9 @@ async function invokeSeedance(input, fetchImpl = fetch) {
           }, "create", fetchImpl);
         }
       } catch (error) {
+        if (error?.failureKind === "portrait_authorization") {
+          error.blockedReferences = seedanceBlockedReferences(error.message, submittedReferences);
+        }
         error.message = `${error.message}。漫镜请求编号：${requestId}`;
         error.requestId = requestId;
         throw error;
@@ -1092,7 +1128,14 @@ async function desktopApiResponse(request, url, dataRoot, settingsCodec) {
     if (url.pathname === "/api/desktop/settings") return jsonResponse(await writeDesktopSettings(dataRoot, input, settingsCodec));
     return null;
   } catch (error) {
-    return jsonResponse({ error: String(error?.message || "自定义 API 调用失败"), retryable: error?.retryable !== false, done: error?.done === true }, Number(error?.statusCode) || 500);
+    return jsonResponse({
+      error: String(error?.message || "自定义 API 调用失败"),
+      retryable: error?.retryable !== false,
+      done: error?.done === true,
+      failureKind: String(error?.failureKind || ""),
+      requestId: String(error?.requestId || ""),
+      blockedReferences: Array.isArray(error?.blockedReferences) ? error.blockedReferences : []
+    }, Number(error?.statusCode) || 500);
   }
 }
 

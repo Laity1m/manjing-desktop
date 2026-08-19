@@ -49,6 +49,48 @@ test("trusted Ark audio assets can be submitted as @Audio without a public URL",
   assert.equal(createBody.content[1].audio_url.url, "asset://voice-canonical-001");
 });
 
+test("real-person safety errors map content indexes back to exact character assets and cannot be blindly retried", async () => {
+  await assert.rejects(() => invokeSeedance({
+    action: "create",
+    requestId: "portrait-content-index-map",
+    apiKey: "test-seedance-key",
+    model: "doubao-seedance-2-0-260128",
+    prompt: "使用两个人物资产生成连续对白镜头",
+    references: [
+      { kind: "image", role: "reference_image", url: "https://media.volces.com/suli.jpg", name: "当前任务 Canonical 人物四区角色卡：苏梨-基础版", libraryAssetId: "asset-local-suli", identityKey: "苏梨", lookName: "基础版" },
+      { kind: "image", role: "reference_image", url: "https://media.volces.com/linwan.jpg", name: "当前任务 Canonical 人物四区角色卡：林婉-白衣版", libraryAssetId: "asset-local-linwan", identityKey: "林婉", lookName: "白衣版" },
+    ],
+  }, async () => new Response(JSON.stringify({ error: { message: "The request failed because the input image 'content[1]' 'content[2]' may contain real person." } }), { status: 400 })), (error) => {
+    assert.equal(error.failureKind, "portrait_authorization");
+    assert.equal(error.retryable, false);
+    assert.equal(error.requestId, "portrait-content-index-map");
+    assert.deepEqual(error.blockedReferences.map((item) => ({ contentIndex: item.contentIndex, libraryAssetId: item.libraryAssetId, identityKey: item.identityKey, lookName: item.lookName })), [
+      { contentIndex: 1, libraryAssetId: "asset-local-suli", identityKey: "苏梨", lookName: "基础版" },
+      { contentIndex: 2, libraryAssetId: "asset-local-linwan", identityKey: "林婉", lookName: "白衣版" },
+    ]);
+    assert.match(error.message, /可信人像/);
+    return true;
+  });
+});
+
+test("authorized character Asset IDs are sent as trusted asset references", async () => {
+  let createBody = null;
+  const result = await invokeSeedance({
+    action: "create",
+    requestId: "trusted-character-asset-reference",
+    apiKey: "test-seedance-key",
+    model: "doubao-seedance-2-0-260128",
+    prompt: "锁定已授权人物身份生成视频",
+    references: [{ kind: "image", role: "reference_image", url: "asset://portrait-suli-authorized", name: "苏梨-基础版", libraryAssetId: "asset-local-suli", identityKey: "苏梨", lookName: "基础版" }],
+  }, async (_url, init) => {
+    createBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({ id: "cgt-trustedportrait1" }), { status: 200 });
+  });
+  assert.equal(result.id, "cgt-trustedportrait1");
+  assert.equal(createBody.content[1].image_url.url, "asset://portrait-suli-authorized");
+  assert.equal(result.acceptedReferences[0].libraryAssetId, "asset-local-suli");
+});
+
 test("endpoint IDs stay in explicit omni mode and never become first-frame video", async () => {
   let createBody = null;
   const result = await invokeSeedance({

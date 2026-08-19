@@ -369,6 +369,23 @@ type Storyboard = { title: string; characters: CharacterAsset[]; music: string; 
 type LibTvResult = { kind: "image" | "video"; url: string };
 type LibTvMessage = { id: string; seq: number; role: "user" | "assistant"; content: string };
 type SeedancePendingTask = { id: string; model: string; createdAt: number; promptSignature?: string };
+type SeedanceBlockedReference = { contentIndex: number; kind: string; role?: string; name: string; libraryAssetId?: string; identityKey?: string; lookName?: string };
+type SeedancePortraitBlock = { requestId?: string; sceneId?: string; blockedReferences: SeedanceBlockedReference[]; createdAt: number };
+
+class SeedanceRequestError extends Error {
+  failureKind: string;
+  retryable: boolean;
+  requestId: string;
+  blockedReferences: SeedanceBlockedReference[];
+  constructor(message: string, details: { failureKind?: string; retryable?: boolean; requestId?: string; blockedReferences?: SeedanceBlockedReference[] } = {}) {
+    super(message);
+    this.name = "SeedanceRequestError";
+    this.failureKind = details.failureKind || "";
+    this.retryable = details.retryable !== false;
+    this.requestId = details.requestId || "";
+    this.blockedReferences = details.blockedReferences || [];
+  }
+}
 
 const SAMPLE_STORY = "雨夜，女孩在即将关门的旧书店前，遇见了消失三年的恋人。他带着一封从未寄出的信，藏着两人错过彼此的真相。";
 const STUDIO_SESSION_KEY = "manjing-studio-session-v2";
@@ -376,6 +393,7 @@ const STUDIO_DRAFTS_KEY = "manjing-studio-drafts-v1";
 const NEW_STUDIO_KEY = "manjing-new-studio";
 const OPEN_STUDIO_PROJECT_KEY = "manjing-studio-open-project";
 const SEEDANCE_PENDING_KEY = "manjing-seedance-pending-v1";
+const SEEDANCE_PORTRAIT_BLOCK_KEY = "manjing-seedance-portrait-block-v1";
 
 function durableMediaUrl(url?: string) {
   return url && !url.startsWith("blob:") ? url : undefined;
@@ -832,6 +850,15 @@ async function responseError(response: Response) {
   }
 }
 
+async function responseFailure(response: Response) {
+  try {
+    const data = (await response.json()) as { error?: string; message?: string; failureKind?: string; retryable?: boolean; requestId?: string; blockedReferences?: SeedanceBlockedReference[] };
+    return new SeedanceRequestError(data.error || data.message || `请求失败（${response.status}）`, data);
+  } catch {
+    return new SeedanceRequestError(`请求失败（${response.status}）`, { retryable: response.status >= 500 });
+  }
+}
+
 function validAgentEndpoint(value: string) {
   try {
     const url = new URL(value);
@@ -1230,6 +1257,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState("等待创作");
   const [error, setError] = useState("");
+  const [seedancePortraitBlock, setSeedancePortraitBlock] = useState<SeedancePortraitBlock | null>(null);
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
   const [exportUrl, setExportUrl] = useState("");
@@ -1462,6 +1490,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     let active = true;
     queueMicrotask(() => { if (active) void refreshVoiceProfiles().catch(() => undefined); });
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(SEEDANCE_PORTRAIT_BLOCK_KEY) || "null") as SeedancePortraitBlock | null;
+      if (saved?.blockedReferences?.length) setSeedancePortraitBlock(saved);
+    } catch { window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY); }
   }, []);
 
   useEffect(() => {
@@ -2926,6 +2961,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     url: string;
     name: string;
     referenceText?: string;
+    libraryAssetId?: string;
+    identityKey?: string;
+    lookName?: string;
   };
   type MediaReference = string | VideoReference;
 
@@ -2960,6 +2998,22 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     canonicalVoiceAudioRef.current.set(speaker, loaded.url);
     if (loaded.referenceMediaUrl) canonicalVoiceVideoRef.current.set(speaker, loaded.referenceMediaUrl);
     return { ...match, url: loaded.url };
+  }
+
+  async function registerSeedancePortraitBlock(reason: unknown, sceneId = "") {
+    if (!(reason instanceof SeedanceRequestError) || reason.failureKind !== "portrait_authorization") return false;
+    const block: SeedancePortraitBlock = { requestId: reason.requestId, sceneId, blockedReferences: reason.blockedReferences, createdAt: Date.now() };
+    setSeedancePortraitBlock(block);
+    window.localStorage.setItem(SEEDANCE_PORTRAIT_BLOCK_KEY, JSON.stringify(block));
+    const ids = new Set(reason.blockedReferences.map((item) => item.libraryAssetId).filter(Boolean));
+    if (ids.size) {
+      const library = await listLibraryAssets({ allProjects: true }).catch(() => [] as LibraryAsset[]);
+      await Promise.all(library.filter((asset) => ids.has(asset.id)).map((asset) => updateLibraryAsset(asset.id, { tags: [...new Set([...asset.tags, "Seedance真人拦截", "待绑定可信人像"])] }).catch(() => undefined)));
+    }
+    const names = reason.blockedReferences.map((item) => item.identityKey || item.name.replace(/^.*?：/, "").replace(/；.*$/, "")).filter(Boolean).join("、") || "被拦截的人物参考图";
+    setError(`${names} 被方舟识别为可能包含真人。系统已停止重复提交；请到可信人物中心为对应人物完成授权并绑定 Asset ID`);
+    recordActivity("video", `已将 ${names} 精确定位到可信人物中心；授权完成前不会再次提交相同图片`, "error");
+    return true;
   }
 
   async function persistCanonicalVoiceProfile(scene: Scene, source: Blob | string, duration: number, voiceName: string, voiceSource: "generated-dialogue" | "video-extracted" | "user-uploaded" = "generated-dialogue", referenceMediaUrl = "") {
@@ -3168,11 +3222,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     for (const character of cast) {
       const reanchorLabel = shouldReanchorCharacterIdentity(sceneIndex) ? `；第 ${sceneIndex + 1} 镜任务内周期重锚` : "";
       if (agentConfigs.video.adapter === "seedance" && character.arkAssetId && character.portraitAuthorizationStatus === "authorized") {
-        pushReference({ kind: "image", role: "reference_image", url: `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`, name: `当前任务 Canonical 人物四区角色卡：${characterAssetNaming(character).displayName}${reanchorLabel}` });
+        pushReference({ kind: "image", role: "reference_image", url: `asset://${String(character.arkAssetId).replace(/^asset:\/\//i, "")}`, name: `当前任务 Canonical 人物四区角色卡：${characterAssetNaming(character).displayName}${reanchorLabel}`, libraryAssetId: character.libraryAssetId, identityKey: characterIdentity(character), lookName: characterLook(character) });
       } else {
         const characterUrl = await usableReferenceUrl(character.remoteUrl || character.imageUrl);
         if (!characterUrl) continue;
-        pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `当前任务 Canonical 人物四区角色卡：${characterAssetNaming(character).displayName}${reanchorLabel}` });
+        pushReference({ kind: "image", role: "reference_image", url: characterUrl, name: `当前任务 Canonical 人物四区角色卡：${characterAssetNaming(character).displayName}${reanchorLabel}`, libraryAssetId: character.libraryAssetId, identityKey: characterIdentity(character), lookName: characterLook(character) });
       }
     }
 
@@ -3248,6 +3302,39 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (asset.category === "audio") return asset.voiceConsent !== "revoked" && [...voiceNames].some((name) => searchable.includes(name));
       return false;
     });
+    const characterAssets = library.filter((asset) => asset.category === "character" && asset.mediaType === "image");
+    const preparedCast = cast.map((character) => {
+      const identity = normalizeAssetIdentity(characterIdentity(character));
+      const look = normalizeAssetLook(characterLook(character));
+      const candidates = characterAssets.filter((asset) => normalizeAssetIdentity(asset.identityKey || asset.entityId || asset.name) === identity);
+      const exact = candidates.filter((asset) => normalizeAssetLook(asset.lookName || asset.variantName || "基础版") === look);
+      const matched = (exact.length ? exact : candidates).sort((a, b) => Number(b.portraitAuthorizationStatus === "authorized" && Boolean(b.arkAssetId)) - Number(a.portraitAuthorizationStatus === "authorized" && Boolean(a.arkAssetId)) || Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || b.createdAt.localeCompare(a.createdAt))[0];
+      if (!matched) return character;
+      return { ...character, libraryAssetId: matched.id, arkAssetId: matched.arkAssetId || character.arkAssetId, portraitAuthorizationStatus: matched.portraitAuthorizationStatus || character.portraitAuthorizationStatus };
+    });
+    if (preparedCast.some((item, index) => item.libraryAssetId !== cast[index]?.libraryAssetId || item.arkAssetId !== cast[index]?.arkAssetId || item.portraitAuthorizationStatus !== cast[index]?.portraitAuthorizationStatus)) {
+      setCharacters((items) => items.map((item) => preparedCast.find((prepared) => prepared.id === item.id) || item));
+      recordActivity("video", "已在提交前重新读取资产库，并把人物的方舟 Asset ID 与授权状态同步到当前镜头", "done");
+    }
+    let storedBlock: SeedancePortraitBlock | null = seedancePortraitBlock;
+    if (!storedBlock) {
+      try { storedBlock = JSON.parse(window.localStorage.getItem(SEEDANCE_PORTRAIT_BLOCK_KEY) || "null") as SeedancePortraitBlock | null; } catch { storedBlock = null; }
+    }
+    if (storedBlock?.blockedReferences?.length) {
+      const unresolved = storedBlock.blockedReferences.filter((blocked) => {
+        if (blocked.kind !== "image") return false;
+        const identity = normalizeAssetIdentity(blocked.identityKey || blocked.name.replace(/^.*?：/, "").replace(/；.*$/, ""));
+        const matchingCharacter = preparedCast.find((character) => normalizeAssetIdentity(characterIdentity(character)) === identity || character.libraryAssetId === blocked.libraryAssetId);
+        return !matchingCharacter?.arkAssetId || matchingCharacter.portraitAuthorizationStatus !== "authorized";
+      });
+      if (unresolved.length) {
+        const names = unresolved.map((item) => item.identityKey || item.name.replace(/^.*?：/, "").replace(/；.*$/, "")).join("、");
+        throw new SeedanceRequestError(`生成前检查已阻止无效重试：${names} 仍未绑定已授权的方舟可信人像 Asset ID。请先前往可信人物中心处理`, { failureKind: "portrait_authorization", retryable: false, requestId: storedBlock.requestId, blockedReferences: unresolved });
+      }
+      window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY);
+      setSeedancePortraitBlock(null);
+      recordActivity("video", "此前被拦截的人物现已全部绑定可信 Asset ID，本次会改用 asset:// 引用并恢复生成", "done");
+    }
     videoAssetPreflightRef.current = new Set(matches.map((asset) => asset.id));
     const summary = {
       character: matches.filter((asset) => asset.category === "character").length,
@@ -3256,7 +3343,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       audio: matches.filter((asset) => asset.category === "audio").length,
     };
     recordActivity("video", `资产预检完成：优先复用 ${summary.character} 个人物/造型、${summary.scene} 个场景、${summary.prop} 个道具、${summary.audio} 个音色；后续镜头只叠加上一镜已批准视频作为 @Video 全能参考，不使用首尾帧图片`, matches.length ? "done" : "warning");
-    return summary;
+    return { ...summary, cast: preparedCast };
   }
 
   function seedancePendingTasks() {
@@ -3314,7 +3401,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           voiceover: { enabled: Boolean(options.voiceover?.script), backgroundMusic: bgmEnabled && options.voiceover?.mode !== "onscreen_dialogue", audioEnabled: true, language: "普通话", script: options.voiceover?.script || "", speaker: options.voiceover?.speaker || "", mode: options.voiceover?.mode || "none", style: "保持角色声音身份、音色、年龄感、语速、口音和情绪连续一致" },
         }),
       }, "创建 Seedance 视频任务", 1);
-      if (!created.ok) throw new Error(await responseError(created));
+      if (!created.ok) throw await responseFailure(created);
       const task = await created.json() as { id?: string; requestId?: string; acceptedReferences?: Array<{ kind: string; role: string; name: string }>; referenceFallback?: boolean };
       if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
       if (task.acceptedReferences?.length) {
@@ -4358,7 +4445,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       }
 
       if (agentConfigs.video.adapter !== "browser") {
-        await preflightReusableVideoAssets(work, cast);
+        const videoPreflight = await preflightReusableVideoAssets(work, cast);
+        cast = videoPreflight.cast;
+        publishCharacters(cast);
         setPhase("video");
         activeRole = "video";
         recordActivity("video", `${agentName("video")}开始使用人物、道具、场景、音色和上一镜已批准视频进行全能参考生成；抽帧只用于质检，不作为生成输入`);
@@ -4539,7 +4628,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     } catch (reason) {
       if (runRef.current !== run) return;
       setPhase("error");
-      setError(reason instanceof Error ? reason.message : "生成失败，请重试");
+      const portraitBlocked = await registerSeedancePortraitBlock(reason, scenes[selected]?.id || "");
+      if (!portraitBlocked) setError(reason instanceof Error ? reason.message : "生成失败，请重试");
       setStatusText("生成中断");
       recordActivity(activeRole, reason instanceof Error ? `制作中断：${reason.message}` : "制作中断", "error");
     }
@@ -4568,8 +4658,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   function canRerunRole(role: AgentRole) {
     if (role === "writer") return story.trim().length >= 8;
     if (role === "director" || role === "image" || role === "voice") return scenes.length > 0;
-    if (role === "video") return scenes.length > 0 && (agentConfigs.video.adapter !== "browser" || scenes.some((scene) => scene.imageUrl));
+    if (role === "video") return scenes.length > 0 && !seedancePortraitBlock && (agentConfigs.video.adapter !== "browser" || scenes.some((scene) => scene.imageUrl));
     return scenes.some((scene) => scene.imageUrl || scene.videoUrl);
+  }
+
+  function openTrustedPortraitCenter() {
+    const blocked = seedancePortraitBlock?.blockedReferences.map((item) => item.libraryAssetId || item.identityKey).filter(Boolean).join(",") || "";
+    router.push(`/assets?trusted=1&project=${encodeURIComponent(activeAssetProjectId())}&blocked=${encodeURIComponent(blocked)}`);
   }
 
   async function rerunRole(role: AgentRole) {
@@ -4721,7 +4816,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         }
         setPhase("video");
         let work = scenes.map((scene) => ({ ...scene }));
-        await preflightReusableVideoAssets(work, characters);
+        const videoPreflight = await preflightReusableVideoAssets(work, characters);
+        const preparedCharacters = videoPreflight.cast;
         const sequentialPlan = planSequentialVideo(work);
         if (sequentialPlan.kind === "review") {
           setSelected(sequentialPlan.index);
@@ -4742,9 +4838,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           work = work.map((item) => item.id === scene.id ? { ...item, status: "animating" as SceneStatus } : item);
           publishScenes(work);
           const previousScene = sceneIndex > 0 ? work[sceneIndex - 1] : undefined;
-          const visibleCast = charactersForScene(characters, scene).filter(isVisualCharacterAsset);
+          const visibleCast = charactersForScene(preparedCharacters, scene).filter(isVisualCharacterAsset);
           const prompt = await compileShotMotionPrompt(scene, sceneIndex, previousScene);
-          const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene, previousScene, characters, propAssets, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
+          const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene, previousScene, preparedCharacters, propAssets, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
           const durableCandidate = await persistSceneVideoAsset(scene, clip.url, "candidate");
           const inspection = await withStageTimeout(inspectGeneratedVideo(scene, durableCandidate.url, visibleCast, previousScene), 120000, "视频已生成，但一致性检查等待超过 120 秒；请重试该镜头");
           if (!inspection.accepted) {
@@ -4849,7 +4945,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (role === "voice") setScenes((items) => items.map((item) => item.status === "voicing" ? { ...item, status: "error" as SceneStatus } : item));
       const message = reason instanceof Error ? reason.message : `${AGENT_ROLES.find((item) => item.id === role)?.title}重新运行失败`;
       setPhase("error");
-      setError(message);
+      const portraitBlocked = role === "video" && await registerSeedancePortraitBlock(reason, scenes[selected]?.id || "");
+      if (!portraitBlocked) setError(message);
       setStatusText(`${AGENT_ROLES.find((item) => item.id === role)?.title}重新运行中断`);
       recordActivity(role, `重新运行中断：${message}`, "error");
     } finally {
@@ -4935,12 +5032,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     updateScene(scene.id, { status: "animating" });
     recordActivity("video", `${agentName("video")}正在重做“${scene.title}”的动态表演`);
     try {
-      await preflightReusableVideoAssets(scenes.length ? scenes : [scene], characters);
+      const videoPreflight = await preflightReusableVideoAssets(scenes.length ? scenes : [scene], characters);
+      const preparedCharacters = videoPreflight.cast;
       const sceneIndex = scenes.findIndex((item) => item.id === scene.id);
       const previousScene = sceneIndex > 0 ? scenes[sceneIndex - 1] : undefined;
-      const visibleCast = charactersForScene(characters, scene).filter(isVisualCharacterAsset);
+      const visibleCast = charactersForScene(preparedCharacters, scene).filter(isVisualCharacterAsset);
       const prompt = await compileShotMotionPrompt(scene, Math.max(0, sceneIndex), previousScene);
-      const clip = await pollinationsMedia("video", prompt, Math.max(0, sceneIndex), { references: await videoReferences(scene, previousScene, characters, propAssets, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
+      const clip = await pollinationsMedia("video", prompt, Math.max(0, sceneIndex), { references: await videoReferences(scene, previousScene, preparedCharacters, propAssets, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
       const durableCandidate = await persistSceneVideoAsset(scene, clip.url, "candidate");
       const inspection = await withStageTimeout(inspectGeneratedVideo(scene, durableCandidate.url, visibleCast, previousScene), 120000, "新视频已返回，但一致性检查等待超过 120 秒；旧候选仍已保留，请再次重做");
       if (!inspection.accepted) {
@@ -4955,7 +5053,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     } catch (reason) {
       if (runRef.current !== actionRun) return;
       updateScene(scene.id, { status: "error" });
-      setError(reason instanceof Error ? reason.message : "动态镜头生成失败");
+      const portraitBlocked = await registerSeedancePortraitBlock(reason, scene.id);
+      if (!portraitBlocked) setError(reason instanceof Error ? reason.message : "动态镜头生成失败");
       recordActivity("video", `“${scene.title}”视频生成失败`, "error");
     } finally {
       if (sceneActionRef.current === actionId) {
@@ -6503,7 +6602,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑</small></button>
           {busy && <button className="cancel-button" onClick={cancelGeneration}>{phase === "exporting" ? "停止合成" : "停止"}</button>}
         </div>
-        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{error && failedRole && <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button>}{!error && nativeVideoEnabled && phase === "ready" && sequentialVideoPlan.kind === "generate" && <button type="button" className="job-retry-button" onClick={() => void rerunRole("video")} disabled={busy}>继续生成第 {sequentialVideoPlan.index + 1} 镜</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
+        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{seedancePortraitBlock ? "方舟真人安全拦截不是网络故障；授权完成前已禁止重复付费提交。" : error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{seedancePortraitBlock ? <button type="button" className="job-retry-button portrait-center-button" onClick={openTrustedPortraitCenter} disabled={busy}>处理可信人物（{seedancePortraitBlock.blockedReferences.length || 1}）</button> : error && failedRole ? <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button> : null}{!error && nativeVideoEnabled && phase === "ready" && sequentialVideoPlan.kind === "generate" && <button type="button" className="job-retry-button" onClick={() => void rerunRole("video")} disabled={busy}>继续生成第 {sequentialVideoPlan.index + 1} 镜</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
         {(activityLog.length > 0 || busy) && <div className="workflow-monitor">
           <div className="workflow-heading"><div><b>AI 制作现场</b><span>每个岗位正在做什么、用了哪个模型、交付了什么，都实时记录</span></div><em>{busy ? "制作直播中" : "本次流程已保存"}</em></div>
           <div className="workflow-roles">{AGENT_ROLES.map((role) => {
