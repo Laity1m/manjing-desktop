@@ -17,6 +17,7 @@ allowBuilds:
   esbuild: true
   protobufjs: false
   sharp: true
+  tos-crc64-js: false
   workerd: true
 
 minimumReleaseAgeExclude:

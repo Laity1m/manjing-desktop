@@ -33,6 +33,10 @@ export type LibraryAsset = {
   parentAssetId?: string;
   arkAssetId?: string;
   portraitAuthorizationStatus?: "unbound" | "pending" | "authorized";
+  arkAssetGroupId?: string;
+  arkAssetStatus?: "unbound" | "awaiting_actor" | "validated" | "processing" | "active" | "failed";
+  arkAssetError?: string;
+  arkAssetSyncedAt?: string;
   referenceText?: string;
   referenceMediaUrl?: string;
   voiceSource?: "generated-dialogue" | "video-extracted" | "user-uploaded";
@@ -428,7 +432,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "referenceText" | "referenceMediaUrl" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "arkAssetGroupId" | "arkAssetStatus" | "arkAssetError" | "arkAssetSyncedAt" | "referenceText" | "referenceMediaUrl" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -458,6 +462,10 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...(typeof patch.parentAssetId === "string" ? { parentAssetId: patch.parentAssetId.trim() || undefined } : {}),
       ...(typeof patch.arkAssetId === "string" ? { arkAssetId: patch.arkAssetId.trim().replace(/^asset:\/\//i, "").slice(0, 180) || undefined } : {}),
       ...(patch.portraitAuthorizationStatus ? { portraitAuthorizationStatus: patch.portraitAuthorizationStatus } : {}),
+      ...(typeof patch.arkAssetGroupId === "string" ? { arkAssetGroupId: patch.arkAssetGroupId.trim().slice(0, 300) || undefined } : {}),
+      ...(patch.arkAssetStatus ? { arkAssetStatus: patch.arkAssetStatus } : {}),
+      ...(typeof patch.arkAssetError === "string" ? { arkAssetError: patch.arkAssetError.trim().slice(0, 500) || undefined } : {}),
+      ...(typeof patch.arkAssetSyncedAt === "string" ? { arkAssetSyncedAt: patch.arkAssetSyncedAt } : {}),
       ...(typeof patch.referenceText === "string" ? { referenceText: patch.referenceText.trim().slice(0, 500) || undefined } : {}),
       ...(typeof patch.referenceMediaUrl === "string" ? { referenceMediaUrl: /^https:\/\//i.test(patch.referenceMediaUrl) ? patch.referenceMediaUrl.trim().slice(0, 2000) : undefined } : {}),
       ...(patch.voiceSource ? { voiceSource: patch.voiceSource } : {}),

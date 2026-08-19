@@ -4,9 +4,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { invokeEnterpriseAsset } = require("./enterprise-assets");
+const { enterpriseConfig, validateConfig, probeEnterpriseAssets, startPortraitValidation, getPortraitValidation, createPortraitAsset, getPortraitAsset } = require("./enterprise-assets");
 
-const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+const MAX_REQUEST_BYTES = 48 * 1024 * 1024;
 const API_TIMEOUT_MS = 30000;
 const TEXT_ROLE_TIMEOUT_MS = {
   producer: 300000,
@@ -1087,9 +1087,144 @@ function writeDesktopSettings(dataRoot, value, settingsCodec) {
   return pending;
 }
 
+function enterprisePublicState(stored = {}) {
+  const config = stored.config || {};
+  const sessions = stored.sessions && typeof stored.sessions === "object" ? stored.sessions : {};
+  return {
+    configured: Boolean(config.accessKeyId && config.secretKey),
+    companyName: String(config.companyName || ""),
+    plan: String(config.plan || "advanced"),
+    accessKeyHint: config.accessKeyId ? `••••${String(config.accessKeyId).slice(-4)}` : "",
+    projectName: String(config.projectName || "default"),
+    callbackUrl: String(config.callbackUrl || "https://console.volcengine.com/ark"),
+    tosBucket: String(config.tosBucket || ""),
+    tosRegion: String(config.tosRegion || "cn-beijing"),
+    tosEndpoint: String(config.tosEndpoint || ""),
+    sessions: Object.entries(sessions).map(([localAssetId, session]) => ({
+      localAssetId,
+      identityKey: String(session.identityKey || ""),
+      name: String(session.name || ""),
+      state: String(session.state || "unbound"),
+      h5Link: String(session.h5Link || ""),
+      groupId: String(session.groupId || ""),
+      arkAssetId: String(session.arkAssetId || ""),
+      arkStatus: String(session.arkStatus || ""),
+      error: String(session.error || ""),
+      updatedAt: String(session.updatedAt || ""),
+    })),
+  };
+}
+
+function trimEnterpriseSessions(sessions) {
+  return Object.fromEntries(Object.entries(sessions || {}).sort((a, b) => String(b[1]?.updatedAt || "").localeCompare(String(a[1]?.updatedAt || ""))).slice(0, 100));
+}
+
+async function saveEnterpriseState(dataRoot, settingsCodec, enterpriseAssets) {
+  await writeDesktopSettings(dataRoot, { enterpriseAssets: { ...enterpriseAssets, sessions: trimEnterpriseSessions(enterpriseAssets.sessions) } }, settingsCodec);
+}
+
+async function handleEnterpriseAssets(input, dataRoot, settingsCodec) {
+  const settings = await readDesktopSettings(dataRoot, settingsCodec);
+  const stored = settings.enterpriseAssets && typeof settings.enterpriseAssets === "object" ? settings.enterpriseAssets : {};
+  const sessions = stored.sessions && typeof stored.sessions === "object" ? { ...stored.sessions } : {};
+  const action = String(input?.action || "");
+  if (action === "save-config") {
+    const previous = stored.config || {};
+    const config = enterpriseConfig({
+      ...previous,
+      ...input,
+      accessKeyId: String(input?.accessKeyId || "").trim() || previous.accessKeyId,
+      secretKey: String(input?.secretKey || "").trim() || previous.secretKey,
+    });
+    validateConfig(config);
+    const credentialChanged = previous.accessKeyId && previous.accessKeyId !== config.accessKeyId;
+    await saveEnterpriseState(dataRoot, settingsCodec, { config, sessions: credentialChanged ? {} : sessions, savedAt: new Date().toISOString() });
+    return { saved: true, ...enterprisePublicState({ config, sessions: credentialChanged ? {} : sessions }) };
+  }
+  const config = enterpriseConfig(stored.config || {});
+  validateConfig(config);
+  if (action === "probe") return { ...(await probeEnterpriseAssets(config)), ...enterprisePublicState(stored) };
+  const localAssetId = String(input?.localAssetId || "").trim().slice(0, 240);
+  if (!localAssetId) throw Object.assign(new Error("请选择要入库的人物资产"), { statusCode: 400, retryable: false });
+  if (action === "reset") {
+    delete sessions[localAssetId];
+    await saveEnterpriseState(dataRoot, settingsCodec, { ...stored, config, sessions });
+    return { reset: true, localAssetId };
+  }
+  if (action === "start") {
+    const identityKey = String(input?.identityKey || input?.name || "").trim().slice(0, 180);
+    const name = String(input?.name || identityKey || "人物").trim().slice(0, 180);
+    const current = sessions[localAssetId];
+    if (current && current.state !== "failed" && Date.now() - Date.parse(current.startedAt || 0) < 25 * 60 * 1000) return enterprisePublicState({ config, sessions }).sessions.find((item) => item.localAssetId === localAssetId);
+    const sameActor = Object.values(sessions).find((session) => session.groupId && String(session.identityKey || "").toLocaleLowerCase("zh-CN") === identityKey.toLocaleLowerCase("zh-CN"));
+    const now = new Date().toISOString();
+    if (sameActor?.groupId) {
+      sessions[localAssetId] = { localAssetId, identityKey, name, groupId: sameActor.groupId, state: "validated", startedAt: now, updatedAt: now };
+    } else {
+      const validation = await startPortraitValidation(config);
+      sessions[localAssetId] = { localAssetId, identityKey, name, ...validation, startedAt: now, updatedAt: now };
+    }
+    await saveEnterpriseState(dataRoot, settingsCodec, { ...stored, config, sessions });
+    return enterprisePublicState({ config, sessions }).sessions.find((item) => item.localAssetId === localAssetId);
+  }
+  if (action !== "advance") throw Object.assign(new Error("不支持的企业可信人物操作"), { statusCode: 400, retryable: false });
+  const session = sessions[localAssetId];
+  if (!session) throw Object.assign(new Error("请先为该人物发起本人授权"), { statusCode: 400, retryable: false });
+  if (!session.groupId) {
+    if (Date.now() - Date.parse(session.startedAt || 0) > 30 * 60 * 1000) {
+      session.state = "failed";
+      session.error = "本人授权链接已超过 30 分钟，请重新发起";
+    } else {
+      const validation = await getPortraitValidation(config, session.bytedToken);
+      session.state = validation.state;
+      if (validation.groupId) session.groupId = validation.groupId;
+    }
+  }
+  if (session.groupId && !session.arkAssetId) {
+    if (!input?.mediaDataUrl && !input?.url) {
+      session.state = "validated";
+      session.updatedAt = new Date().toISOString();
+      await saveEnterpriseState(dataRoot, settingsCodec, { ...stored, config, sessions });
+      return { ...enterprisePublicState({ config, sessions }).sessions.find((item) => item.localAssetId === localAssetId), needsMedia: true };
+    }
+    const created = await createPortraitAsset(config, { ...input, groupId: session.groupId, name: session.name });
+    session.arkAssetId = created.id;
+    session.tosKey = created.tosKey;
+    session.state = created.state;
+    session.updatedAt = new Date().toISOString();
+    // Persist the returned Asset ID before the first status query. Ark may not
+    // expose a freshly-created asynchronous asset immediately; losing this ID
+    // would make a retry create a duplicate paid asset.
+    await saveEnterpriseState(dataRoot, settingsCodec, { ...stored, config, sessions });
+  }
+  if (session.arkAssetId) {
+    try {
+      const status = await getPortraitAsset(config, session.arkAssetId);
+      session.state = status.state;
+      session.arkStatus = status.status;
+      session.error = status.error || "";
+    } catch (error) {
+      if (Number(error?.statusCode) !== 404) throw error;
+      session.state = "processing";
+      session.arkStatus = "Processing";
+    }
+  }
+  session.updatedAt = new Date().toISOString();
+  await saveEnterpriseState(dataRoot, settingsCodec, { ...stored, config, sessions });
+  return enterprisePublicState({ config, sessions }).sessions.find((item) => item.localAssetId === localAssetId);
+}
+
 async function desktopApiResponse(request, url, dataRoot, settingsCodec) {
   try {
-    if (url.pathname === "/api/desktop/settings" && request.method === "GET") return jsonResponse(await readDesktopSettings(dataRoot, settingsCodec));
+    if (url.pathname === "/api/desktop/settings" && request.method === "GET") {
+      const settings = await readDesktopSettings(dataRoot, settingsCodec);
+      const { enterpriseAssets: _privateEnterpriseAssets, ...publicSettings } = settings;
+      return jsonResponse(publicSettings);
+    }
+    if (url.pathname === "/api/desktop/enterprise-assets" && request.method === "GET") {
+      const settings = await readDesktopSettings(dataRoot, settingsCodec);
+      return jsonResponse(enterprisePublicState(settings.enterpriseAssets || {}));
+    }
     if (url.pathname === "/api/desktop/volcengine-sdk" && request.method === "GET") return jsonResponse(volcengineSdkStatus());
     if (url.pathname === "/api/desktop/seedance" && request.method === "GET") {
       const media = await downloadSeedanceMedia(url.searchParams.get("url"));
@@ -1118,7 +1253,7 @@ async function desktopApiResponse(request, url, dataRoot, settingsCodec) {
     }
     if (request.method !== "POST") return jsonResponse({ error: "只支持 GET 或 POST 请求" }, 405);
     const input = await readJsonRequest(request);
-    if (url.pathname === "/api/desktop/enterprise-assets") return jsonResponse(await invokeEnterpriseAsset(input));
+    if (url.pathname === "/api/desktop/enterprise-assets") return jsonResponse(await handleEnterpriseAssets(input, dataRoot, settingsCodec));
     if (url.pathname === "/api/desktop/models") return jsonResponse(await discoverRemoteModels(input));
     if (url.pathname === "/api/desktop/mcp") return jsonResponse(await invokeMcp(input));
     if (url.pathname === "/api/desktop/invoke") return jsonResponse(await invokeTextModel(input));

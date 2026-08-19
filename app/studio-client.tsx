@@ -1314,6 +1314,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const assetReuseKeyRef = useRef("");
   const batchAssetGenerationRef = useRef(false);
   const runRef = useRef(0);
+  const portraitResumeStartedRef = useRef(false);
   const editorSyncRef = useRef(false);
   const quickModelSaveRef = useRef(false);
   const roleModelWriteRef = useRef<AgentRole | null>(null);
@@ -6386,6 +6387,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     // scene/function identities here would replay the request on ordinary renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sequentialResumeToken]);
+
+  useEffect(() => {
+    if (!agentTeamLoaded || busy || !scenes.length || seedancePortraitBlock || portraitResumeStartedRef.current) return;
+    const resumeAssetId = window.localStorage.getItem("manjing-studio-resume-video-after-portrait-v1");
+    if (!resumeAssetId) return;
+    portraitResumeStartedRef.current = true;
+    window.localStorage.removeItem("manjing-studio-resume-video-after-portrait-v1");
+    setStatusText("可信人物授权已完成，正在从中断镜头恢复视频生成");
+    const timeout = window.setTimeout(() => void rerunRole("video"), 350);
+    return () => window.clearTimeout(timeout);
+    // This one-shot flag is written only after the user completes Ark's actor
+    // authorization flow. Ordinary renders must never replay a paid request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentTeamLoaded, busy, scenes.length, seedancePortraitBlock]);
 
   return (
     <main id="top" className={`${surface}-surface`}>

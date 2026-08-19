@@ -24,7 +24,7 @@
   "build": {
     "appId": "com.manjing.desktop",
     "productName": "漫镜",
-    "artifactName": "漫镜-${version}-可信人像-全能参考修复-${arch}.${ext}",
+    "artifactName": "漫镜-${version}-企业可信人物自动接入-${arch}.${ext}",
     "asar": true,
     "compression": "maximum",
     "directories": {
@@ -76,6 +76,7 @@
     }
   },
   "dependencies": {
-    "@volcengine/openapi": "1.36.2"
+    "@volcengine/openapi": "1.36.2",
+    "@volcengine/tos-sdk": "2.9.1"
   }
 }
