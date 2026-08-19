@@ -40,6 +40,118 @@ export type ScriptAssetManifest = {
   background: string;
 };
 
+const VISIBLE_LOOK_ANCHORS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /白衣[^，,；;。.!！\n]{0,12}战损|white[^,.;!\n]{0,20}(?:battle[- ]?damaged|wounded)/iu, label: "白衣战损版" },
+  { pattern: /黑衣[^，,；;。.!！\n]{0,12}战损|black[^,.;!\n]{0,20}(?:battle[- ]?damaged|wounded)/iu, label: "黑衣战损版" },
+  { pattern: /官服|朝服|公服|品官服|official robes?|court robes?/iu, label: "官服版" },
+  { pattern: /居家(?:服|常服)?|家常(?:服|衣|衫)?|loungewear|home wear|house clothes/iu, label: "居家版" },
+  { pattern: /(?:白衣|白色|素白|月白)[^，,；;。.!！\n]{0,8}(?:常服|便服|日常)/iu, label: "白衣常服版" },
+  { pattern: /(?:黑衣|黑色|玄色|墨色)[^，,；;。.!！\n]{0,8}(?:常服|便服|日常)/iu, label: "黑衣常服版" },
+  { pattern: /白衣|白色(?:长袍|衣裙|衣袍|常服)|white (?:robes?|dress|clothes|outfit)/iu, label: "白衣版" },
+  { pattern: /黑衣|黑色(?:长袍|衣裙|衣袍|常服)|black (?:robes?|dress|clothes|outfit)/iu, label: "黑衣版" },
+  { pattern: /玄衣|玄色(?:长袍|衣袍|常服)/iu, label: "玄衣版" },
+  { pattern: /西装|正装|business suit|tailored suit/iu, label: "西装版" },
+  { pattern: /校服|学生制服|school uniform/iu, label: "校服版" },
+  { pattern: /军装|警服|制服|military uniform|police uniform/iu, label: "制服版" },
+  { pattern: /婚纱|wedding dress|bridal gown/iu, label: "婚纱版" },
+  { pattern: /礼服|晚礼服|evening gown|formal dress/iu, label: "礼服版" },
+  { pattern: /运动装|运动服|健身服|球衣|sportswear|tracksuit/iu, label: "运动版" },
+  { pattern: /战损|负伤|受伤|伤痕累累|battle[- ]?damaged|wounded/iu, label: "战损版" },
+  { pattern: /囚服|prison uniform|prison clothes/iu, label: "囚服版" },
+  { pattern: /睡衣|寝衣|pajamas?|sleepwear/iu, label: "睡衣版" },
+  { pattern: /常服|便服|日常服|casual wear|regular clothes|everyday outfit/iu, label: "常服版" },
+];
+
+/** Convert a display label into a stable, visible appearance label. */
+export function canonicalCharacterLookName(value: unknown, appearance: unknown = "") {
+  const raw = clean(value, 80) || "基础版";
+  const combined = `${raw} ${clean(appearance, 500)}`;
+  for (const anchor of VISIBLE_LOOK_ANCHORS) if (anchor.pattern.test(raw)) return anchor.label;
+  for (const anchor of VISIBLE_LOOK_ANCHORS) if (anchor.pattern.test(combined)) return anchor.label;
+  const withoutSceneContext = raw
+    .replace(/^(?:第?\d+(?:集|场|镜)|\d+[-—]\d+|白天|日间|夜间|深夜|清晨|早晨|上午|中午|下午|傍晚|黄昏|雨夜|雪夜|室内|室外)[-—_·•\s]*/iu, "")
+    .replace(/(?:白天|日间|夜间|深夜|清晨|早晨|上午|中午|下午|傍晚|黄昏|雨夜|雪夜)(?=(?:版|造型|look|outfit)?$)/iu, "")
+    .trim();
+  const normalized = withoutSceneContext || raw;
+  if (/^(?:基础|基础版|基础造型|默认|默认版|默认造型|base|base look|default|default look)$/iu.test(normalized)) return containsChinese(combined) ? "基础版" : "Base Look";
+  return normalized;
+}
+
+/** Split a long screenplay without dropping its tail. Prefer episode/scene/paragraph boundaries. */
+export function splitScriptForAssetAnalysis(script: string, maxChunkLength = 24000) {
+  const source = String(script || "").trim();
+  if (!source) return [];
+  const limit = Math.max(4000, maxChunkLength);
+  if (source.length <= limit) return [source];
+  const blocks = source.split(/(?=^\s*(?:第\s*[0-9一二两三四五六七八九十百]+\s*集\b|episode\s*\d+\b|(?:INT\.?|EXT\.?|内景|外景|场景)\s*[.：:\-— ]))/gimu).filter((item) => item.trim());
+  const chunks: string[] = [];
+  let current = "";
+  const flush = () => { if (current.trim()) chunks.push(current.trim()); current = ""; };
+  const appendBlock = (block: string) => {
+    const paragraphs = block.length > limit ? block.split(/\n{2,}|(?=^\s*(?:场次|镜号|SCENE)\s*[:：\d])/gimu).filter((item) => item.trim()) : [block];
+    for (const paragraph of paragraphs) {
+      if (paragraph.length > limit) {
+        flush();
+        for (let offset = 0; offset < paragraph.length; offset += limit) chunks.push(paragraph.slice(offset, offset + limit).trim());
+        continue;
+      }
+      if (current && current.length + paragraph.length + 2 > limit) flush();
+      current += `${current ? "\n\n" : ""}${paragraph.trim()}`;
+    }
+  };
+  for (const block of blocks.length ? blocks : [source]) appendBlock(block);
+  flush();
+  return chunks.filter(Boolean);
+}
+
+function mergeTextValues(values: string[], limit: number) {
+  return [...new Set(values.map((item) => clean(item, limit)).filter(Boolean))].join(" ").slice(0, limit);
+}
+
+/** Merge all chunk results into one authoritative production manifest. */
+export function mergeScriptAssetManifests(manifests: ScriptAssetManifest[]): ScriptAssetManifest {
+  const characterMap = new Map<string, ScriptCharacterCandidate>();
+  const propMap = new Map<string, ScriptPropCandidate>();
+  const sceneMap = new Map<string, ScriptSceneCandidate>();
+  for (const manifest of manifests) {
+    for (const item of manifest.characters) {
+      const lookName = canonicalCharacterLookName(item.lookName, item.appearance);
+      const key = `${item.identityName.toLocaleLowerCase("zh-CN")}::${lookName.toLocaleLowerCase("zh-CN")}`;
+      const previous = characterMap.get(key);
+      characterMap.set(key, previous ? {
+        ...previous,
+        lookName,
+        episodeScope: mergeTextValues([previous.episodeScope, item.episodeScope], 80),
+        sceneHints: [...new Set([...previous.sceneHints, ...item.sceneHints])].slice(0, 30),
+        role: previous.role.length >= item.role.length ? previous.role : item.role,
+        appearance: previous.appearance.length >= item.appearance.length ? previous.appearance : item.appearance,
+        reason: mergeTextValues([previous.reason, item.reason], 240),
+        visualEvidence: mergeTextValues([previous.visualEvidence, item.visualEvidence], 320),
+        requiresVisualAsset: previous.requiresVisualAsset || item.requiresVisualAsset,
+        needsVoice: previous.needsVoice || item.needsVoice,
+        firstDialogue: previous.firstDialogue || item.firstDialogue,
+      } : { ...item, lookName });
+    }
+    for (const item of manifest.props) {
+      const key = item.name.toLocaleLowerCase("zh-CN");
+      const previous = propMap.get(key);
+      propMap.set(key, previous ? { ...previous, description: previous.description.length >= item.description.length ? previous.description : item.description, reason: mergeTextValues([previous.reason, item.reason], 240), importance: previous.importance === "hero" || item.importance === "hero" ? "hero" : previous.importance === "recurring" || item.importance === "recurring" ? "recurring" : "story" } : item);
+    }
+    for (const item of manifest.scenes) {
+      const key = item.environmentKey.toLocaleLowerCase("zh-CN");
+      const previous = sceneMap.get(key);
+      sceneMap.set(key, previous ? { ...previous, description: previous.description.length >= item.description.length ? previous.description : item.description, timeWeather: mergeTextValues([previous.timeWeather, item.timeWeather], 180), episodeScope: mergeTextValues([previous.episodeScope, item.episodeScope], 80), sceneHints: [...new Set([...previous.sceneHints, ...item.sceneHints])].slice(0, 30), reason: mergeTextValues([previous.reason, item.reason], 240) } : item);
+    }
+  }
+  return {
+    characters: [...characterMap.values()].slice(0, 80),
+    props: [...propMap.values()].slice(0, 80),
+    scenes: [...sceneMap.values()].slice(0, 60),
+    synopsis: mergeTextValues(manifests.map((item) => item.synopsis), 1200),
+    background: mergeTextValues(manifests.map((item) => item.background), 2400),
+  };
+}
+
 function clean(value: unknown, limit = 240) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
 }
@@ -207,7 +319,9 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
   const characters = rawCharacters.map((item) => {
     const value = item as Record<string, unknown>;
     const identityName = normalizeScriptCharacterName(clean(value.identityName || value.identity || value.characterName || value.name || value.n, 60));
-    const lookName = clean(value.lookName || value.look || value.variant || value.outfit || value.state, 60) || "基础版";
+    const rawLookName = clean(value.lookName || value.look || value.variant || value.outfit || value.state, 60) || "基础版";
+    const appearance = clean(value.appearance || value.a || value.description, 420) || "等待用户补充人物外貌、年龄、发型、服装和状态";
+    const lookName = canonicalCharacterLookName(rawLookName, appearance);
     const rawSceneHints = Array.isArray(value.sceneHints) ? value.sceneHints : Array.isArray(value.scenes) ? value.scenes : [];
     return {
       name: identityName,
@@ -216,7 +330,7 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
       episodeScope: clean(value.episodeScope || value.episode || value.episodeName, 80) || "当前集",
       sceneHints: rawSceneHints.map((hint) => clean(hint, 80)).filter(Boolean).slice(0, 20),
       role: clean(value.role || value.r, 120) || "剧本角色",
-      appearance: clean(value.appearance || value.a || value.description, 420) || "等待用户补充人物外貌、年龄、发型、服装和状态",
+      appearance,
       reason: clean(value.reason || value.why, 180) || "剧本中需要稳定视觉身份",
       requiresVisualAsset: value.requiresVisualAsset !== false && value.visualAsset !== false && value.isVisual !== false && value.voiceOnly !== true,
       visualEvidence: clean(value.visualEvidence || value.onScreenEvidence || value.evidence || value.reason || value.why, 240),
@@ -255,7 +369,10 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
   const characterSource = characters.length ? characters : fallback.characters;
   const propSource = props.length ? props : fallback.props;
   const sceneSource = scenes.length ? scenes : fallback.scenes;
-  const characterMap = new Map(characterSource.map((item) => [`${item.identityName.toLocaleLowerCase()}::${item.lookName.toLocaleLowerCase()}`, item]));
+  const characterMap = new Map(characterSource.map((item) => {
+    const lookName = canonicalCharacterLookName(item.lookName, item.appearance);
+    return [`${item.identityName.toLocaleLowerCase()}::${lookName.toLocaleLowerCase()}`, { ...item, lookName }] as const;
+  }));
   const propMap = new Map(propSource.map((item) => [item.name.toLocaleLowerCase(), item]));
   const sceneMap = new Map(sceneSource.map((item) => [item.environmentKey.toLocaleLowerCase(), item]));
   const uniqueCharacters = [...characterMap.values()].slice(0, 40);

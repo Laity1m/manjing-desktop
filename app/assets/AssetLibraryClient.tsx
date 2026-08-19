@@ -107,11 +107,13 @@ export default function AssetLibraryClient() {
 
   function clearResolvedPortraitBlock(nextAssets: LibraryAsset[]) {
     try {
-      const block = JSON.parse(localStorage.getItem("manjing-seedance-portrait-block-v1") || "null") as { blockedReferences?: Array<{ libraryAssetId?: string; identityKey?: string; name?: string }> } | null;
+      const block = JSON.parse(localStorage.getItem("manjing-seedance-portrait-block-v1") || "null") as { projectId?: string; blockedReferences?: Array<{ libraryAssetId?: string; identityKey?: string; name?: string }> } | null;
       if (!block?.blockedReferences?.length) return;
       const unresolved = block.blockedReferences.filter((reference) => {
         const identity = normalizedIdentity(reference.identityKey || String(reference.name || "").replace(/^.*?：/, "").replace(/；.*$/, ""));
-        const match = nextAssets.find((asset) => asset.category === "character" && (asset.id === reference.libraryAssetId || normalizedIdentity(asset.identityKey || asset.entityId || asset.name) === identity));
+        const match = nextAssets.find((asset) => asset.category === "character"
+          && (!block.projectId || !asset.projectId || asset.scope === "global" || asset.projectId === block.projectId)
+          && (asset.id === reference.libraryAssetId || normalizedIdentity(asset.identityKey || asset.entityId || asset.name) === identity));
         return !match?.arkAssetId || match.portraitAuthorizationStatus !== "authorized";
       });
       if (!unresolved.length) {

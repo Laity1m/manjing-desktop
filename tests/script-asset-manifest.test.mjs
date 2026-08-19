@@ -129,6 +129,33 @@ test("keeps one identity while splitting per-episode costume and state assets", 
   assert.deepEqual(manifest.characters[0].sceneHints, ["祭典", "1-1"]);
 });
 
+test("merges location and time aliases when the visible home costume did not change", async () => {
+  const { parseScriptAssetManifest } = await loadManifestModule();
+  const manifest = parseScriptAssetManifest(JSON.stringify({
+    characters: [
+      { name: "苏梨", identityName: "苏梨", lookName: "破院居家版", appearance: "淡棕粉色家常衫和深灰长裙", sceneHints: ["破院日间"] },
+      { name: "苏梨", identityName: "苏梨", lookName: "夜间居家版", appearance: "同一套淡棕粉色家常衫和深灰长裙", sceneHints: ["破院夜间"] },
+    ],
+  }), "苏梨从白天忙到夜里，期间没有换衣。\n");
+  assert.equal(manifest.characters.length, 1);
+  assert.equal(manifest.characters[0].lookName, "居家版");
+});
+
+test("splits long scripts without dropping the final episode and merges chunk manifests", async () => {
+  const { mergeScriptAssetManifests, parseScriptAssetManifest, splitScriptForAssetAnalysis } = await loadManifestModule();
+  const script = `第一集\n${"苏梨在破院生活。\n".repeat(500)}\n第二集\n${"萧珏进入王府。\n".repeat(500)}\n第三集\n尾声唯一标记XYZ`;
+  const chunks = splitScriptForAssetAnalysis(script, 4000);
+  assert.ok(chunks.length > 2);
+  assert.ok(chunks.some((item) => item.includes("尾声唯一标记XYZ")));
+  const merged = mergeScriptAssetManifests([
+    parseScriptAssetManifest(JSON.stringify({ characters: [{ name: "苏梨", identityName: "苏梨", lookName: "破院居家版", appearance: "家常衫", sceneHints: ["第一集"] }] }), chunks[0]),
+    parseScriptAssetManifest(JSON.stringify({ characters: [{ name: "苏梨", identityName: "苏梨", lookName: "夜间居家版", appearance: "同一套家常衫", sceneHints: ["第二集"] }], props: [{ name: "账本", description: "黑皮账本", importance: "recurring" }] }), chunks.at(-1)),
+  ]);
+  assert.equal(merged.characters.length, 1);
+  assert.deepEqual(merged.characters[0].sceneHints, ["第一集", "第二集"]);
+  assert.equal(merged.props[0].name, "账本");
+});
+
 test("extracts canonical scene skeletons separately from storyboard frames", async () => {
   const { parseScriptAssetManifest } = await loadManifestModule();
   const manifest = parseScriptAssetManifest(JSON.stringify({

@@ -47,6 +47,11 @@ function normalizedIdentity(value: string) {
   return value.trim().toLocaleLowerCase("zh-CN").replace(/[\s_·•—–-]+/g, "");
 }
 
+function activeProjectId() {
+  try { return String(JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}").projectId || ""); }
+  catch { return ""; }
+}
+
 async function api(input?: Record<string, unknown>) {
   const response = await fetch("/api/desktop/enterprise-assets", input ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) } : undefined);
   let data: Record<string, unknown> = {};
@@ -91,7 +96,7 @@ export default function EnterpriseAssetPanel({ onAssetUpdated }: { onAssetUpdate
   const polling = useRef(new Set<string>());
 
   async function refresh() {
-    const [library, remote] = await Promise.all([listLibraryAssets({ allProjects: true }), api()]);
+    const [library, remote] = await Promise.all([listLibraryAssets(), api()]);
     const next = { ...EMPTY_STATE, ...remote, sessions: Array.isArray(remote.sessions) ? remote.sessions : [] } as EnterpriseState;
     setAssets(library.filter((asset) => asset.category === "character" && asset.mediaType === "image" && asset.assetState !== "placeholder"));
     setEnterprise(next);
@@ -139,9 +144,11 @@ export default function EnterpriseAssetPanel({ onAssetUpdated }: { onAssetUpdate
 
   async function maybeResumeStudio(updatedAssetId: string) {
     try {
-      const block = JSON.parse(localStorage.getItem("manjing-seedance-portrait-block-v1") || "null") as { blockedReferences?: Array<{ libraryAssetId?: string; identityKey?: string; name?: string }> } | null;
+      const block = JSON.parse(localStorage.getItem("manjing-seedance-portrait-block-v1") || "null") as { projectId?: string; blockedReferences?: Array<{ libraryAssetId?: string; identityKey?: string; name?: string }> } | null;
       if (!block?.blockedReferences?.length) return;
-      const library = await listLibraryAssets({ allProjects: true });
+      const projectId = activeProjectId();
+      if (block.projectId && projectId && block.projectId !== projectId) return;
+      const library = (await listLibraryAssets({ allProjects: true })).filter((asset) => !asset.projectId || asset.scope === "global" || asset.projectId === (block.projectId || projectId));
       const unresolved = block.blockedReferences.filter((reference) => {
         const identity = normalizedIdentity(reference.identityKey || String(reference.name || "").replace(/^.*?：/, "").replace(/；.*$/, ""));
         const match = library.find((asset) => asset.category === "character" && (asset.id === reference.libraryAssetId || normalizedIdentity(asset.identityKey || asset.entityId || asset.name) === identity));

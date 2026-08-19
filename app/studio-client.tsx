@@ -21,8 +21,10 @@ import { CHARACTER_REFERENCE_POLICY, characterIdentityLockInstruction, selectCha
 import { videoConsistencyAccepted } from "./lib/consistency-gate";
 import { planSequentialVideo } from "./lib/sequential-video-flow";
 import { characterAssetDisplayName, characterAssetNaming } from "./lib/character-asset-naming";
-import { fallbackScriptAssetManifest, localizedSceneDisplayName, parseScriptAssetManifest } from "./lib/script-asset-manifest";
+import { fallbackScriptAssetManifest, localizedSceneDisplayName, mergeScriptAssetManifests, parseScriptAssetManifest, splitScriptForAssetAnalysis } from "./lib/script-asset-manifest";
 import { reconcileAnalyzedCharacterAssets } from "./lib/character-asset-reconciliation";
+import { lockStoryboardToAssetManifest } from "./lib/production-asset-manifest-lock";
+import { portraitBlockReferencesForProject, styleRequiresTrustedPortrait } from "./lib/portrait-authorization-policy";
 
 type GeneratedAssetMetadata = { displayName?: string; identityKey?: string; lookName?: string; entityId?: string; variantName?: string };
 
@@ -370,7 +372,7 @@ type LibTvResult = { kind: "image" | "video"; url: string };
 type LibTvMessage = { id: string; seq: number; role: "user" | "assistant"; content: string };
 type SeedancePendingTask = { id: string; model: string; createdAt: number; promptSignature?: string };
 type SeedanceBlockedReference = { contentIndex: number; kind: string; role?: string; name: string; libraryAssetId?: string; identityKey?: string; lookName?: string };
-type SeedancePortraitBlock = { requestId?: string; sceneId?: string; blockedReferences: SeedanceBlockedReference[]; createdAt: number };
+type SeedancePortraitBlock = { requestId?: string; sceneId?: string; projectId?: string; styleName?: string; blockedReferences: SeedanceBlockedReference[]; createdAt: number };
 
 class SeedanceRequestError extends Error {
   failureKind: string;
@@ -1496,7 +1498,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   useEffect(() => {
     try {
       const saved = JSON.parse(window.localStorage.getItem(SEEDANCE_PORTRAIT_BLOCK_KEY) || "null") as SeedancePortraitBlock | null;
-      if (saved?.blockedReferences?.length) setSeedancePortraitBlock(saved);
+      const projectId = activeAssetProjectId();
+      if (saved?.blockedReferences?.length && (!saved.projectId || saved.projectId === projectId)) setSeedancePortraitBlock(saved);
     } catch { window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY); }
   }, []);
 
@@ -2660,8 +2663,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const languageRule = sourceLanguage === "English"
       ? "The source screenplay is English. Preserve every character name and spoken line in English; never translate dialogue or proper names into Chinese. JSON keys must remain exactly as specified. Descriptive production fields may use concise English."
       : "源剧本为中文。角色名、对白和制作描述使用简体中文。";
-    const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。" : "把故事改编为可拍摄短剧。"}${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，必须设计为一个连续完整镜头，禁止拆成多个镜头。` : `先分析剧情 Beat、场景/时空变化、视角变化、动作复杂度和情绪节奏，自主决定 ${minimumCount}–${maximumCount} 个镜头。每个镜头的时长由叙事需要独立决定，可以相同也可以不同，禁止机械平均；重要动作和情绪可更长，转场与反应可更短。`}每镜不得超过15秒，总时长必须精确等于目标时长。先为全剧建立场景身份：同一地点、时间、天气和布景必须复用同一个 environmentKey，并写出 environmentBible，固定空间布局、门窗方向、道具位置、主色调与光线方向。人物身份和本集造型必须分层：同一个 identityName 保持同一张脸；剧本中每一种实际出镜的服装、妆发、受伤或贫富状态都在 characters 中建立独立 lookName 资产，appearance 只描述该造型，禁止把白衣和黑衣等互斥造型揉成一张图。每镜必须用 characterLooks 显式指定每个出镜人物当前引用的 lookName，例如 {"男主":"白衣版"}，且只能引用 characters 已列出的对应造型。不同人物必须有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感、体型和辨识标记，禁止同脸。每镜必须写 continuity 说明如何承接上一镜，并用 endState 记录镜头结束时人物位置、朝向、手持道具和动作姿态；正式换景时明确说明。camera 必须根据动作从横向轨道、稳定器跟拍、肩后横移、弧形环绕、摇镜揭示、升降摇臂、受控手持、前景擦镜等技巧中选择，连续镜头不得重复只写推进或拉远，并写明缓入缓出和动作匹配点。${languageRule} 只返回 JSON。结构：{"title":"标题","music":"无歌词配乐描述","shotPlan":{"count":镜头数,"reason":"拆镜或不拆镜的简短理由"},"characters":[{"name":"角色身份名","identityName":"角色身份名","lookName":"本集服装/状态名","episodeScope":"当前集或集数","sceneHints":["使用镜头或剧情短语"],"role":"身份","appearance":"固定身份特征加当前造型，且与其他人物有明显差异","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","environmentKey":"场景身份","environmentBible":"固定背景和空间规则","continuity":"与上一镜的关系或换景说明","endState":"镜头结束状态","characters":["角色身份名"],"characterLooks":{"角色身份名":"该镜造型名"},"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"具体运镜轨迹、速度变化和衔接点","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色身份、当镜造型与场景背景必须一致；每镜都要推动剧情。`;
-  const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n已锁定剧本简介：${scriptMemory.synopsis || "未单独提供，以完整剧本为准"}\n已锁定背景故事/世界记忆：${scriptMemory.background || "未单独提供，以完整剧本为准"}\n已规划 Canonical 场景（environmentKey 必须逐字选用，禁止另起同义名称）：${sceneAssets.length ? JSON.stringify(sceneAssets.map((item) => ({ environmentKey: item.environmentKey, name: item.name, description: item.description, timeWeather: item.timeWeather, sceneHints: item.sceneHints }))) : "尚无预分析场景，以剧本实际地点建立稳定键"}\n资产规划要求：每个镜头的 visual 必须使用 [场景:场景身份] 标记固定场景，并用 [道具:道具1,道具2] 标记真正推动剧情或跨镜重复出现的重要道具；普通桌椅和无关装饰不要列为重要道具。后续跳过分镜图片，视频模型只通过全能参考组合已锁定的人物身份、当前造型、Canonical 场景图、道具、音色和上一镜已批准视频；禁止提交首帧或尾帧图片，不得脱离资产重新设计。\n${scriptImported ? "用户定稿剧本" : "故事"}：${storyboardStory}`;
+    const system = `你是专业 AI 漫剧编剧和分镜师。${scriptImported ? "用户提供的是已经定稿的完整剧本，严禁改写剧情、角色关系、台词含义和结局，只做结构化拆镜。导入阶段已经生成并由用户确认唯一资产清单；本阶段只能逐字引用清单中的 identityName、lookName 和 environmentKey，严禁重新分析、改名或新增人物造型。地点、昼夜和镜号不是人物造型。" : "把故事改编为可拍摄短剧。"}${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，必须设计为一个连续完整镜头，禁止拆成多个镜头。` : `先分析剧情 Beat、场景/时空变化、视角变化、动作复杂度和情绪节奏，自主决定 ${minimumCount}–${maximumCount} 个镜头。每个镜头的时长由叙事需要独立决定，可以相同也可以不同，禁止机械平均；重要动作和情绪可更长，转场与反应可更短。`}每镜不得超过15秒，总时长必须精确等于目标时长。先为全剧建立场景身份：同一地点、时间、天气和布景必须复用同一个 environmentKey，并写出 environmentBible，固定空间布局、门窗方向、道具位置、主色调与光线方向。人物身份和本集造型必须分层：同一个 identityName 保持同一张脸；剧本中每一种实际出镜的服装、妆发、受伤或贫富状态都在 characters 中建立独立 lookName 资产，appearance 只描述该造型，禁止把白衣和黑衣等互斥造型揉成一张图。每镜必须用 characterLooks 显式指定每个出镜人物当前引用的 lookName，例如 {"男主":"白衣版"}，且只能引用 characters 已列出的对应造型。不同人物必须有明显不同的脸型、眼型、鼻形、嘴形、眉形、年龄感、体型和辨识标记，禁止同脸。每镜必须写 continuity 说明如何承接上一镜，并用 endState 记录镜头结束时人物位置、朝向、手持道具和动作姿态；正式换景时明确说明。camera 必须根据动作从横向轨道、稳定器跟拍、肩后横移、弧形环绕、摇镜揭示、升降摇臂、受控手持、前景擦镜等技巧中选择，连续镜头不得重复只写推进或拉远，并写明缓入缓出和动作匹配点。${languageRule} 只返回 JSON。结构：{"title":"标题","music":"无歌词配乐描述","shotPlan":{"count":镜头数,"reason":"拆镜或不拆镜的简短理由"},"characters":[{"name":"角色身份名","identityName":"角色身份名","lookName":"本集服装/状态名","episodeScope":"当前集或集数","sceneHints":["使用镜头或剧情短语"],"role":"身份","appearance":"固定身份特征加当前造型，且与其他人物有明显差异","voice":"nova|coral|onyx|echo"}],"scenes":[{"title":"镜头标题","environmentKey":"场景身份","environmentBible":"固定背景和空间规则","continuity":"与上一镜的关系或换景说明","endState":"镜头结束状态","characters":["角色身份名"],"characterLooks":{"角色身份名":"该镜造型名"},"shot":"景别","visual":"场景、构图、灯光与生图提示词","action":"人物连续动作、表情、互动与视频提示词","camera":"具体运镜轨迹、速度变化和衔接点","speaker":"说话角色","emotion":"台词情绪","dialogue":"自然简短台词","sfx":"环境音或动作音","duration":6}]}。角色身份、当镜造型与场景背景必须一致；每镜都要推动剧情。`;
+  const user = `视觉风格：${style}\n目标时长：${productionDuration} 秒\n已锁定剧本简介：${scriptMemory.synopsis || "未单独提供，以完整剧本为准"}\n已锁定背景故事/世界记忆：${scriptMemory.background || "未单独提供，以完整剧本为准"}\n已锁定人物造型清单（只能选择，禁止新增或改名）：${characters.length ? JSON.stringify(characters.filter(isVisualCharacterAsset).map((item) => ({ identityName: characterIdentity(item), lookName: characterLook(item), appearance: item.appearance, sceneHints: item.sceneHints }))) : "未导入剧本时可按故事规划"}\n已规划 Canonical 场景（environmentKey 必须逐字选用，禁止另起同义名称）：${sceneAssets.length ? JSON.stringify(sceneAssets.map((item) => ({ environmentKey: item.environmentKey, name: item.name, description: item.description, timeWeather: item.timeWeather, sceneHints: item.sceneHints }))) : "尚无预分析场景，以剧本实际地点建立稳定键"}\n资产规划要求：每个镜头的 visual 必须使用 [场景:场景身份] 标记固定场景，并用 [道具:道具1,道具2] 标记真正推动剧情或跨镜重复出现的重要道具；普通桌椅和无关装饰不要列为重要道具。后续跳过分镜图片，视频模型只通过全能参考组合已锁定的人物身份、当前造型、Canonical 场景图、道具、音色和上一镜已批准视频；禁止提交首帧或尾帧图片，不得脱离资产重新设计。\n${scriptImported ? "用户定稿剧本" : "故事"}：${storyboardStory}`;
     const storyboardTask = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
       ? customApiText("writer", { task: "storyboard", system, prompt: user, minimumCount, maximumCount, duration: productionDuration })
       : pollinationsText("writer", system, user);
@@ -3003,7 +3006,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function registerSeedancePortraitBlock(reason: unknown, sceneId = "") {
     if (!(reason instanceof SeedanceRequestError) || reason.failureKind !== "portrait_authorization") return false;
-    const block: SeedancePortraitBlock = { requestId: reason.requestId, sceneId, blockedReferences: reason.blockedReferences, createdAt: Date.now() };
+    const preset = visualStyle(style);
+    if (!styleRequiresTrustedPortrait(preset.category)) {
+      setError(`方舟把当前“${style}”动画参考误判为真人。漫镜不会要求动画角色办理真人加白；已隔离本次误判，不会影响其他剧本。请重新运行，系统会移除被误判的单项图片参考并保留其余全能参考。`);
+      recordActivity("video", `“${style}”属于${preset.category}风格，本次真人识别属于供应商误判；未写入可信人物阻断`, "warning");
+      return true;
+    }
+    const block: SeedancePortraitBlock = { requestId: reason.requestId, sceneId, projectId: activeAssetProjectId(), styleName: style, blockedReferences: reason.blockedReferences, createdAt: Date.now() };
     setSeedancePortraitBlock(block);
     window.localStorage.setItem(SEEDANCE_PORTRAIT_BLOCK_KEY, JSON.stringify(block));
     const ids = new Set(reason.blockedReferences.map((item) => item.libraryAssetId).filter(Boolean));
@@ -3321,20 +3330,24 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     if (!storedBlock) {
       try { storedBlock = JSON.parse(window.localStorage.getItem(SEEDANCE_PORTRAIT_BLOCK_KEY) || "null") as SeedancePortraitBlock | null; } catch { storedBlock = null; }
     }
-    if (storedBlock?.blockedReferences?.length) {
-      const unresolved = storedBlock.blockedReferences.filter((blocked) => {
-        if (blocked.kind !== "image") return false;
+    const relevantBlockedReferences = portraitBlockReferencesForProject(storedBlock, projectId, preparedCast) as SeedanceBlockedReference[];
+    if (styleRequiresTrustedPortrait(visualStyle(style).category) && relevantBlockedReferences.length) {
+      const unresolved = relevantBlockedReferences.filter((blocked) => {
         const identity = normalizeAssetIdentity(blocked.identityKey || blocked.name.replace(/^.*?：/, "").replace(/；.*$/, ""));
         const matchingCharacter = preparedCast.find((character) => normalizeAssetIdentity(characterIdentity(character)) === identity || character.libraryAssetId === blocked.libraryAssetId);
         return !matchingCharacter?.arkAssetId || matchingCharacter.portraitAuthorizationStatus !== "authorized";
       });
       if (unresolved.length) {
         const names = unresolved.map((item) => item.identityKey || item.name.replace(/^.*?：/, "").replace(/；.*$/, "")).join("、");
-        throw new SeedanceRequestError(`生成前检查已阻止无效重试：${names} 仍未绑定已授权的方舟可信人像 Asset ID。请先前往可信人物中心处理`, { failureKind: "portrait_authorization", retryable: false, requestId: storedBlock.requestId, blockedReferences: unresolved });
+        throw new SeedanceRequestError(`生成前检查已阻止无效重试：${names} 仍未绑定已授权的方舟可信人像 Asset ID。请先前往可信人物中心处理`, { failureKind: "portrait_authorization", retryable: false, requestId: storedBlock?.requestId, blockedReferences: unresolved });
       }
       window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY);
       setSeedancePortraitBlock(null);
       recordActivity("video", "此前被拦截的人物现已全部绑定可信 Asset ID，本次会改用 asset:// 引用并恢复生成", "done");
+    } else if (storedBlock?.projectId === projectId && !styleRequiresTrustedPortrait(visualStyle(style).category)) {
+      window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY);
+      setSeedancePortraitBlock(null);
+      recordActivity("video", `当前“${style}”为动画/艺术风格，已忽略并清除本项目遗留的真人授权阻断`, "done");
     }
     videoAssetPreflightRef.current = new Set(matches.map((asset) => asset.id));
     const summary = {
@@ -3382,14 +3395,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setStatusText(`正在恢复上次中断的 Seedance 任务 ${taskId.slice(-8)}`);
       recordActivity("video", `已找到未完成任务 ${taskId.slice(-8)}，继续查询，不重复创建和扣费`, "warning");
     } else {
-      const requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : uid();
+      let requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : uid();
+      let submittedReferences = [...(options.references || [])];
       window.localStorage.setItem("manjing-seedance-last-request-v146", JSON.stringify({ requestId, model: config.model, scene: options.resumeKey || "", createdAt: Date.now(), status: "submitting" }));
-      const created = await seedanceRequest("/api/seedance", {
+      const createSeedanceTask = (references: VideoReference[], currentRequestId: string) => seedanceRequest("/api/seedance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "create",
-          requestId,
+          requestId: currentRequestId,
           apiKey: config.apiKey.trim(),
           model: config.model,
           resolution: videoResolution,
@@ -3398,11 +3412,28 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           duration: options.duration,
           referenceMode: "omni",
           imageUrl: "",
-          references: options.references || [],
+          references,
           voiceover: { enabled: Boolean(options.voiceover?.script), backgroundMusic: bgmEnabled && options.voiceover?.mode !== "onscreen_dialogue", audioEnabled: true, language: "普通话", script: options.voiceover?.script || "", speaker: options.voiceover?.speaker || "", mode: options.voiceover?.mode || "none", style: "保持角色声音身份、音色、年龄感、语速、口音和情绪连续一致" },
         }),
       }, "创建 Seedance 视频任务", 1);
-      if (!created.ok) throw await responseFailure(created);
+      let created = await createSeedanceTask(submittedReferences, requestId);
+      if (!created.ok) {
+        const failure = await responseFailure(created);
+        if (failure.failureKind !== "portrait_authorization" || styleRequiresTrustedPortrait(visualStyle(style).category)) throw failure;
+        const blockedIds = new Set(failure.blockedReferences.map((item) => item.libraryAssetId).filter(Boolean));
+        const blockedIdentities = new Set(failure.blockedReferences.map((item) => normalizeAssetIdentity(item.identityKey || item.name.replace(/^.*?：/, "").replace(/；.*$/, ""))).filter(Boolean));
+        const filtered = submittedReferences.filter((reference) => reference.kind !== "image"
+          || !(blockedIds.has(reference.libraryAssetId) || blockedIdentities.has(normalizeAssetIdentity(reference.identityKey || reference.name.replace(/^.*?：/, "").replace(/；.*$/, "")))));
+        submittedReferences = filtered.length < submittedReferences.length
+          ? filtered
+          : submittedReferences.filter((reference) => reference.kind !== "image" || !reference.identityKey);
+        if (submittedReferences.length === (options.references || []).length) throw failure;
+        requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : uid();
+        window.localStorage.setItem("manjing-seedance-last-request-v146", JSON.stringify({ requestId, model: config.model, scene: options.resumeKey || "", createdAt: Date.now(), status: "animation-reference-fallback" }));
+        recordActivity("video", `方舟把“${style}”中的 ${failure.blockedReferences.length || 1} 项动画人物图误判为真人；本次 400 未创建付费任务，已自动移除被误判图片并保留场景、道具、音色和上一镜 @Video 全能参考后重提`, "warning");
+        created = await createSeedanceTask(submittedReferences, requestId);
+        if (!created.ok) throw await responseFailure(created);
+      }
       const task = await created.json() as { id?: string; requestId?: string; acceptedReferences?: Array<{ kind: string; role: string; name: string }>; referenceFallback?: boolean };
       if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
       if (task.acceptedReferences?.length) {
@@ -4105,6 +4136,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           recordActivity("writer", "免费输出被截断，漫镜已补齐缺失镜头", "warning");
         }
       }
+      if (scriptImported) {
+        const locked = lockStoryboardToAssetManifest(storyboard.characters, storyboard.scenes, characters);
+        if (locked.blocked.length) {
+          setAssetAnalysisState("ready");
+          document.querySelector(".script-asset-blueprint")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          throw new Error(`正式拆镜发现首次全文资产清单之外的人物：${locked.blocked.join("、")}。系统已停止制片且不会自动生图；请回到资产清单确认剧本原文是否确有遗漏`);
+        }
+        storyboard = { ...storyboard, characters: locked.characters, scenes: locked.scenes };
+        if (locked.remapped.length) recordActivity("director", `已阻止二次资产命名并重新绑定首次清单：${locked.remapped.slice(0, 8).join("；")}`, "done");
+      }
       setProjectTitle(storyboard.title);
       setMusicPrompt(storyboard.music);
       const blueprintCharacters = new Map(characters.map((item) => [characterAssetKey(item), item]));
@@ -4119,6 +4160,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       publishCharacters(cast);
       publishScenes(work);
       setSelected(0);
+
+      if (scriptImported) {
+        const unresolvedAfterStoryboard = cast.filter((item) => isVisualCharacterAsset(item) && (!item.imageUrl || item.reviewDecision === "pending"));
+        if (unresolvedAfterStoryboard.length) {
+          setAssetAnalysisState("ready");
+          document.querySelector(".script-asset-blueprint")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          throw new Error(`资产清单锁定检查未通过：${unresolvedAfterStoryboard.map((item) => characterAssetNaming(item).displayName).join("、")} 尚未确认。系统不会在开拍后补建人物框架或自动换脸`);
+        }
+        recordActivity("image", `正式拆镜已逐项绑定首次确认的 ${cast.filter(isVisualCharacterAsset).length} 套人物造型；未创建任何二次人物框架`, "done");
+      }
 
       setPhase("characters");
       activeRole = "image";
@@ -5399,7 +5450,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setImportMessage(`正在分析“${filename}”：此阶段不会生成任何图片或消耗生图额度`);
     recordActivity("writer", "开始分析导入剧本中的人物、服装状态、可复用场景与重要道具");
     const system = `你是影视制片的剧本拆解师。只分析，不改写剧本，不生成图片。先区分元数据、剧本简介、背景故事/世界观、人物表、场景标题、动作和真正的角色对白。完整提取所有实际需要视觉出镜的具名人物、每个需要稳定复用的拍摄场景，以及推动剧情、被人物持有或穿戴、发生状态变化、跨镜重复出现的重要道具。场景资产不是分镜图：每个不同地点/布景/时代状态建立一张没有人物、没有可移动剧情道具的 Canonical 空场景参考图，用于无首尾帧、无分镜图时仍能通过全能参考锁定建筑、门窗、固定陈设、空间布局、天气、时段、色调和光线方向；同一场景只建一次，可跨镜复用，发生实质改造/灾后/季节变化时才拆成独立 environmentKey。中文剧本中的场景 name 必须使用简短自然的中文，例如“苏梨破院”“户部公廨大厅”，严禁把 EP01_ENV_... 一类英文机器编码填进 name；environmentKey 是内部稳定复用键，可保持已有值，但新建时也优先使用简短中文。人物身份与人物造型必须分层：同一人物仍使用同一个 identityName，但本集每一种实际出镜的服装、妆发或剧情状态都要分别输出一条人物造型资产，例如男主平时黑衣、本集先穿白衣后受伤，就输出男主/白衣版和男主/白衣战损版；禁止把多个互斥造型揉在一张图里。lookName 必须短而明确，使用“白衣版、黑衣常服版、西装版、颓废版、战损版”等可直接显示和引用的名字；sceneHints 写明使用该造型或场景的标题、镜号或可检索剧情短语。没有明确变化时只输出基础版。人物 appearance 必须先忠实提取剧本明确的年龄感、族裔、体型、脸部与妆造信息；如果剧本没有写具体五官，可以根据身份和性格补充一套协调而有美感的角色设计方向：一个主要面部记忆点、两个辅助五官、清晰脸型与轮廓、角色专属发型妆面和克制配色。美感必须服务年龄、身份和剧情，不得把老人、反派、伤病或疲惫状态统一美化成年轻网红脸，也不得随机拼凑互相冲突的五官。系列项目、当前制作、剧本简介、背景故事、项目长期记忆、角色圣经、上一集结束状态、“小传/人物小传/角色小传”等栏目标题绝对不是人物或场景；片名、题材、时长、作者、编剧、人物关系、场次、镜号、景别、运镜、情绪、转场、音效、配乐、字幕、MONTAGE、FLASHBACK、CUT TO、TITLE CARD、SFX 等制片字段和剧本技术标记也绝对不是人物。VO、V.O.、-VO-、OS、O.S. 是附着在真实角色名后的画外音/声音位置扩展：如“苏梨（V.O.）”应识别为苏梨，但孤立的 VO/OS 绝对不是人物名。群演甲、路人A、众人、群众、男声、女声、系统声等没有稳定身份且不需要跨镜一致性的对象不得建立人物资产。每个人物必须给出可核对的 visualEvidence；只有剧本明确出镜或明确要求稳定视觉形象时 requiresVisualAsset 才能为 true，纯声音、栏目标题、舞台说明和技术标记必须为 false。普通桌椅和无剧情意义装饰也不是资产。只有实际说过台词的具名人物才需要建立音色框架；同一人物无论多少造型只共用一个音色。只返回 JSON：{"synopsis":"剧本简介或根据剧情提炼的简明故事梗概","background":"背景故事、时代地点、世界规则、主要关系与前史；没有明确内容就如实概括","characters":[{"name":"实际人物名（与 identityName 相同，不含 VO/OS 扩展）","identityName":"人物固定身份名","lookName":"当前服装/状态造型名","episodeScope":"第几集或当前集","sceneHints":["使用该造型的镜号、场景标题或剧情短语"],"role":"身份/关系","appearance":"人物固定身份特征、成套协调的脸型/主要记忆点/辅助五官，以及仅当前造型的服装、妆发和状态；缺失部分按角色身份克制补全，不得网红化或抹去年龄和剧情状态","reason":"该造型在何处出镜的依据","requiresVisualAsset":true或false,"visualEvidence":"证明该人物实际出镜或需要稳定视觉形象的原文场景/动作证据","needsVoice":true或false,"firstDialogue":"该人物第一句真实台词；没说话则为空"}],"scenes":[{"name":"便于用户识别的中文场景名（中文剧本严禁使用英文机器编码）","environmentKey":"稳定且唯一的场景身份，新建中文剧本优先使用短中文","description":"建筑、空间布局、门窗方向、固定陈设、主色调与光线方向","timeWeather":"时间、季节、天气和环境状态","episodeScope":"第几集或当前集","sceneHints":["使用该场景的镜号或剧情短语"],"reason":"需要建立并复用场景图的原因"}],"props":[{"name":"道具名","description":"剧本明确的形状、材质、颜色、尺寸和状态；没有依据就写待补充","importance":"hero|recurring|story","reason":"需要道具资产的原因"}]}。`;
-    const prompt = `请为以下完整剧本建立资产候选清单。保持原文人物名和语言；同一人物的称谓要合并为同一 identityName，但必须把本集实际出现的不同服装/妆发/受伤或贫富等状态拆成独立 lookName 资产。还要提取所有实际需要的 Canonical 空场景图并建立唯一 environmentKey；即使后续完全不用首尾帧和分镜图，视频模型也必须能只靠人物、场景、道具、音色的全能参考生成。所有人物造型和场景都给出 sceneHints。\n\n${content.slice(0, 30000)}`;
+    const chunks = splitScriptForAssetAnalysis(content);
+    const promptHeader = "请分析下面这部分剧本并建立资产候选清单。保持原文人物名和语言；同一人物的称谓合并为同一 identityName。只有服装、妆发、伤势、年龄或身体状态出现可见变化时才拆分 lookName；地点、昼夜、场次和镜头编号绝对不能成为人物造型名。没有明确换装时，破院居家、夜间居家等场景描述必须合并为同一个居家造型。还要提取实际需要的 Canonical 空场景图并建立唯一 environmentKey。所有人物造型和场景都给出 sceneHints。";
     let usedFallback = false;
     try {
       const languageRole = (["writer", "prompt", "director", "editor"] as const).find((role) => {
@@ -5411,18 +5463,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         return false;
       }) || "writer";
       const config = agentConfigs[languageRole];
-      let raw = "";
-      if (config.adapter === "horde") {
-        const task = await startHorde("assets", { story: content, model: config.model });
-        const result = await pollHorde("text", task.id, run, { maxAttempts: 40, timeoutMessage: "免费资产分析排队超过 120 秒" });
-        raw = String(result.text || "");
-      } else {
-        const task = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
-          ? customApiText(languageRole, { task: "script_asset_manifest", system, prompt })
-          : pollinationsText(languageRole, system, prompt);
-        raw = await withStageTimeout(task, 180000, "剧本资产分析超过 180 秒，请检查编剧模型接口");
+      const manifests = [];
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        const chunk = chunks[chunkIndex];
+        setStatusText(`AI 正在完整分析剧本 ${chunkIndex + 1}/${chunks.length}：人物造型、场景、道具与对白`);
+        const prompt = `${promptHeader}\n这是全文的第 ${chunkIndex + 1}/${chunks.length} 部分；只提取本部分有原文证据的内容，跨部分结果稍后由程序统一合并。\n\n${chunk}`;
+        let raw = "";
+        if (config.adapter === "horde") {
+          const task = await startHorde("assets", { story: prompt, model: config.model });
+          const result = await pollHorde("text", task.id, run, { maxAttempts: 40, timeoutMessage: `免费资产分析第 ${chunkIndex + 1} 部分排队超过 120 秒` });
+          raw = String(result.text || "");
+        } else {
+          const task = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
+            ? customApiText(languageRole, { task: "script_asset_manifest", system, prompt })
+            : pollinationsText(languageRole, system, prompt);
+          raw = await withStageTimeout(task, 180000, `剧本资产分析第 ${chunkIndex + 1}/${chunks.length} 部分超过 180 秒，请检查编剧模型接口`);
+        }
+        manifests.push(parseScriptAssetManifest(raw, chunk));
       }
-      const manifest = parseScriptAssetManifest(raw, content);
+      const manifest = mergeScriptAssetManifests(manifests);
       persistScriptMemory({ synopsis: manifest.synopsis, background: manifest.background });
       const previousCharacters = new Map(characters.map((item) => [characterAssetKey(item), item]));
       const previousProps = new Map(propAssets.map((item) => [item.name.toLocaleLowerCase(), item]));
@@ -5448,7 +5507,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const identityCount = new Set(manifest.characters.map((item) => item.identityName.toLocaleLowerCase("zh-CN"))).size;
       setStatusText(`已识别简介与背景记忆，并建立 ${identityCount} 个人物的 ${manifest.characters.length} 套本集造型、${manifest.scenes.length} 个场景、${manifest.props.length} 个道具、${persisted.voices.length} 个实际说话人物音色框架`);
       setImportMessage(`AI 已区分“${filename}”中的故事设定、人物、道具和对白；可先上传已有资产，再一键生成其余缺失图片`);
-      recordActivity("writer", `${agentName(languageRole)}已通读全文并完成结构化拆解：${identityCount} 个人物、${manifest.characters.length} 套本集服装/状态造型、${manifest.scenes.length} 个 Canonical 场景、${manifest.props.length} 个重要道具、${persisted.voices.length} 个实际对白人物音色；本地规则未混入 AI 结果`, "done");
+      recordActivity("writer", `${agentName(languageRole)}已分 ${chunks.length} 段无遗漏通读全文并锁定唯一资产清单：${identityCount} 个人物、${manifest.characters.length} 套可见服装/状态造型、${manifest.scenes.length} 个 Canonical 场景、${manifest.props.length} 个重要道具、${persisted.voices.length} 个实际对白人物音色；地点和昼夜未作为人物造型`, "done");
     } catch (reason) {
       usedFallback = true;
       const manifest = fallbackScriptAssetManifest(content);
@@ -5856,12 +5915,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         content = String(payload.script || payload.story || payload.premise || payload.content || "").trim();
       }
       if (content.length < 8) throw new Error("剧本内容太短或文件格式不正确");
-      setStory(content.slice(0, 50000));
+      setStory(content);
       setScriptImported(true);
       setScenes([]);
       setSelected(0);
       setExportUrl("");
-      await analyzeScriptAssetBlueprint(content.slice(0, 50000), file.name);
+      await analyzeScriptAssetBlueprint(content, file.name);
       setError("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "剧本导入失败");

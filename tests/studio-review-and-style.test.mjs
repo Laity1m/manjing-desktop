@@ -11,6 +11,8 @@ test("Western 3D anime preset is CGI animation rather than a graphic-novel prese
   assert.match(source, /toon and PBR hybrid materials/);
   assert.doesNotMatch(source, /name: "欧美3D图像小说"/);
   await access(new URL("../public/styles/western-3d-anime.webp", import.meta.url));
+  assert.match(source, /animation-reference-fallback/);
+  assert.match(source, /styleRequiresTrustedPortrait\(visualStyle\(style\)\.category\)/);
 });
 
 test("generated assets enter a non-blocking incremental review queue", () => {
@@ -24,7 +26,9 @@ test("generated assets enter a non-blocking incremental review queue", () => {
 test("imported scripts create editable asset skeletons before any image generation", () => {
   assert.match(source, /剧本资产框架/);
   assert.match(source, /AI 先区分简介、背景故事、实际人物、对白和重要道具/);
-  assert.match(source, /await analyzeScriptAssetBlueprint\(content\.slice\(0, 50000\), file\.name\)/);
+  assert.match(source, /await analyzeScriptAssetBlueprint\(content, file\.name\)/);
+  assert.match(source, /splitScriptForAssetAnalysis\(content\)/);
+  assert.doesNotMatch(source, /analyzeScriptAssetBlueprint\(content\.slice\(/);
   assert.match(source, /上传已有图片/);
   assert.match(source, /让 AI 生成/);
   assert.match(source, /配对后生成真正缺失项/);
