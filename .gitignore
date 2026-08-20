@@ -43,6 +43,7 @@ next-env.d.ts
 /work/
 /windows-app/node_modules/
 /windows-app/release/
+/windows-app/release-*/
 /.pnpm-store/
 *.exe
 *.blockmap
