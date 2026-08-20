@@ -1,5 +1,6 @@
 import { normalizeAssetIdentity, normalizeAssetLook } from "./asset-reuse";
-import { canonicalCharacterLookName } from "./script-asset-manifest";
+import { canonicalCharacterLookName, isReusableSceneAssetCandidate } from "./script-asset-manifest";
+import { isGenericNonAssetCharacter } from "./series-project";
 
 export type ProductionManifestCharacter = {
   name: string;
@@ -16,6 +17,62 @@ export type ProductionManifestScene = {
   speaker?: string;
   characterLooks?: Record<string, string>;
 };
+
+export type ProductionManifestEnvironment = {
+  name: string;
+  environmentKey: string;
+  description?: string;
+  sceneHints?: string[];
+};
+
+type EnvironmentStoryboardScene = {
+  title?: string;
+  visual?: string;
+  action?: string;
+  environmentKey?: string;
+  environmentBible?: string;
+};
+
+function normalizedEnvironment(value: unknown) {
+  return normalizeAssetIdentity(String(value || "").replace(/^scene:/i, ""));
+}
+
+function labeledScene(text: string) {
+  return String(text || "").match(/\[场景[：:]([^\]]+)\]/i)?.[1]?.split(/[，,、]/)[0]?.trim() || "";
+}
+
+/**
+ * Bind storyboard shots to the one scene manifest approved during import.
+ * Shot titles and dramatic beats are never promoted into scene assets.
+ */
+export function lockStoryboardScenesToAssetManifest<TScene extends EnvironmentStoryboardScene>(scenes: TScene[], approvedScenes: ProductionManifestEnvironment[]) {
+  const environments = approvedScenes.filter((item) => isReusableSceneAssetCandidate(item.environmentKey, item.name));
+  const remapped: string[] = [];
+  const blocked: string[] = [];
+  const lockedScenes = scenes.map((scene) => {
+    const explicit = String(scene.environmentKey || labeledScene(scene.visual || "") || "").trim();
+    const normalizedExplicit = normalizedEnvironment(explicit);
+    let match = normalizedExplicit ? environments.find((item) => [item.environmentKey, item.name].some((value) => normalizedEnvironment(value) === normalizedExplicit)) : undefined;
+    if (!match) {
+      const sceneText = `${scene.title || ""} ${scene.visual || ""} ${scene.action || ""}`.toLocaleLowerCase("zh-CN");
+      const ranked = environments.map((item, index) => {
+        const names = [item.environmentKey, item.name].map((value) => String(value || "").trim()).filter(Boolean);
+        const nameScore = names.reduce((score, name) => score + (sceneText.includes(name.toLocaleLowerCase("zh-CN")) ? 100 : 0), 0);
+        const hintScore = (item.sceneHints || []).reduce((score, hint) => score + (hint && sceneText.includes(hint.toLocaleLowerCase("zh-CN")) ? 30 : 0), 0);
+        return { item, index, score: nameScore + hintScore };
+      }).sort((left, right) => right.score - left.score || left.index - right.index);
+      if (ranked[0]?.score > 0 && ranked[0].score > (ranked[1]?.score || 0)) match = ranked[0].item;
+    }
+    if (!match && environments.length === 1) match = environments[0];
+    if (!match) {
+      blocked.push(explicit && isReusableSceneAssetCandidate(explicit, explicit) ? explicit : `镜头“${scene.title || "未命名"}”缺少可确认地点`);
+      return scene;
+    }
+    if (explicit && normalizedEnvironment(explicit) !== normalizedEnvironment(match.environmentKey)) remapped.push(`${explicit}→${match.environmentKey}`);
+    return { ...scene, environmentKey: match.environmentKey, environmentBible: scene.environmentBible || match.description || "按已确认的 Canonical 场景保持空间布局与光线" } as TScene;
+  });
+  return { scenes: lockedScenes, remapped: [...new Set(remapped)], blocked: [...new Set(blocked)] };
+}
 
 function identityOf(value: ProductionManifestCharacter) {
   return normalizeAssetIdentity(value.identityName || value.name);
@@ -57,6 +114,7 @@ export function lockStoryboardToAssetManifest<
   const blocked: string[] = [];
   const lockedCharacters: TCharacter[] = [];
   for (const character of storyboardCharacters) {
+    if (isGenericNonAssetCharacter(character.identityName || character.name)) continue;
     const identity = identityOf(character);
     const candidates = plannedByIdentity.get(identity) || [];
     if (!candidates.length) {
@@ -73,6 +131,7 @@ export function lockStoryboardToAssetManifest<
   const lockedScenes = scenes.map((scene) => {
     const sceneText = `${scene.title || ""} ${scene.visual || ""} ${scene.action || ""}`;
     const characters = scene.characters.flatMap((name) => {
+      if (isGenericNonAssetCharacter(name)) return [];
       const identityName = canonicalIdentityName.get(normalizeAssetIdentity(name));
       if (identityName) return [identityName];
       blocked.push(name);
@@ -80,6 +139,7 @@ export function lockStoryboardToAssetManifest<
     });
     const speaker = scene.speaker ? canonicalIdentityName.get(normalizeAssetIdentity(scene.speaker)) || scene.speaker : scene.speaker;
     const characterLooks = Object.fromEntries(Object.entries(scene.characterLooks || {}).flatMap(([name, requestedLook]) => {
+      if (isGenericNonAssetCharacter(name)) return [];
       const identity = normalizeAssetIdentity(name);
       const candidates = plannedByIdentity.get(identity) || [];
       const identityName = canonicalIdentityName.get(identity);

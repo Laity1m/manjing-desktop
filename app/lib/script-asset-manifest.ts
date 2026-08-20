@@ -138,6 +138,7 @@ export function mergeScriptAssetManifests(manifests: ScriptAssetManifest[]): Scr
       propMap.set(key, previous ? { ...previous, description: previous.description.length >= item.description.length ? previous.description : item.description, reason: mergeTextValues([previous.reason, item.reason], 240), importance: previous.importance === "hero" || item.importance === "hero" ? "hero" : previous.importance === "recurring" || item.importance === "recurring" ? "recurring" : "story" } : item);
     }
     for (const item of manifest.scenes) {
+      if (!isReusableSceneAssetCandidate(item.environmentKey, item.name)) continue;
       const key = item.environmentKey.toLocaleLowerCase("zh-CN");
       const previous = sceneMap.get(key);
       sceneMap.set(key, previous ? { ...previous, description: previous.description.length >= item.description.length ? previous.description : item.description, timeWeather: mergeTextValues([previous.timeWeather, item.timeWeather], 180), episodeScope: mergeTextValues([previous.episodeScope, item.episodeScope], 80), sceneHints: [...new Set([...previous.sceneHints, ...item.sceneHints])].slice(0, 30), reason: mergeTextValues([previous.reason, item.reason], 240) } : item);
@@ -232,6 +233,16 @@ export function localizedSceneDisplayName(scene: Pick<ScriptSceneCandidate, "nam
 
 function isNarrativeLabel(value: string) {
   return isNonCharacterLabel(value) || /^(?:系列项目|当前制作|当前剧集|剧本简介|故事简介|剧情简介|内容简介|项目简介|全剧背景故事|背景故事|故事背景|世界观|世界背景|项目长期记忆|本集相关角色圣经|上一集结束状态|本集完整剧本|人物关系与隐藏信息|世界规则与连续性约束|分集时间线|series project|current production|current episode|synopsis|logline|summary|background|backstory|worldbuilding|world bible|project memory|previous episode end state|full script)$/i.test(value.trim());
+}
+
+const SHOT_FUNCTION_LABEL = /^(?:镜头\s*\d+|场景[-_\s]*\d+|异样开场|线索逼近|冲突反转|悬念收束|(?:异样|序幕|剧情|故事|本集)?开场|建立镜头|线索|逼近|冲突|反转|高潮|悬念|收束|结尾|尾声|转场|过渡|空镜|特写|反打|推进|拉远|opening|establishing(?:\s+shot)?|approach|conflict|reversal|climax|suspense|closing|ending|transition|close[- ]?up|reaction(?:\s+shot)?)$/iu;
+
+/** A reusable scene asset is a physical environment, never a beat or shot function. */
+export function isReusableSceneAssetCandidate(environmentKey: unknown, name: unknown = "") {
+  const key = clean(environmentKey, 120);
+  const label = clean(name, 120);
+  if (!key && !label) return false;
+  return !SHOT_FUNCTION_LABEL.test(key) && !SHOT_FUNCTION_LABEL.test(label) && !isNarrativeLabel(key) && !isNarrativeLabel(label);
 }
 
 function isNonVisualCharacterRecord(item: Pick<ScriptCharacterCandidate, "name" | "role" | "appearance" | "requiresVisualAsset">) {
@@ -361,8 +372,9 @@ export function parseScriptAssetManifest(raw: string, script: string): ScriptAss
       sceneHints: rawSceneHints.map((hint) => clean(hint, 80)).filter(Boolean).slice(0, 20),
       reason: clean(value.reason || value.why, 180) || "本集分镜需要稳定复用该场景",
     };
-    return { ...scene, name: localizedSceneDisplayName(scene, index) };
-  }).filter((item) => item.name && !isNarrativeLabel(item.name));
+    const displayInput = SHOT_FUNCTION_LABEL.test(scene.name) ? { ...scene, name: "" } : scene;
+    return { ...scene, name: localizedSceneDisplayName(displayInput, index) };
+  }).filter((item) => item.name && isReusableSceneAssetCandidate(item.environmentKey, item.name));
   const fallback = fallbackScriptAssetManifest(script);
   // A successful language-agent result is authoritative. Local regex extraction
   // must not add headings such as “剧本简介” or “全剧背景故事” back as people.

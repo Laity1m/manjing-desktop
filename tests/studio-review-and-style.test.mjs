@@ -117,3 +117,12 @@ test("creates user-selectable canonical scene images for omni-reference-only vid
   assert.match(source, /抽取首尾帧只用于质检，不送入模型/);
   assert.match(source, /禁止提交首帧或尾帧图片/);
 });
+
+test("locks normalized composition bounds and automatically repairs a failed video once", () => {
+  assert.match(source, /POSITION FREEZE OVERRIDE:[^\n]+normalized x\/y center[^\n]+apparent scale[^\n]+tolerance bounds/);
+  assert.match(source, /Lock crop boundaries, focal length, horizon and headroom/);
+  assert.match(source, /generateInspectedVideoWithOneRepair/);
+  assert.match(source, /for \(let attempt = 1; attempt <= 2; attempt \+= 1\)/);
+  assert.match(source, /首次一致性检查未通过[^\n]+自动重生成 1 次/);
+  assert.match(source, /上一镜已批准视频的结束位置参考（仅用于QA，不提交视频生成）/);
+});

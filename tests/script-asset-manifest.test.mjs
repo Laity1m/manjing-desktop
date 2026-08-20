@@ -166,6 +166,22 @@ test("extracts canonical scene skeletons separately from storyboard frames", asy
   assert.match(manifest.scenes[0].description, /东墙长窗/);
 });
 
+test("rejects shot functions and narrative beats as canonical scene assets", async () => {
+  const { isReusableSceneAssetCandidate, parseScriptAssetManifest } = await loadManifestModule();
+  const manifest = parseScriptAssetManifest(JSON.stringify({
+    scenes: [
+      { name: "户部公廨大厅", environmentKey: "户部公廨大厅", description: "官署大厅" },
+      { name: "异样开场", environmentKey: "异样开场", description: "建立故事空间" },
+      { name: "线索逼近", environmentKey: "线索逼近", description: "关键人物进入画面" },
+      { name: "冲突反转", environmentKey: "冲突反转", description: "矛盾爆发" },
+      { name: "悬念收束", environmentKey: "悬念收束", description: "下一集钩子" },
+    ],
+  }), "场景：户部公廨大厅\n苏梨进入大厅。\n");
+  assert.deepEqual(manifest.scenes.map((item) => item.environmentKey), ["户部公廨大厅"]);
+  assert.equal(isReusableSceneAssetCandidate("场景-5", "场景-5"), false);
+  assert.equal(isReusableSceneAssetCandidate("摄政王府书房", "摄政王府书房"), true);
+});
+
 test("turns machine scene identifiers into Chinese display names without changing reuse keys", async () => {
   const { parseScriptAssetManifest } = await loadManifestModule();
   const firstKey = "EP01_ENV_SU_LI_DILAPIDATED_COURTYARD_NIGHT";
