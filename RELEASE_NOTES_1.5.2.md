@@ -48,6 +48,6 @@
 
 请下载 Release 中的 `Manjing-1.5.2-Full-Script-Asset-Lock-x64.exe`（本机打包文件仍显示中文产品名“漫镜”）。
 
-- 大小：113.04 MiB（118,533,242 字节）
+- 大小：113.04 MiB（118,533,809 字节）
 - SHA256：`4B90963C5A5C38963C78BD73E431AAF8550C2DCCB9DAD8746EDE4024D6B4AE7A`
 - Authenticode：`NotSigned`
