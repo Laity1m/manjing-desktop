@@ -83,6 +83,8 @@ test("completes truncated free storyboards instead of aborting production", asyn
   assert.match(source, /编剧输出镜头不足或字段不一致，漫镜正在保留可解析内容并补全分镜/);
   assert.match(source, /storyboardPayload\.shots/);
   assert.match(source, /storyboardPayload\.frames/);
+  assert.match(source, /\.filter\(\(value\): value is Record<string, unknown> => Boolean\(value\)/);
+  assert.match(source, /const beat = beats\[index % beats\.length\]/);
 });
 
 test("ships a user-editable multitrack workbench and downloadable deliverables", async () => {

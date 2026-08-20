@@ -969,14 +969,16 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, 
   const storyboardPayload = parsed.storyboard && typeof parsed.storyboard === "object" && !Array.isArray(parsed.storyboard)
     ? parsed.storyboard as Record<string, unknown>
     : parsed;
-  const sceneSource = [storyboardPayload.scenes, storyboardPayload.s, storyboardPayload.shots, storyboardPayload.frames, parsed.shots, parsed.frames]
-    .find((value): value is unknown[] => Array.isArray(value)) || [];
+  const sceneSource = ([storyboardPayload.scenes, storyboardPayload.s, storyboardPayload.shots, storyboardPayload.frames, parsed.shots, parsed.frames]
+    .find((value): value is unknown[] => Array.isArray(value)) || [])
+    .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value));
   if (sceneSource.length < minimumScenes) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
-  const picked = sceneSource.slice(0, targetSeconds <= 15 ? 1 : Math.max(minimumScenes, Math.min(16, maximumScenes))) as Array<Record<string, unknown>>;
+  const picked = sceneSource.slice(0, targetSeconds <= 15 ? 1 : Math.max(minimumScenes, Math.min(16, maximumScenes)));
   const normalizedDurations = normalizeSceneDurations(picked, targetSeconds);
-  const characterSource = [storyboardPayload.characters, storyboardPayload.c, storyboardPayload.cast, parsed.characters, parsed.cast]
-    .find((value): value is unknown[] => Array.isArray(value)) || [];
-  const rawCharacters = characterSource.slice(0, 16) as Array<Record<string, unknown>>;
+  const characterSource = ([storyboardPayload.characters, storyboardPayload.c, storyboardPayload.cast, parsed.characters, parsed.cast]
+    .find((value): value is unknown[] => Array.isArray(value)) || [])
+    .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value));
+  const rawCharacters = characterSource.slice(0, 16);
   const characters: CharacterAsset[] = deduplicateCharacterAssets(rawCharacters.map((item, index) => ({
     id: uid(),
     name: String(item.identityName || item.identity || item.name || item.n || `角色 ${index + 1}`).slice(0, 24),
@@ -1063,7 +1065,7 @@ function mergeReviewedStoryboard(reviewed: Storyboard, previousCast: CharacterAs
 function completeFreeStoryboard(partial: Storyboard | null, story: string, visualStyle: string, targetSeconds: number): Storyboard {
   const count = targetSeconds <= 15 ? 1 : Math.max(sceneCountForDuration(targetSeconds), partial?.scenes.length || 0);
   const premise = story.replace(/\s+/g, " ").slice(0, 140);
-  const characters: CharacterAsset[] = partial?.characters.length ? partial.characters : [
+  const characters: CharacterAsset[] = partial?.characters?.length ? partial.characters : [
     { id: uid(), name: "主角", role: "故事推动者", appearance: `${visualStyle}风格，具有明确五官、固定发型和标志性服装的年轻主角`, voice: "nova", status: "queued" as const },
     { id: uid(), name: "关键人物", role: "冲突与秘密的承载者", appearance: `${visualStyle}风格，与主角形成轮廓和色彩对比，固定服装与神态`, voice: "onyx", status: "queued" as const },
   ];
@@ -1073,13 +1075,16 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
     { title: "冲突反转", shot: "近景与特写", camera: "快速推近后停住", visual: "矛盾在同一空间内爆发，通过表情、手部动作和关键证据形成视觉反转", action: "关键人物揭开部分真相，主角从拒绝相信转为必须立即作出选择", dialogue: "如果现在不选，就再也来不及了。", emotion: "急迫", sfx: "低频冲击后瞬间安静" },
     { title: "悬念收束", shot: "特写转远景", camera: "拉远并留下空镜", visual: "主角做出第一步选择，但画面边缘出现新的代价或更大秘密，形成下一集钩子", action: "主角伸手触碰关键物件，画面在结果揭晓前切黑，只留下新的异常信号", dialogue: "原来，这才是开始。", emotion: "震惊后坚定", sfx: "心跳、信号声与切黑余响" },
   ];
-  const existing = partial?.scenes || [];
+  const existing = partial?.scenes?.filter(Boolean) || [];
   const durationSources = Array.from({ length: count }, (_, index) => ({ duration: existing[index]?.duration || targetSeconds / count }));
   const normalizedDurations = normalizeSceneDurations(durationSources, targetSeconds);
   const names = [...new Map(characters.map((character) => [characterIdentity(character), character.name])).values()].slice(0, 2);
   const scenes: Scene[] = Array.from({ length: count }, (_, index) => {
     const source = existing[index];
-    const beat = beats[index];
+    // The fallback beat library is intentionally reusable. Long productions
+    // often need more than four shots; cycling prevents the fifth generated
+    // shell from becoming undefined while keeping the dramatic progression.
+    const beat = beats[index % beats.length];
     return source ? { ...source, duration: normalizedDurations[index], motion: source.motion || (["push", "pan-right", "pull", "pan-left"] as MotionPreset[])[index % 4], motionIntensity: source.motionIntensity || 1, transition: source.transition || (index === 0 ? "cut" : "fade"), filter: source.filter || "none", speed: source.speed || 1, volume: source.volume ?? 1, subtitleEnabled: source.subtitleEnabled !== false, subtitlePosition: source.subtitlePosition || "bottom" } : {
       id: uid(),
       title: beat.title,
