@@ -80,7 +80,9 @@ test("completes truncated free storyboards instead of aborting production", asyn
   const source = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
   assert.match(source, /parseStoryboard\(raw, productionDuration, sceneCountForDuration\(productionDuration\), 8\)/);
   assert.match(source, /completeFreeStoryboard\(partial, story\.trim\(\), style, productionDuration\)/);
-  assert.match(source, /免费编剧输出不完整，漫镜正在自动补全分镜/);
+  assert.match(source, /编剧输出镜头不足或字段不一致，漫镜正在保留可解析内容并补全分镜/);
+  assert.match(source, /storyboardPayload\.shots/);
+  assert.match(source, /storyboardPayload\.frames/);
 });
 
 test("ships a user-editable multitrack workbench and downloadable deliverables", async () => {

@@ -598,8 +598,23 @@ const STYLE_PRESETS: VisualStylePreset[] = [
 
 const STYLE_PROMPTS: Record<string, string> = Object.fromEntries(STYLE_PRESETS.map((preset) => [preset.name, preset.base]));
 
+function normalizedVisualStyleName(name: string) {
+  const raw = String(name || "").trim();
+  if (STYLE_PROMPTS[raw]) return raw;
+  // Older project snapshots and user-entered labels may say “3D漫剧” rather
+  // than the exact preset name. They must never fall through to a live-action
+  // historical preset, because that incorrectly enables portrait enrollment.
+  if (/(?:欧美|western).*(?:3d|三维|cg)|(?:3d|三维|cg).*(?:欧美|western)/iu.test(raw)) return "欧美3D动漫";
+  if (/(?:3d|三维|cg|3D漫剧)/iu.test(raw)) return "3D 动画";
+  if (/(?:真人|实拍|写实|live[ -]?action|photoreal)/iu.test(raw)) return "电影写实";
+  return "国漫电影感";
+}
+
 function visualStyle(name: string) {
-  return STYLE_PRESETS.find((preset) => preset.name === name) || STYLE_PRESETS[4];
+  const normalized = normalizedVisualStyleName(name);
+  return STYLE_PRESETS.find((preset) => preset.name === normalized)
+    || STYLE_PRESETS.find((preset) => preset.name === "国漫电影感")
+    || STYLE_PRESETS[0];
 }
 
 function scriptLanguage(value: string) {
@@ -948,11 +963,19 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, 
       throw new Error("免费模型的剧本输出被截断，请再次生成");
     }
   }
-  const sceneSource = Array.isArray(parsed.scenes) ? parsed.scenes : Array.isArray(parsed.s) ? parsed.s : [];
+  // Models in the configured text-agent ecosystem commonly use shots,
+  // storyboard or frames despite being asked for scenes. Treat these as the
+  // same production unit instead of discarding an otherwise valid response.
+  const storyboardPayload = parsed.storyboard && typeof parsed.storyboard === "object" && !Array.isArray(parsed.storyboard)
+    ? parsed.storyboard as Record<string, unknown>
+    : parsed;
+  const sceneSource = [storyboardPayload.scenes, storyboardPayload.s, storyboardPayload.shots, storyboardPayload.frames, parsed.shots, parsed.frames]
+    .find((value): value is unknown[] => Array.isArray(value)) || [];
   if (sceneSource.length < minimumScenes) throw new Error("AI 没有生成足够的完整分镜，请再次生成");
   const picked = sceneSource.slice(0, targetSeconds <= 15 ? 1 : Math.max(minimumScenes, Math.min(16, maximumScenes))) as Array<Record<string, unknown>>;
   const normalizedDurations = normalizeSceneDurations(picked, targetSeconds);
-  const characterSource = Array.isArray(parsed.characters) ? parsed.characters : Array.isArray(parsed.c) ? parsed.c : [];
+  const characterSource = [storyboardPayload.characters, storyboardPayload.c, storyboardPayload.cast, parsed.characters, parsed.cast]
+    .find((value): value is unknown[] => Array.isArray(value)) || [];
   const rawCharacters = characterSource.slice(0, 16) as Array<Record<string, unknown>>;
   const characters: CharacterAsset[] = deduplicateCharacterAssets(rawCharacters.map((item, index) => ({
     id: uid(),
@@ -968,9 +991,9 @@ function parseStoryboard(raw: string, targetSeconds: number, minimumScenes = 1, 
   })));
   if (!characters.length) characters.push({ id: uid(), name: "主角", role: "故事主角", appearance: "与剧情匹配、具有鲜明辨识度的年轻角色，固定五官、发型和服装", voice: "nova", status: "queued" });
   return {
-    title: String(parsed.title || parsed.t || "未命名漫剧").slice(0, 32),
+    title: String(storyboardPayload.title || storyboardPayload.t || parsed.title || parsed.t || "未命名漫剧").slice(0, 32),
     characters,
-    music: String(parsed.music || parsed.m || "cinematic emotional Chinese animation soundtrack, instrumental, no vocals").slice(0, 220),
+    music: String(storyboardPayload.music || storyboardPayload.m || parsed.music || parsed.m || "cinematic emotional Chinese animation soundtrack, instrumental, no vocals").slice(0, 220),
     scenes: picked.map((item, index) => ({
       id: uid(),
       title: String(item.title || item.t || `镜头 ${index + 1}`).slice(0, 32),
@@ -1038,7 +1061,7 @@ function mergeReviewedStoryboard(reviewed: Storyboard, previousCast: CharacterAs
 }
 
 function completeFreeStoryboard(partial: Storyboard | null, story: string, visualStyle: string, targetSeconds: number): Storyboard {
-  const count = targetSeconds <= 15 ? 1 : partial?.scenes.length || sceneCountForDuration(targetSeconds);
+  const count = targetSeconds <= 15 ? 1 : Math.max(sceneCountForDuration(targetSeconds), partial?.scenes.length || 0);
   const premise = story.replace(/\s+/g, " ").slice(0, 140);
   const characters: CharacterAsset[] = partial?.characters.length ? partial.characters : [
     { id: uid(), name: "主角", role: "故事推动者", appearance: `${visualStyle}风格，具有明确五官、固定发型和标志性服装的年轻主角`, voice: "nova", status: "queued" as const },
@@ -1053,7 +1076,7 @@ function completeFreeStoryboard(partial: Storyboard | null, story: string, visua
   const existing = partial?.scenes || [];
   const durationSources = Array.from({ length: count }, (_, index) => ({ duration: existing[index]?.duration || targetSeconds / count }));
   const normalizedDurations = normalizeSceneDurations(durationSources, targetSeconds);
-  const names = characters.slice(0, 2).map((character) => character.name);
+  const names = [...new Map(characters.map((character) => [characterIdentity(character), character.name])).values()].slice(0, 2);
   const scenes: Scene[] = Array.from({ length: count }, (_, index) => {
     const source = existing[index];
     const beat = beats[index];
@@ -1499,9 +1522,23 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     try {
       const saved = JSON.parse(window.localStorage.getItem(SEEDANCE_PORTRAIT_BLOCK_KEY) || "null") as SeedancePortraitBlock | null;
       const projectId = activeAssetProjectId();
-      if (saved?.blockedReferences?.length && (!saved.projectId || saved.projectId === projectId)) setSeedancePortraitBlock(saved);
-    } catch { window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY); }
-  }, []);
+      const requiresTrustedPortrait = styleRequiresTrustedPortrait(visualStyle(style).category);
+      // A pre-project legacy blocker cannot safely be attributed to the
+      // current script. Clear it rather than making a new 3D project wait for
+      // somebody else's real-person authorization.
+      if (!saved?.projectId) {
+        if (saved) window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY);
+        setSeedancePortraitBlock(null);
+        return;
+      }
+      if (saved.blockedReferences?.length && saved.projectId === projectId && requiresTrustedPortrait) {
+        setSeedancePortraitBlock(saved);
+      } else {
+        if (saved.projectId === projectId && !requiresTrustedPortrait) window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY);
+        setSeedancePortraitBlock(null);
+      }
+    } catch { window.localStorage.removeItem(SEEDANCE_PORTRAIT_BLOCK_KEY); setSeedancePortraitBlock(null); }
+  }, [style]);
 
   useEffect(() => {
     try {
@@ -4128,12 +4165,23 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         try {
           storyboard = parseStoryboard(raw, productionDuration, sceneCountForDuration(productionDuration), 8);
         } catch (reason) {
-          if (agentConfigs.writer.adapter !== "horde") throw reason;
           let partial: Storyboard | null = null;
           try { partial = parseStoryboard(raw, productionDuration, sceneCountForDuration(productionDuration), 8); } catch { partial = null; }
-          setStatusText("免费编剧输出不完整，漫镜正在自动补全分镜");
+          // A returned storyboard can be valid but use a different field name,
+          // or contain fewer shots than a longer target duration needs. Parse
+          // its usable portion first, then add only the missing shot shells.
+          if (!partial) {
+            try { partial = parseStoryboard(raw, productionDuration, 1, 16); } catch { partial = null; }
+          }
+          if (scriptImported) {
+            partial = {
+              ...(partial || { title: projectTitle || "用户导入项目", music: "cinematic instrumental soundtrack, no vocals", scenes: [] }),
+              characters: characters.map((item) => ({ ...item })),
+            };
+          }
+          setStatusText("编剧输出镜头不足或字段不一致，漫镜正在保留可解析内容并补全分镜");
           storyboard = completeFreeStoryboard(partial, story.trim(), style, productionDuration);
-          recordActivity("writer", "免费输出被截断，漫镜已补齐缺失镜头", "warning");
+          recordActivity("writer", `${agentName("writer")}输出镜头不足或字段不一致；已保留有效内容并补齐缺失镜头，不中断制作`, "warning");
         }
       }
       if (scriptImported) {
@@ -4710,12 +4758,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   function canRerunRole(role: AgentRole) {
     if (role === "writer") return story.trim().length >= 8;
     if (role === "director" || role === "image" || role === "voice") return scenes.length > 0;
-    if (role === "video") return scenes.length > 0 && !seedancePortraitBlock && (agentConfigs.video.adapter !== "browser" || scenes.some((scene) => scene.imageUrl));
+    if (role === "video") return scenes.length > 0 && !activePortraitBlock && (agentConfigs.video.adapter !== "browser" || scenes.some((scene) => scene.imageUrl));
     return scenes.some((scene) => scene.imageUrl || scene.videoUrl);
   }
 
   function openTrustedPortraitCenter() {
-    const blocked = seedancePortraitBlock?.blockedReferences.map((item) => item.libraryAssetId || item.identityKey).filter(Boolean).join(",") || "";
+    const blocked = activePortraitBlock?.blockedReferences.map((item) => item.libraryAssetId || item.identityKey).filter(Boolean).join(",") || "";
     router.push(`/assets?trusted=1&project=${encodeURIComponent(activeAssetProjectId())}&blocked=${encodeURIComponent(blocked)}`);
   }
 
@@ -6432,6 +6480,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const pendingMusicReviews = musicUrl && musicReviewDecision === "pending" ? 1 : 0;
   const pendingReviewCount = pendingCharacterReviews.length + pendingImageReviews.length + pendingVideoReviews.length + pendingAudioReviews.length + pendingMusicReviews;
   const sequentialVideoPlan = planSequentialVideo(scenes);
+  const trustedPortraitRequired = styleRequiresTrustedPortrait(visualStyle(style).category);
+  const activePortraitBlock = trustedPortraitRequired && seedancePortraitBlock?.projectId === activeAssetProjectId()
+    ? seedancePortraitBlock
+    : null;
 
   useEffect(() => {
     if (!sequentialResumeToken) return;
@@ -6448,7 +6500,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }, [sequentialResumeToken]);
 
   useEffect(() => {
-    if (!agentTeamLoaded || busy || !scenes.length || seedancePortraitBlock || portraitResumeStartedRef.current) return;
+    if (!agentTeamLoaded || busy || !scenes.length || activePortraitBlock || portraitResumeStartedRef.current) return;
     const resumeAssetId = window.localStorage.getItem("manjing-studio-resume-video-after-portrait-v1");
     if (!resumeAssetId) return;
     portraitResumeStartedRef.current = true;
@@ -6459,7 +6511,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     // This one-shot flag is written only after the user completes Ark's actor
     // authorization flow. Ordinary renders must never replay a paid request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentTeamLoaded, busy, scenes.length, seedancePortraitBlock]);
+  }, [agentTeamLoaded, busy, scenes.length, activePortraitBlock]);
 
   return (
     <main id="top" className={`${surface}-surface`}>
@@ -6676,7 +6728,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑</small></button>
           {busy && <button className="cancel-button" onClick={cancelGeneration}>{phase === "exporting" ? "停止合成" : "停止"}</button>}
         </div>
-        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{seedancePortraitBlock ? "方舟真人安全拦截不是网络故障；授权完成前已禁止重复付费提交。" : error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{seedancePortraitBlock ? <button type="button" className="job-retry-button portrait-center-button" onClick={openTrustedPortraitCenter} disabled={busy}>处理可信人物（{seedancePortraitBlock.blockedReferences.length || 1}）</button> : error && failedRole ? <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button> : null}{!error && nativeVideoEnabled && phase === "ready" && sequentialVideoPlan.kind === "generate" && <button type="button" className="job-retry-button" onClick={() => void rerunRole("video")} disabled={busy}>继续生成第 {sequentialVideoPlan.index + 1} 镜</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
+        {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{activePortraitBlock ? "方舟真人安全拦截不是网络故障；授权完成前已禁止重复付费提交。" : error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{activePortraitBlock ? <button type="button" className="job-retry-button portrait-center-button" onClick={openTrustedPortraitCenter} disabled={busy}>处理可信人物（{activePortraitBlock.blockedReferences.length || 1}）</button> : error && failedRole ? <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button> : null}{!error && nativeVideoEnabled && phase === "ready" && sequentialVideoPlan.kind === "generate" && <button type="button" className="job-retry-button" onClick={() => void rerunRole("video")} disabled={busy}>继续生成第 {sequentialVideoPlan.index + 1} 镜</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
         {(activityLog.length > 0 || busy) && <div className="workflow-monitor">
           <div className="workflow-heading"><div><b>AI 制作现场</b><span>每个岗位正在做什么、用了哪个模型、交付了什么，都实时记录</span></div><em>{busy ? "制作直播中" : "本次流程已保存"}</em></div>
           <div className="workflow-roles">{AGENT_ROLES.map((role) => {

@@ -13,6 +13,10 @@ test("Western 3D anime preset is CGI animation rather than a graphic-novel prese
   await access(new URL("../public/styles/western-3d-anime.webp", import.meta.url));
   assert.match(source, /animation-reference-fallback/);
   assert.match(source, /styleRequiresTrustedPortrait\(visualStyle\(style\)\.category\)/);
+  assert.match(source, /3D漫剧/);
+  assert.match(source, /const activePortraitBlock = trustedPortraitRequired/);
+  assert.match(source, /saved\.projectId === projectId && requiresTrustedPortrait/);
+  assert.doesNotMatch(source, /处理可信人物（\{seedancePortraitBlock\.blockedReferences/);
 });
 
 test("generated assets enter a non-blocking incremental review queue", () => {
