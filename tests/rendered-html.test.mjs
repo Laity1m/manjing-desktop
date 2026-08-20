@@ -710,7 +710,7 @@ test("Windows app directly loads the bundled app without an iframe or local web 
   assert.match(main, /mainWindow\.loadURL\(initialUrl\)/);
   assert.doesNotMatch(main, /loadFile\(|shell\.html|iframe|127\.0\.0\.1|chatgpt\.site/);
   assert.doesNotMatch(runtime, /createServer|server\.listen|chatgpt\.site/);
-  assert.equal(desktopPackage.version, "1.5.2");
+  assert.equal(desktopPackage.version, "0.0.1");
   assert.match(main, /dataRoot: app\.getPath\("userData"\)/);
   assert.match(runtime, /manjing-settings\.json/);
   assert.match(runtime, /\/api\/desktop\/settings/);

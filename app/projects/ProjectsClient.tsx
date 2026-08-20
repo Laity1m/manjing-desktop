@@ -80,6 +80,11 @@ export default function ProjectsClient() {
     if (!selected) return;
     const episode = selected.episodes.find((item) => item.id === episodeId);
     if (!episode) return;
+    const normalizedContent = episode.content.replace(/\s+/g, "").toLocaleLowerCase("zh-CN");
+    if (!normalizedContent || /请在项目中导入或填写本集剧本/.test(normalizedContent)) {
+      setMessage("当前剧集还没有真实剧本，请先导入总剧本后再进入制作");
+      return;
+    }
     try {
       if (JSON.parse(localStorage.getItem("manjing-production-runtime-v1") || "null")?.active === true) {
         setMessage("当前工作台任务仍在后台制作，请等待完成或停止任务后再切换剧集");

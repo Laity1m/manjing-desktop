@@ -202,6 +202,23 @@ export function appendSeriesProductionRecord(projectId: string, record: Omit<Ser
   saveSeriesProjects(next);
 }
 
+export function completeSeriesEpisode(projectId: string, episodeId: string | undefined, endState: string) {
+  if (!projectId.trim() || !episodeId?.trim()) return;
+  const projects = loadSeriesProjects();
+  const now = new Date().toISOString();
+  const normalizedEndState = endState.replace(/\s+/g, " ").trim().slice(0, 600);
+  const next = projects.map((project) => project.id !== projectId ? project : {
+    ...project,
+    updatedAt: now,
+    episodes: project.episodes.map((episode) => episode.id !== episodeId ? episode : {
+      ...episode,
+      status: "done" as const,
+      endState: normalizedEndState || episode.endState,
+    }),
+  });
+  saveSeriesProjects(next);
+}
+
 export function loadSeriesProjects(): SeriesProject[] {
   if (typeof window === "undefined") return [];
   try {
@@ -243,6 +260,7 @@ export function activateSeriesEpisode(project: SeriesProject, episode: SeriesEpi
   sessionStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(context));
   try { localStorage.setItem(ACTIVE_SERIES_CONTEXT_KEY, JSON.stringify(compactMetadata)); } catch { /* Session context remains authoritative for this production run. */ }
   try { localStorage.setItem("manjing-text-draft", context.context); } catch { sessionStorage.setItem("manjing-text-draft", context.context); }
+  window.dispatchEvent(new CustomEvent("manjing-active-series-context-changed", { detail: compactMetadata }));
   try { localStorage.setItem("manjing-new-studio", "1"); } catch { /* Optional navigation hint. */ }
   localStorage.removeItem("manjing-studio-open-project");
   const workspace = (() => { try { return JSON.parse(localStorage.getItem("manjing-workspace") || "{}"); } catch { return {}; } })();

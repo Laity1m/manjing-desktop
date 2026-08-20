@@ -145,7 +145,8 @@ export async function POST(request: Request) {
         }
         return json({ error: detail, retryable: TRANSIENT_STATUSES.has(upstream.status), failureKind: "provider", requestId }, upstream.status || 502);
       }
-      const result = { id: payload.id, status: "queued", acceptedReferences: submittedReferences, ignoredReferences: Math.max(0, rawReferences.length - submittedReferences.length), referenceFallback: submittedReferences.length < accepted.length };
+      const droppedReferences = accepted.filter((reference) => !submittedReferences.some((submitted) => submitted.kind === reference.kind && submitted.role === reference.role && submitted.name === reference.name));
+      const result = { id: payload.id, status: "queued", acceptedReferences: submittedReferences, droppedReferences, ignoredReferences: Math.max(0, rawReferences.length - submittedReferences.length), referenceFallback: submittedReferences.length < accepted.length };
       if (requestId && /^[a-z0-9-]{8,80}$/i.test(requestId)) {
         createCache.set(requestId, { expiresAt: Date.now() + 30 * 60 * 1000, payload: result });
         if (createCache.size > 80) for (const [key, value] of createCache) if (value.expiresAt <= Date.now()) createCache.delete(key);

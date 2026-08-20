@@ -1,6 +1,6 @@
 "use client";
 
-import { appendSeriesProductionRecord, isGenericNonAssetCharacter, isNonCharacterLabel } from "./lib/series-project";
+import { appendSeriesProductionRecord, completeSeriesEpisode, isGenericNonAssetCharacter, isNonCharacterLabel } from "./lib/series-project";
 
 import StudioProjectBinding from "./components/StudioProjectBinding";
 
@@ -1316,7 +1316,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [subtitleColor, setSubtitleColor] = useState("#ffffff");
   const [musicVolume, setMusicVolume] = useState(0.16);
   const [activityLog, setActivityLog] = useState<ActivityEvent[]>([]);
-  const [bridgeUrl, setBridgeUrl] = useState("");
+  const [bridgeUrl, setBridgeUrl] = useState("http://127.0.0.1:8765");
   const [bridgeToken, setBridgeToken] = useState("");
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealth>({ state: "idle", message: "尚未检测" });
   const [lipsyncEnabled, setLipsyncEnabled] = useState(false);
@@ -1524,8 +1524,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   useEffect(() => {
     let active = true;
-    queueMicrotask(() => { if (active) void refreshVoiceProfiles().catch(() => undefined); });
-    return () => { active = false; };
+    const refresh = () => { if (active) void refreshVoiceProfiles().catch(() => undefined); };
+    queueMicrotask(refresh);
+    window.addEventListener("manjing-active-series-context-changed", refresh);
+    window.addEventListener("manjing-series-projects-changed", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("manjing-active-series-context-changed", refresh);
+      window.removeEventListener("manjing-series-projects-changed", refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -2730,7 +2737,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const config = agentConfigs.director;
     const minimumCount = sceneCountForDuration(productionDuration);
     const maximumCount = productionDuration <= 15 ? 1 : Math.min(16, minimumCount + 3);
-    setStatusText(`${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
+    setStatusText(scriptImported ? `${agentName("director")}正在复核锁定分镜的执行与连续性，不重新分析资产` : `${agentName("director")}正在审查人物一致性、节奏和结尾钩子`);
     if (config.adapter === "horde") {
       const task = await startHorde("director", { story: story.trim(), style, draft, count: maximumCount, minCount: minimumCount, model: config.model });
       const result = await pollHorde("text", task.id, run, {
@@ -2743,7 +2750,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       return String(result.text || draft);
     }
-    const system = `你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜。${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，最终必须只有一个连续完整镜头，发现拆镜必须合并。` : `根据剧情 Beat、场景变化、视角必要性、动作复杂度和情绪节奏，独立决定 ${minimumCount}–${maximumCount} 镜，并逐镜决定时长；可以相同也可以不同，但禁止机械平均。`}单镜不得超过15秒，总时长必须精确等于目标时长。检查同一 identityName 的脸部身份保持不变、每个本集服装/状态均有独立 lookName 资产，并确保每镜 characterLooks 只引用该镜剧情实际需要的造型；不得把同一人物的多套互斥服装同时引用。检查每个 environmentKey 的 environmentBible 是否稳定，逐镜校验人物站位、朝向、视线、手持道具、动作方向、背景布局和光线连续性；判断 continuity 是连续动作、同场景换机位、反打还是正式换景，并保证上一镜 endState 能被下一镜自然承接。更新 shotPlan 后只返回完整 JSON，不要解释。`;
+    const system = `你是 AI 漫剧总导演。审查编剧交付的 JSON 分镜。${scriptImported ? "剧本原文以及首次全文分析得到的人物、造型、场景、道具和音色清单均已锁定。本阶段不是再次分析剧本：严禁增加、删除、改名或合并任何资产，严禁创造清单外人物与场景，只能调整镜头执行、节奏、机位和连续性。" : ""}${productionDuration <= 15 ? `目标时长为 ${productionDuration} 秒，最终必须只有一个连续完整镜头，发现拆镜必须合并。` : `根据剧情 Beat、场景变化、视角必要性、动作复杂度和情绪节奏，独立决定 ${minimumCount}–${maximumCount} 镜，并逐镜决定时长；可以相同也可以不同，但禁止机械平均。`}单镜不得超过15秒，总时长必须精确等于目标时长。检查同一 identityName 的脸部身份保持不变、每个本集服装/状态均有独立 lookName 资产，并确保每镜 characterLooks 只引用该镜剧情实际需要的造型；不得把同一人物的多套互斥服装同时引用。检查每个 environmentKey 的 environmentBible 是否稳定，逐镜校验人物站位、朝向、视线、手持道具、动作方向、背景布局和光线连续性；判断 continuity 是连续动作、同场景换机位、反打还是正式换景，并保证上一镜 endState 能被下一镜自然承接。更新 shotPlan 后只返回完整 JSON，不要解释。`;
     const user = `原故事：${compactStoryboardContext(story.trim())}\n视觉风格：${style}\n编剧初稿：${draft}`;
     const reviewTask = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
       ? customApiText("director", { task: "review_storyboard", system, prompt: user, draft })
@@ -2946,7 +2953,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   async function extractGeneratedVideoVoice(scene: Scene, videoUrl: string) {
     const voiceover = sceneVoiceover(scene);
     if (!voiceEnabled || voiceover.mode !== "onscreen_dialogue" || !voiceover.speaker || !voiceover.script) return null;
-    if (await canonicalVoiceProfile(scene)) return null;
+    if (await canonicalVoiceProfile(scene, { projectOnly: true })) return null;
     const videoResponse = await fetch(videoUrl);
     if (!videoResponse.ok) throw new Error("无法读取首条人物对白视频");
     const videoBlob = await videoResponse.blob();
@@ -3040,12 +3047,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     recordActivity("voice", `已将 ${voiceover.speaker} 的独立音轨登记为 Canonical 声音参考`, "done");
   }
 
-  async function canonicalVoiceProfile(scene: Scene) {
+  async function canonicalVoiceProfile(scene: Scene, options: { projectOnly?: boolean } = {}) {
     const speaker = sceneVoiceover(scene).speaker.trim();
     if (!speaker) return null;
     const normalized = speaker.toLocaleLowerCase("zh-CN");
     const projectId = activeAssetProjectId();
-    const candidates = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.category === "audio" && asset.mediaType === "audio" && asset.assetState !== "placeholder" && asset.reusable !== false && asset.voiceConsent !== "revoked" && (!asset.projectId || asset.scope === "global" || asset.projectId === projectId) && String(asset.identityKey || "").trim().toLocaleLowerCase("zh-CN") === normalized).sort((a, b) => Number(b.projectId === projectId) - Number(a.projectId === projectId) || Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || b.createdAt.localeCompare(a.createdAt));
+    const candidates = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.category === "audio" && asset.mediaType === "audio" && asset.assetState !== "placeholder" && asset.reusable !== false && asset.voiceConsent !== "revoked" && (options.projectOnly ? asset.projectId === projectId && asset.scope !== "global" : (!asset.projectId || asset.scope === "global" || asset.projectId === projectId)) && String(asset.identityKey || "").trim().toLocaleLowerCase("zh-CN") === normalized).sort((a, b) => Number(b.projectId === projectId) - Number(a.projectId === projectId) || Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || b.createdAt.localeCompare(a.createdAt));
     const match = candidates[0];
     if (!match) return null;
     const [loaded] = await loadLibraryAssets([match.id]);
@@ -3081,7 +3088,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const speaker = sceneVoiceover(scene).speaker.trim();
     const isCharacter = characters.some((character) => character.name.trim().toLocaleLowerCase("zh-CN") === speaker.toLocaleLowerCase("zh-CN")) || scene.characters.some((name) => name.trim().toLocaleLowerCase("zh-CN") === speaker.toLocaleLowerCase("zh-CN"));
     if (!speaker || !isCharacter) return null;
-    const existing = await canonicalVoiceProfile(scene);
+    const existing = await canonicalVoiceProfile(scene, { projectOnly: true });
     if (existing) return existing;
     const blob = typeof source === "string" ? await (await fetch(source)).blob() : source;
     if (!blob.type.startsWith("audio/")) return null;
@@ -3371,7 +3378,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const look = normalizeAssetLook(characterLook(character));
       const candidates = characterAssets.filter((asset) => normalizeAssetIdentity(asset.identityKey || asset.entityId || asset.name) === identity);
       const exact = candidates.filter((asset) => normalizeAssetLook(asset.lookName || asset.variantName || "基础版") === look);
-      const matched = (exact.length ? exact : candidates).sort((a, b) => Number(b.portraitAuthorizationStatus === "authorized" && Boolean(b.arkAssetId)) - Number(a.portraitAuthorizationStatus === "authorized" && Boolean(a.arkAssetId)) || Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || b.createdAt.localeCompare(a.createdAt))[0];
+      const matched = exact.sort((a, b) => Number(b.portraitAuthorizationStatus === "authorized" && Boolean(b.arkAssetId)) - Number(a.portraitAuthorizationStatus === "authorized" && Boolean(a.arkAssetId)) || Number(Boolean(b.canonical)) - Number(Boolean(a.canonical)) || Number(Boolean(b.locked)) - Number(Boolean(a.locked)) || b.createdAt.localeCompare(a.createdAt))[0];
       if (!matched) return character;
       return { ...character, libraryAssetId: matched.id, arkAssetId: matched.arkAssetId || character.arkAssetId, portraitAuthorizationStatus: matched.portraitAuthorizationStatus || character.portraitAuthorizationStatus };
     });
@@ -3487,7 +3494,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         created = await createSeedanceTask(submittedReferences, requestId);
         if (!created.ok) throw await responseFailure(created);
       }
-      const task = await created.json() as { id?: string; requestId?: string; acceptedReferences?: Array<{ kind: string; role: string; name: string }>; referenceFallback?: boolean };
+      const task = await created.json() as { id?: string; requestId?: string; acceptedReferences?: Array<{ kind: string; role: string; name: string }>; droppedReferences?: Array<{ kind: string; role: string; name: string }>; referenceFallback?: boolean };
       if (!task.id) throw new Error("即梦 Seedance 没有返回任务编号");
       if (task.acceptedReferences?.length) {
         const firstFrameCount = task.acceptedReferences.filter((reference) => reference.role === "first_frame").length;
@@ -3495,7 +3502,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const lockedAssetCount = task.acceptedReferences.filter((reference) => reference.role === "reference_image").length;
         recordActivity("video", `Seedance 已按全能参考、不送首尾帧模式接收 ${task.acceptedReferences.length} 项素材：${lockedAssetCount} 项人物/场景/道具/构图参考已绑定`, "done");
       }
-      if (task.referenceFallback) recordActivity("video", "上一镜视频或音色公网地址已失效；方舟明确拒绝后，漫镜仅重提一次人物、场景、道具 Canonical 图片与完整状态提示词，当前镜头继续生成", "warning");
+      if (task.referenceFallback) {
+        const dropped = (task.droppedReferences || []).map((reference) => reference.name).filter(Boolean).join("、");
+        recordActivity("video", `${dropped || "上一镜视频或音色"}的公网地址被方舟拒绝；漫镜仅重提一次剩余 Canonical 参考。当前镜头已明确降级，不会显示为完整全能参考`, "warning");
+      }
       taskId = task.id;
       window.localStorage.setItem("manjing-seedance-last-request-v146", JSON.stringify({ requestId: task.requestId || requestId, taskId, model: config.model, scene: options.resumeKey || "", createdAt: Date.now(), status: "created" }));
       saveSeedancePendingTask(resumeKey, { id: taskId, model: config.model, createdAt: Date.now(), promptSignature });
@@ -4172,8 +4182,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setActivityLog([]);
     setPhase(hasLockedStoryboard ? "characters" : "story");
     setProgress(hasLockedStoryboard ? 15 : 5);
-    setStatusText(hasLockedStoryboard ? "已锁定用户分镜，正在检查缺少的生产素材" : scriptImported ? "已导入剧本，AI 只负责结构化拆镜" : "AI 正在理解故事并编写分镜");
-    recordActivity("writer", hasLockedStoryboard ? "用户分镜已锁定，跳过编剧岗位" : scriptImported ? "用户剧本已锁定，只拆分镜头，不改写剧情" : `${agentName("writer")}开始改编剧本和拆分镜头`, hasLockedStoryboard ? "done" : "running");
+    setStatusText(hasLockedStoryboard ? "已锁定用户分镜，正在检查缺少的生产素材" : scriptImported ? "首次全文分析结果已锁定，正在转换为可执行镜头" : "AI 正在理解故事并编写分镜");
+    recordActivity("writer", hasLockedStoryboard ? "用户分镜已锁定，跳过编剧岗位" : scriptImported ? "消费首次全文分析结果：仅转换镜头结构，不重新识别人、景、物或改写剧情" : `${agentName("writer")}开始改编剧本和拆分镜头`, hasLockedStoryboard ? "done" : "running");
     let activeRole: AgentRole = hasLockedStoryboard ? "image" : "writer";
     try {
       let storyboard: Storyboard;
@@ -4182,10 +4192,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         recordActivity("director", "用户分镜视为已定稿，跳过导演复核", "done");
       } else {
         let raw = await generateStoryboard(run);
-        recordActivity("writer", scriptImported ? "已按用户剧本交付结构化分镜" : "剧本初稿与分镜提示词已交付", "done");
+        recordActivity("writer", scriptImported ? "已按锁定剧本和唯一资产清单交付结构化镜头，未新增资产" : "剧本初稿与分镜提示词已交付", "done");
         setProgress(10);
         activeRole = "director";
-        recordActivity("director", `${agentName("director")}开始复核节奏、角色一致性和结尾钩子`);
+        recordActivity("director", scriptImported ? `${agentName("director")}只复核镜头执行、节奏与连续性，不再次分析剧本或扩充资产` : `${agentName("director")}开始复核节奏、角色一致性和结尾钩子`);
         try {
           const reviewed = await directorReview(raw, run);
           parseStoryboard(reviewed, productionDuration, sceneCountForDuration(productionDuration), 8);
@@ -4266,8 +4276,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       activeRole = "image";
       recordActivity("image", `${agentName("image")}开始生成角色设定与一致性参考`);
       let generatedCharacters = 0;
-      const reusableProductionAssets = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.reusable !== false);
       const productionProjectId = activeAssetProjectId();
+      const reusableProductionAssets = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.reusable !== false && (!asset.projectId || asset.scope === "global" || asset.projectId === productionProjectId));
       for (let index = 0; index < cast.length; index += 1) {
         const character = cast[index];
         if (!isVisualCharacterAsset(character)) {
@@ -4354,16 +4364,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         const knownPropNames = new Set(videoPropAssets.map((item) => item.name.trim().toLocaleLowerCase("zh-CN")));
         const newlyDiscoveredProps = storyboardPropNames.filter((name) => !knownPropNames.has(name.trim().toLocaleLowerCase("zh-CN")));
         if (scriptImported && newlyDiscoveredProps.length) {
-          const context = activeSeriesContext();
-          const additions = await Promise.all(newlyDiscoveredProps.map(async (name) => {
-            const saved = await saveLibraryPlaceholder({ name, category: "prop", identityKey: name, semanticDescription: "分镜结构化时发现的剧情道具，等待上传已有图片或让 AI 生成", tags: ["剧本分析", "重要道具"], projectId: context.projectId || activeAssetProjectId(), episodeId: context.episodeId, generationPrompt: `${frameVisualPrompt(style)}, production prop identity sheet for ${name}, exact shape, material, color and scale, neutral background, no person, no text` });
-            return { id: uid(), libraryAssetId: saved.id, name, description: "分镜结构化时发现的剧情道具，等待补充外观、材质、尺寸和状态", importance: "story" as const, reason: "分镜分析补充发现", status: "queued" as const };
-          }));
-          setPropAssets((items) => [...items, ...additions]);
-          setAssetAnalysisState("ready");
-          throw new Error(`发现 ${newlyDiscoveredProps.length} 个新道具（${newlyDiscoveredProps.join("、")}），已在资产库建立空框；请上传或让 AI 生成后再开始视频，系统不会先画分镜图`);
+          throw new Error(`分镜模型引用了首次全文资产清单之外的道具（${newlyDiscoveredProps.join("、")}）。生产清单已锁定，系统没有二次建框或生图；请重新运行首次剧本分析并确认清单，或修改分镜只使用已确认资产`);
         }
-        const reusableProps = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.category === "prop" && asset.mediaType === "image" && asset.assetState !== "placeholder" && asset.reusable !== false);
+        const reusableProps = (await listLibraryAssets({ allProjects: true })).filter((asset) => asset.category === "prop" && asset.mediaType === "image" && asset.assetState !== "placeholder" && asset.reusable !== false && (!asset.projectId || asset.scope === "global" || asset.projectId === productionProjectId));
         for (let index = 0; index < videoPropAssets.length; index += 1) {
           const prop = videoPropAssets[index];
           if (prop.imageUrl) continue;
@@ -4416,9 +4419,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const knownPropNames = new Set(propAssets.map((item) => item.name.trim().toLocaleLowerCase()));
       const newlyDiscoveredProps = storyboardPropNames.filter((name) => !knownPropNames.has(name.trim().toLocaleLowerCase()));
       if (scriptImported && newlyDiscoveredProps.length) {
-        setPropAssets((items) => [...items, ...newlyDiscoveredProps.map((name) => ({ id: uid(), name, description: "分镜结构化时发现的剧情道具，等待补充外观、材质、尺寸和状态", importance: "story" as const, reason: "分镜分析补充发现", status: "queued" as const }))]);
-        setAssetAnalysisState("ready");
-        throw new Error(`分镜阶段补充发现 ${newlyDiscoveredProps.length} 个道具（${newlyDiscoveredProps.join("、")}）；已建立资产卡，请先上传或生成并采用，未自动出图`);
+        throw new Error(`分镜模型引用了首次全文资产清单之外的道具（${newlyDiscoveredProps.join("、")}）。生产清单已锁定，系统没有二次建框或出图；请重新运行首次分析或修改分镜`);
       }
       const propUploadKey = agentConfigs.image.adapter === "pollinations" ? agentKey("image") : agentConfigs.video.adapter === "pollinations" ? agentKey("video") : "";
       for (const prop of propAssets.filter((item) => item.imageUrl)) {
@@ -6184,7 +6185,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   function downloadProject() {
-    const payload = { format: "manjing-project", version: 2, savedAt: new Date().toISOString(), projectTitle, story, style, targetDuration, aspect, frameContinuityMode, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, assetAnalysisState, characters: characters.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), propAssets: propAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), sceneAssets: sceneAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), scenes: scenes.map(({ imageUrl, videoUrl, audioUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined, videoUrl: videoUrl?.startsWith("http") ? videoUrl : undefined, audioUrl: audioUrl?.startsWith("http") ? audioUrl : undefined })) };
+    const context = activeSeriesContext();
+    const payload = { format: "manjing-project", version: 3, savedAt: new Date().toISOString(), projectId: context.projectId || activeAssetProjectId(), episodeId: context.episodeId, localMediaPolicy: "同一设备优先按资产 ID 恢复；公网媒体保留 URL", projectTitle, story, style, targetDuration, aspect, frameContinuityMode, voiceEnabled, bgmEnabled, subtitleEnabled, voice, musicPrompt, subtitleScale, subtitleColor, musicVolume, assetAnalysisState, characters: characters.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), propAssets: propAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), sceneAssets: sceneAssets.map(({ imageUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined })), scenes: scenes.map(({ imageUrl, videoUrl, audioUrl, ...item }) => ({ ...item, imageUrl: imageUrl?.startsWith("http") ? imageUrl : undefined, videoUrl: videoUrl?.startsWith("http") ? videoUrl : undefined, audioUrl: audioUrl?.startsWith("http") ? audioUrl : undefined })) };
     saveBlob(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" }), `${safeFilename(projectTitle)}-漫镜工程.json`);
   }
 
@@ -6193,7 +6195,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     try {
       const payload = JSON.parse(await file.text()) as Record<string, unknown>;
       if (payload.format !== "manjing-project" || !Array.isArray(payload.scenes)) throw new Error("这不是有效的漫镜工程文件");
-      const importedScenes = (payload.scenes as Scene[]).slice(0, 50).map((scene, index) => ({ ...scene, id: uid(), title: String(scene.title || `镜头 ${index + 1}`), duration: Math.max(1, Math.min(30, Number(scene.duration) || 6)), status: scene.imageUrl || scene.videoUrl ? "ready" as SceneStatus : "queued" as SceneStatus }));
+      let importedScenes = (payload.scenes as Scene[]).slice(0, 50).map((scene, index) => ({ ...scene, id: uid(), title: String(scene.title || `镜头 ${index + 1}`), duration: Math.max(1, Math.min(30, Number(scene.duration) || 6)), status: scene.imageUrl || scene.videoUrl ? "ready" as SceneStatus : "queued" as SceneStatus }));
       setProjectTitle(String(payload.projectTitle || "导入的漫镜工程").slice(0, 60));
       setStory(String(payload.story || "导入工程的故事梗概"));
       setScriptImported(true);
@@ -6201,12 +6203,25 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (payload.aspect === "9:16" || payload.aspect === "16:9") setAspect(payload.aspect);
       if (payload.frameContinuityMode) setFrameContinuityMode("identity-first");
       setTargetDuration(Number(payload.targetDuration) || 0);
+      let importedCharacters = deduplicateCharacterAssets(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
+      let importedProps = Array.isArray(payload.propAssets) ? (payload.propAssets as PropAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : [];
+      let importedSceneAssets = Array.isArray(payload.sceneAssets) ? (payload.sceneAssets as SceneAsset[]).slice(0, 30).filter((item) => isReusableSceneAssetCandidate(item.environmentKey, item.name)).map((item, index) => ({ ...item, id: uid(), name: localizedSceneDisplayName(item, index) })) : [];
+      const localIds = [...new Set([
+        ...importedCharacters.map((item) => item.libraryAssetId),
+        ...importedProps.map((item) => item.libraryAssetId),
+        ...importedSceneAssets.map((item) => item.libraryAssetId),
+        ...importedScenes.map((item) => item.videoAssetId),
+      ].filter((id): id is string => Boolean(id)))];
+      if (localIds.length) {
+        const restored = new Map((await loadLibraryAssets(localIds)).map((asset) => [asset.id, asset.url || ""]));
+        importedCharacters = importedCharacters.map((item) => !item.imageUrl && item.libraryAssetId && restored.get(item.libraryAssetId) ? { ...item, imageUrl: restored.get(item.libraryAssetId), status: "ready" as const } : item);
+        importedProps = importedProps.map((item) => !item.imageUrl && item.libraryAssetId && restored.get(item.libraryAssetId) ? { ...item, imageUrl: restored.get(item.libraryAssetId), status: "ready" as const } : item);
+        importedSceneAssets = importedSceneAssets.map((item) => !item.imageUrl && item.libraryAssetId && restored.get(item.libraryAssetId) ? { ...item, imageUrl: restored.get(item.libraryAssetId), status: "ready" as const } : item);
+        importedScenes = importedScenes.map((item) => !item.videoUrl && item.videoAssetId && restored.get(item.videoAssetId) ? { ...item, videoUrl: restored.get(item.videoAssetId), status: "ready" as const } : item);
+      }
       setScenes(assignSpatialLayouts(importedScenes));
-      const importedCharacters = deduplicateCharacterAssets(Array.isArray(payload.characters) ? (payload.characters as CharacterAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : []);
       setCharacters(importedCharacters);
-      const importedProps = Array.isArray(payload.propAssets) ? (payload.propAssets as PropAsset[]).slice(0, 40).map((item) => ({ ...item, id: uid() })) : [];
       setPropAssets(importedProps);
-      const importedSceneAssets = Array.isArray(payload.sceneAssets) ? (payload.sceneAssets as SceneAsset[]).slice(0, 30).filter((item) => isReusableSceneAssetCandidate(item.environmentKey, item.name)).map((item, index) => ({ ...item, id: uid(), name: localizedSceneDisplayName(item, index) })) : [];
       setSceneAssets(importedSceneAssets);
       setAssetAnalysisState(importedProps.length || importedSceneAssets.length || importedCharacters.length ? "ready" : "idle");
       setMusicPrompt(String(payload.musicPrompt || ""));
@@ -6463,7 +6478,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       await syncScenesToEditor(movieScenes, url, "studio");
       try {
         const active = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}") as { projectId?: string; episodeId?: string; episodeNumber?: number };
-        if (active.projectId) appendSeriesProductionRecord(active.projectId, { episodeId: active.episodeId, episodeNumber: active.episodeNumber, title: projectTitle || "未命名漫剧", duration: movieDuration, assetId: finalAsset.id, editorProjectId: editorProjectIdRef.current, status: "completed" });
+        if (active.projectId) {
+          appendSeriesProductionRecord(active.projectId, { episodeId: active.episodeId, episodeNumber: active.episodeNumber, title: projectTitle || "未命名漫剧", duration: movieDuration, assetId: finalAsset.id, editorProjectId: editorProjectIdRef.current, status: "completed" });
+          const lastScene = movieScenes[movieScenes.length - 1];
+          const actualEndState = [
+            lastScene?.environmentKey ? `场景：${lastScene.environmentKey}` : "",
+            lastScene?.endState || lastScene?.action || "",
+            lastScene?.characterLooks && Object.keys(lastScene.characterLooks).length ? `人物造型：${JSON.stringify(lastScene.characterLooks)}` : "",
+          ].filter(Boolean).join("；");
+          completeSeriesEpisode(active.projectId, active.episodeId, actualEndState);
+        }
       } catch { /* Final asset remains safely archived even if the project record is unavailable. */ }
       return true;
     } catch (reason) {
