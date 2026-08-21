@@ -114,7 +114,7 @@ test("endpoint IDs stay in explicit omni mode and never become first-frame video
   const media = createBody.content.filter((item) => item.type !== "text");
   assert.deepEqual(media.map((item) => item.role), ["reference_image"]);
   assert.equal(media.some((item) => item.image_url?.url.includes("forbidden-first-frame")), false);
-  assert.match(createBody.content[0].text, /绝不作为首帧控制/);
+  assert.match(createBody.content[0].text, /绝不作为 first_frame\/last_frame 控制/);
 });
 
 test("legacy model requests never silently promote an image to first frame", async () => {

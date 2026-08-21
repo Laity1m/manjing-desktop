@@ -75,6 +75,22 @@ const MEDIA_STORE_NAME = "media";
 const PROJECT_STORE_NAME = "projects";
 const ASSET_STORE_NAME = "library-assets";
 const MAX_ASSET_BYTES = 512 * 1024 * 1024;
+const INLINE_AUDIO_PREVIEW_BYTES = 12 * 1024 * 1024;
+
+function blobDataUrl(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("音色预览地址生成失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function normalizedAudioBlob(blob: Blob, name: string) {
+  if (blob.type.startsWith("audio/")) return blob;
+  const type = /\.mp3$/i.test(name) ? "audio/mpeg" : /\.wav$/i.test(name) ? "audio/wav" : /\.ogg$/i.test(name) ? "audio/ogg" : /\.m4a$/i.test(name) ? "audio/mp4" : /\.webm$/i.test(name) ? "audio/webm" : "";
+  return type ? new Blob([blob], { type }) : blob;
+}
 
 function uid(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -415,7 +431,14 @@ export async function loadLibraryAsset(id: string) {
       request.onsuccess = () => resolve(request.result as Blob | undefined);
       request.onerror = () => reject(request.error || new Error("读取资产文件失败"));
     });
-    if (blob) return { ...normalizedAssetMetadata(asset), url: URL.createObjectURL(blob) };
+    if (blob) {
+      const metadata = normalizedAssetMetadata(asset);
+      const playable = metadata.mediaType === "audio" ? normalizedAudioBlob(blob, metadata.name) : blob;
+      const url = metadata.mediaType === "audio" && playable.size <= INLINE_AUDIO_PREVIEW_BYTES
+        ? await blobDataUrl(playable)
+        : URL.createObjectURL(playable);
+      return { ...metadata, url };
+    }
     return asset.assetState === "placeholder" || asset.mediaId.startsWith("placeholder:") ? normalizedAssetMetadata(asset) : null;
   } finally {
     database.close();
@@ -432,7 +455,7 @@ export async function loadLibraryAssets(ids: string[]) {
   return loaded;
 }
 
-export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "arkAssetGroupId" | "arkAssetStatus" | "arkAssetError" | "arkAssetSyncedAt" | "referenceText" | "referenceMediaUrl" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
+export async function updateLibraryAsset(id: string, patch: Partial<Pick<LibraryAsset, "name" | "category" | "duration" | "tags" | "reusable" | "locked" | "canonical" | "identityKey" | "lookName" | "entityId" | "variantName" | "purposes" | "semanticDescription" | "semanticRegions" | "recognitionStatus" | "recognitionConfidence" | "recognizedAt" | "parentAssetId" | "arkAssetId" | "portraitAuthorizationStatus" | "arkAssetGroupId" | "arkAssetStatus" | "arkAssetError" | "arkAssetSyncedAt" | "referenceText" | "referenceMediaUrl" | "voiceSource" | "voiceConsent" | "assetState" | "sourceChoice" | "blueprintKey" | "generationPrompt" | "projectId" | "episodeId" | "scope" | "usageCount" | "lastUsedAt">>) {
   const database = await openLibraryDatabase();
   try {
     const current = await new Promise<LibraryAsset | undefined>((resolve, reject) => {
@@ -445,6 +468,7 @@ export async function updateLibraryAsset(id: string, patch: Partial<Pick<Library
       ...current,
       ...(typeof patch.name === "string" ? { name: patch.name.trim().slice(0, 180) || current.name } : {}),
       ...(patch.category ? { category: patch.category } : {}),
+      ...(typeof patch.duration === "number" ? { duration: Math.max(0, Math.min(24 * 60 * 60, patch.duration)) } : {}),
       ...(Array.isArray(patch.tags) ? { tags: patch.tags.map((item) => item.trim()).filter(Boolean).slice(0, 12) } : {}),
       ...(typeof patch.reusable === "boolean" ? { reusable: patch.reusable } : {}),
       ...(typeof patch.locked === "boolean" ? { locked: patch.locked } : {}),

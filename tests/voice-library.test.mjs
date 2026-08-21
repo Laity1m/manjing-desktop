@@ -13,6 +13,9 @@ const desktopRuntime = await readFile(new URL("../windows-app/desktop-runtime.js
 test("extracts each character's first generated-video dialogue into the voice library", () => {
   assert.match(studio, /extractGeneratedVideoVoice/);
   assert.match(studio, /persistCanonicalVoiceProfile\(scene, audioBlob/);
+  assert.match(studio, /attachLibraryFileToPlaceholder\(placeholder\.id, file/);
+  assert.match(studio, /asset\.projectId === projectId/);
+  assert.match(studio, /voice-extraction-notice/);
   assert.match(studio, /video-extracted/);
   assert.match(studio, /recordVideoAudioTrack/);
   assert.match(studio, /MediaRecorder\(destination\.stream/);
@@ -51,6 +54,11 @@ test("reuses canonical voice audio in TTS and multimodal video references", () =
 test("ships an auditable voice library and optional video-to-MP3 extraction", () => {
   assert.match(libraryUi, /音色已迁移到独立音色库/);
   assert.match(voiceUi, /公共音色库/);
+  assert.match(voiceUi, /试听音色/);
+  assert.match(voiceUi, /音频解码失败/);
+  assert.match(voiceUi, /重新上传并替换/);
+  assert.match(library, /INLINE_AUDIO_PREVIEW_BYTES/);
+  assert.match(library, /readAsDataURL/);
   assert.match(voiceUi, /确认授权并设为 Canonical/);
   assert.match(voiceUi, /让 AI 生成参考音色/);
   assert.match(bridge, /@app\.post\("\/v1\/voice-profiles\/extract"\)/);
@@ -77,29 +85,39 @@ test("preflights reusable assets before every Seedance video path", () => {
   assert.match(studio, /role: "reference_video"/);
 });
 
-test("direct video workflow skips generated storyboard frames and never submits extracted tail frames", () => {
+test("direct video workflow turns the approved generated-video tail into selectable alternate-camera coverage", () => {
   assert.match(studio, /const directVideoWorkflow = agentConfigs\.video\.adapter !== "browser"/);
-  assert.match(studio, /跳过分镜首帧图，直接进入全能参考视频/);
+  assert.match(studio, /跳过传统分镜图/);
   assert.match(studio, /previousEpisodeVideoReference/);
   assert.match(studio, /continuityReferenceDecision: "cross-episode-video"/);
   assert.match(studio, /上一镜已批准视频连续性/);
-  assert.doesNotMatch(studio, /可控尾帧继承/);
-  assert.match(studio, /全能参考连续性（已锁定）/);
+  assert.match(studio, /function cameraCoverageSpecs/);
+  assert.match(studio, /buildCameraCoverageAlternatives/);
+  assert.match(studio, /pendingCameraCoverageReviews/);
+  assert.match(studio, /selectCameraCoverage/);
+  assert.match(studio, /用户选中的尾帧派生多机位画面/);
+  assert.match(studio, /previousScene\?\.videoReviewDecision === "approved"/);
+  assert.match(studio, /tailCutPlan/);
+  assert.match(studio, /尾帧多机位组接（已锁定）/);
   assert.doesNotMatch(studio, /function persistTailFrameAsset/);
   assert.doesNotMatch(studio, /function shouldInheritTailFrame/);
 });
 
-test("keeps extracted frames QA-only and never exposes controlled inheritance", () => {
+test("uses the real generated-video tail only to create coverage and submits the selected coverage to video", () => {
   assert.match(studio, /videoStartFrameUrl: inspection\.frames\.start/);
   assert.match(studio, /videoEndFrameUrl: inspection\.frames\.end/);
-  assert.doesNotMatch(studio, /上一镜视频截取首帧/);
-  assert.doesNotMatch(studio, /上一镜视频截取尾帧/);
-  assert.doesNotMatch(studio, /tags: \["视频截帧", "镜头尾帧"/);
+  assert.match(studio, /actualTailFrameUrl/);
+  assert.match(studio, /Reference one is the actual decoded tail frame from the previous approved generated video/);
+  assert.match(studio, /const imageUrl = await makeImage\([^\n]+references\)/);
+  assert.match(studio, /scene\.cameraCoverageImageUrl/);
+  assert.match(studio, /尚未选择由上一镜真实视频尾帧生成的多机位备选画面/);
+  assert.doesNotMatch(studio, /usableReferenceUrl\(previousScene\.videoEndFrameUrl, true, "image"\)/);
   assert.match(studio, /useState<FrameContinuityMode>\("identity-first"\)/);
-  assert.match(studio, /IDENTITY-FIRST MODE: do not submit extracted first\/end-frame images/);
-  assert.doesNotMatch(studio, /CONTROLLED FRAME INHERITANCE MODE/);
+  assert.match(studio, /COVERAGE-BRIDGE MODE/);
   assert.match(studio, /role: "reference_image"/);
   assert.match(seedanceRoute, /const role = kind === "image" \? "reference_image"/);
   assert.match(desktopRuntime, /const role = kind === "image" \? "reference_image"/);
+  assert.doesNotMatch(studio, /role: "first_frame"/);
+  assert.doesNotMatch(studio, /role: "last_frame"/);
   assert.match(seedanceRoute, /return_last_frame: false/);
 });

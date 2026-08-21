@@ -55,3 +55,30 @@ test("does not carry a location-specific spatial map into another environment", 
   assert.equal(scenes[0].spatialLayout["苏梨"].x, 0.32);
   assert.equal(scenes[1].spatialLayout["苏梨"].x, 0.5);
 });
+
+test("projects a draggable 2.5D stage and camera into deterministic screen anchors", async () => {
+  const { defaultStageLayout, projectStageLayout } = await loadSpatialModule();
+  const layout = defaultStageLayout(["甲", "乙"]);
+  const before = projectStageLayout(layout);
+  layout.actors["甲"].x += 0.08;
+  const after = projectStageLayout(layout);
+  assert.notEqual(after["甲"].x, before["甲"].x);
+  assert.equal(after["乙"].x, before["乙"].x);
+  assert.ok(after["甲"].bounds.xMin < after["甲"].bounds.xMax);
+  assert.equal(layout.frozen, true);
+});
+
+test("locks fixed scene objects with the cast and inherits them inside one environment", async () => {
+  const { assignSpatialLayouts, projectStageObjects } = await loadSpatialModule();
+  const scenes = assignSpatialLayouts([
+    { environmentKey: "study", characters: ["苏梨"], visual: "苏梨站在书桌旁 [道具:书桌,官印]" },
+    { environmentKey: "study", characters: ["苏梨"], visual: "苏梨继续说话" },
+  ]);
+  assert.ok(scenes[0].stageLayout.objects["书桌"]);
+  assert.ok(scenes[0].stageLayout.objects["官印"]);
+  assert.deepEqual(scenes[1].stageLayout.objects, scenes[0].stageLayout.objects);
+  assert.equal(scenes[1].objectSpatialLayout["书桌"].x, scenes[0].objectSpatialLayout["书桌"].x);
+  const before = projectStageObjects(scenes[0].stageLayout)["书桌"].x;
+  scenes[0].stageLayout.objects["书桌"].x += 0.1;
+  assert.notEqual(projectStageObjects(scenes[0].stageLayout)["书桌"].x, before);
+});

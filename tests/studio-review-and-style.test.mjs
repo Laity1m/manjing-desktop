@@ -60,7 +60,7 @@ test("all character generation paths use the concise default aesthetic director"
   assert.doesNotMatch(source, /Enabled Image Agent Skill/);
 });
 
-test("four-zone cards receive multi-angle checks and video continuity stays omni-only", () => {
+test("four-zone cards receive multi-angle checks and video continuity uses only omni-reference roles", () => {
   assert.match(source, /frontalFace: number \| null/);
   assert.match(source, /profileSilhouette: number \| null/);
   assert.match(source, /backSilhouette: number \| null/);
@@ -68,9 +68,10 @@ test("four-zone cards receive multi-angle checks and video continuity stays omni
   assert.match(source, /bodyProportion: number \| null/);
   assert.match(source, /costumeConsistency: number \| null/);
   assert.match(source, /正面全身、45度侧面全身、背面全身/);
-  assert.match(source, /全能参考连续性（已锁定）/);
-  assert.match(source, /抽取首尾帧仅用于本地质检，绝不送入模型/);
-  assert.doesNotMatch(source, /pushReference\(\{ kind: "image"[^\n]+videoEndFrameUrl/);
+  assert.match(source, /尾帧多机位组接（已锁定）/);
+  assert.match(source, /上一镜批准后从实际生成视频解码尾帧/);
+  assert.match(source, /生成三个不同景别\/角度的备选画面/);
+  assert.match(source, /原始尾帧不直接充当下一镜构图/);
   assert.match(source, /const pendingCharacterCards = cast\.filter/);
   assert.match(source, /四区角色卡等待用户批准，未提交视频任务/);
 });
@@ -114,8 +115,8 @@ test("creates user-selectable canonical scene images for omni-reference-only vid
   assert.match(source, /approveSceneBlueprint/);
   assert.match(source, /category: "scene"/);
   assert.match(source, /Canonical 空场景：\$\{canonicalSceneAsset\.name\}/);
-  assert.match(source, /抽取首尾帧只用于质检，不送入模型/);
-  assert.match(source, /禁止提交首帧或尾帧图片/);
+  assert.match(source, /用户选中的尾帧派生多机位画面/);
+  assert.match(source, /原始尾帧不直送视频/);
 });
 
 test("locks normalized composition bounds and automatically repairs a failed video once", () => {

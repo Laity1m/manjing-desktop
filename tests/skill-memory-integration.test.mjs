@@ -14,6 +14,8 @@ test("all production text channels resolve project-scoped skills", async () => {
   assert.match(studio, /skillContext: resolution\.text/);
   assert.match(studio, /resolvedSystem = resolution\.text/);
   assert.match(studio, /recordSkillInvocation/);
+  assert.match(studio, /本次实际使用的记忆、Skill 与资产/);
+  assert.match(studio, /promptOrder/);
   assert.match(horde, /Approved project skills and memory for this task/);
 });
 

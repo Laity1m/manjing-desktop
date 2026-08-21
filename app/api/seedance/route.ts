@@ -118,10 +118,10 @@ export async function POST(request: Request) {
       }
       if (accepted.length) {
         const bindings = accepted.map((reference) => {
-          const purpose = reference.role === "reference_video" ? "参考动作、镜头速度和上一镜时间连续性，不复制原剧情" : reference.role === "reference_audio" ? "锁定对应人物音色、年龄感、语速和口音" : "锁定对应人物身份与造型、场景、道具或全片风格";
+          const purpose = /尾帧派生多机位/.test(reference.name) ? "这是用户从多机位备选中选定的下一镜构图；其源尾帧来自上一镜实际生成视频，按选定的新景别或新角度完成动作内切，不退回原机位，不作为首帧控制" : reference.role === "reference_video" ? "参考动作、镜头速度和上一镜时间连续性，不复制原剧情" : reference.role === "reference_audio" ? "锁定对应人物音色、年龄感、语速和口音" : "锁定对应人物身份与造型、场景、道具或全片风格";
           return `${reference.token || "@Image1"} = ${reference.name}；用途：${purpose}`;
         }).join("\n");
-        text += `\n\n多模态资产绑定清单（必须逐项使用）：\n${bindings}\n所有图片都只作为 @Image 全能参考，绝不作为首帧控制。引用优先级：Canonical 人物身份与服装 > 场景和关键道具 > 全片风格 > 连续状态与动作参考。不得重新设计已绑定资产。`;
+        text += `\n\n多模态资产绑定清单（必须逐项使用）：\n${bindings}\n所有图片都只作为 @Image 全能参考，绝不作为 first_frame/last_frame 控制。标记为“尾帧派生多机位”的图片是用户从多个新景别/新角度画面中选定的下一镜构图；原始尾帧来自上一镜已批准生成视频的实际解码帧，但原始尾帧本身不直接提交本次视频。引用优先级：Canonical 人物身份与服装 > 用户选定多机位构图 > 场景和关键道具 > 全片风格 > 连续状态与动作参考。不得重新设计已绑定资产。`;
         content[0] = { type: "text", text };
       }
       const requestId = String(body.requestId || "").trim();

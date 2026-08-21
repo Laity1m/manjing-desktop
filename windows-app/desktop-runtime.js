@@ -925,10 +925,10 @@ async function invokeSeedance(input, fetchImpl = fetch) {
     }
     if (acceptedReferences.length && content[0]?.type === "text") {
       const bindings = acceptedReferences.map((reference) => {
-        const purpose = reference.role === "reference_audio" ? "只锁定该人物音色、年龄感、语速和口音，不改变画面" : reference.role === "reference_video" ? "只参考其动作、口型或运镜，不复制其剧情内容" : "严格锁定对应人物、服装、场景、道具或视觉风格";
+        const purpose = /尾帧派生多机位/.test(reference.name) ? "这是用户从多机位备选中选定的下一镜构图；其源尾帧来自上一镜实际生成视频，按选定的新景别或新角度完成动作内切，不退回原机位，不把它当首帧控制" : reference.role === "reference_audio" ? "只锁定该人物音色、年龄感、语速和口音，不改变画面" : reference.role === "reference_video" ? "只参考其动作、口型或运镜，不复制其剧情内容" : "严格锁定对应人物、服装、场景、道具或视觉风格";
         return `${reference.token || "@Image1"} = ${reference.name}；用途：${purpose}`;
       }).join("\n");
-      content[0].text += `\n\n多模态资产绑定清单（必须逐项使用，不得重新设计）：\n${bindings}\n所有图片都只是 @Image 全能参考，绝不作为首帧控制。若不同参考存在冲突，优先级为：Canonical人物身份与服装 > 全片固定风格 > Canonical场景和道具 > 连续状态与动作参考。禁止把动画人物真人化或把真人动画化；禁止新增参考中没有的耳饰、服装、人物或关键道具。`;
+      content[0].text += `\n\n多模态资产绑定清单（必须逐项使用，不得重新设计）：\n${bindings}\n所有图片都只是 @Image 全能参考，绝不作为 first_frame/last_frame 控制。标记为“尾帧派生多机位”的图片是用户从多个新景别/新角度画面中选定的下一镜构图；原始尾帧来自上一镜已批准生成视频的实际解码帧，但原始尾帧本身不直接提交本次视频。若不同参考存在冲突，优先级为：Canonical人物身份与服装 > 用户选定多机位构图 > 全片固定风格 > Canonical场景和道具 > 连续状态与动作参考。禁止把动画人物真人化或把真人动画化；禁止新增参考中没有的耳饰、服装、人物或关键道具。`;
     }
     const suppliedRequestId = String(input?.requestId || "").trim();
     const requestId = /^[a-z0-9-]{8,80}$/i.test(suppliedRequestId) ? suppliedRequestId : require("node:crypto").randomUUID();

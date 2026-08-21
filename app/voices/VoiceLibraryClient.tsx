@@ -18,6 +18,36 @@ function durationOf(file: File) {
   });
 }
 
+function VoicePreview({ url, name, onMessage }: { url?: string; name: string; onMessage: (message: string) => void }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => { setPlaying(false); setReady(false); setFailed(false); }, [url]);
+
+  async function toggle() {
+    const audio = audioRef.current;
+    if (!audio || !url) { onMessage(`“${name}”还没有可试听的音频，请重新上传或生成。`); return; }
+    if (!audio.paused) { audio.pause(); setPlaying(false); return; }
+    document.querySelectorAll<HTMLAudioElement>("audio[data-voice-preview]").forEach((item) => { if (item !== audio) item.pause(); });
+    try {
+      await audio.play();
+      setPlaying(true);
+      onMessage(`正在试听“${name}”`);
+    } catch (reason) {
+      setFailed(true);
+      onMessage(`“${name}”无法播放：${reason instanceof Error ? reason.message : "音频编码不受支持，请换成 MP3 或 WAV"}`);
+    }
+  }
+
+  return <div className={`voice-preview ${failed ? "failed" : ready ? "ready" : "loading"}`}>
+    <button type="button" onClick={() => void toggle()} disabled={!url}>{playing ? "暂停试听" : ready ? "▶ 试听音色" : url ? "正在加载音色…" : "暂无可试听音频"}</button>
+    {url && <audio ref={audioRef} data-voice-preview src={url} controls preload="auto" onCanPlay={() => { setReady(true); setFailed(false); }} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={() => { setFailed(true); setReady(false); onMessage(`“${name}”音频解码失败，请重新上传 MP3、WAV、M4A、OGG 或 WebM 音频。`); }} />}
+    <small>{failed ? "解码失败，可在下方重新上传替换" : ready ? "已就绪，可试听" : url ? "正在恢复本机音频" : "资产框架尚未绑定声音"}</small>
+  </div>;
+}
+
 export default function VoiceLibraryClient() {
   const router = useRouter();
   const [voices, setVoices] = useState<LibraryAsset[]>([]);
@@ -115,7 +145,7 @@ export default function VoiceLibraryClient() {
         <header><div><span>{group.id === "global" ? "PUBLIC" : "PROJECT"}</span><h2>{group.name}</h2><p>{group.id === "global" ? "所有项目都可以按人物名引用；仅上传你有权使用或克隆的声音。" : "由该项目剧本分析生成的人物音色框架和已确认音色。"}</p></div><b>{items.length} 项</b></header>
         {people.length ? people.map(([identity, personVoices]) => <section key={identity} className="voice-person-group" aria-label={`${identity}专属音色`}>
           <header><div><span>CHARACTER VOICE</span><h3>{identity}</h3><p>该人物在本项目中的音色版本；同一时间只使用一个 Canonical。</p></div><b>{personVoices.length} 个版本</b></header>
-          <div className="voice-card-grid">{personVoices.map((voice) => <article key={voice.id} className={voice.assetState === "placeholder" ? "placeholder" : "ready"}><div className="voice-card-head"><i>声</i><span><b>{voice.identityKey || voice.name}</b><small>{voice.lookName || "标准音色"} · {voice.assetState === "placeholder" ? "等待选择来源" : voice.canonical ? "Canonical" : "待确认"}</small></span></div>{previews[voice.id] && <audio src={previews[voice.id]} controls preload="metadata" />}<input value={voice.identityKey || ""} placeholder="人物名字" onChange={(event) => setVoices((current) => current.map((item) => item.id === voice.id ? { ...item, identityKey: event.target.value } : item))} onBlur={(event) => void edit(voice, { identityKey: event.target.value, entityId: event.target.value })} /><textarea value={voice.referenceText || ""} placeholder="参考音频中的准确台词" onChange={(event) => setVoices((current) => current.map((item) => item.id === voice.id ? { ...item, referenceText: event.target.value } : item))} onBlur={(event) => void edit(voice, { referenceText: event.target.value })} /><p>{voice.semanticDescription}</p>{voice.assetState === "placeholder" ? <div className="voice-source-actions"><label>上传已有音色<input type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg" onChange={(event) => { void bind(voice, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => generate(voice)}>让 AI 生成参考音色</button></div> : <div className="voice-source-actions"><button className={voice.canonical ? "active" : ""} onClick={() => void confirmVoice(voice)}>{voice.canonical ? "✓ 已确认 Canonical" : "确认授权并设为 Canonical"}</button><button onClick={() => void edit(voice, { voiceConsent: "revoked", reusable: false, canonical: false })}>撤销授权</button></div>}<ConfirmButton onConfirm={() => remove(voice)} disabled={busy} ariaLabel={`删除音色 ${voice.name}`} confirmLabel="确认删除">删除</ConfirmButton></article>)}</div>
+          <div className="voice-card-grid">{personVoices.map((voice) => <article key={voice.id} className={voice.assetState === "placeholder" ? "placeholder" : "ready"}><div className="voice-card-head"><i>声</i><span><b>{voice.identityKey || voice.name}</b><small>{voice.lookName || "标准音色"} · {voice.assetState === "placeholder" ? "等待选择来源" : voice.canonical ? "Canonical" : "待确认"}</small></span></div><VoicePreview url={previews[voice.id]} name={voice.identityKey || voice.name} onMessage={setMessage} /><input value={voice.identityKey || ""} placeholder="人物名字" onChange={(event) => setVoices((current) => current.map((item) => item.id === voice.id ? { ...item, identityKey: event.target.value } : item))} onBlur={(event) => void edit(voice, { identityKey: event.target.value, entityId: event.target.value })} /><textarea value={voice.referenceText || ""} placeholder="参考音频中的准确台词" onChange={(event) => setVoices((current) => current.map((item) => item.id === voice.id ? { ...item, referenceText: event.target.value } : item))} onBlur={(event) => void edit(voice, { referenceText: event.target.value })} /><p>{voice.semanticDescription}</p>{voice.assetState === "placeholder" ? <div className="voice-source-actions"><label>上传已有音色<input type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" onChange={(event) => { void bind(voice, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><button onClick={() => generate(voice)}>让 AI 生成参考音色</button></div> : <><div className="voice-source-actions"><button className={voice.canonical ? "active" : ""} onClick={() => void confirmVoice(voice)}>{voice.canonical ? "✓ 已确认 Canonical" : "确认授权并设为 Canonical"}</button><button onClick={() => void edit(voice, { voiceConsent: "revoked", reusable: false, canonical: false })}>撤销授权</button></div><label className="voice-replace-action">重新上传并替换<input type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" onChange={(event) => { void bind(voice, event.target.files?.[0]); event.currentTarget.value = ""; }} /></label></>}<ConfirmButton onConfirm={() => remove(voice)} disabled={busy} ariaLabel={`删除音色 ${voice.name}`} confirmLabel="确认删除">删除</ConfirmButton></article>)}</div>
         </section>) : <div className="voice-project-empty">这个分组还没有音色或音色框架。</div>}
       </section>;
     })}

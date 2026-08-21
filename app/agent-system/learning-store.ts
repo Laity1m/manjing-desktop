@@ -231,6 +231,7 @@ export type SkillInvocation = {
   projectId: string;
   itemIds: string[];
   itemTitles: string[];
+  itemKinds: LearningKind[];
   channel: string;
   createdAt: string;
 };
@@ -285,7 +286,7 @@ export function agentContext(agentId: string, limit = 20, projectId = "") {
   return resolveAgentContext({ agentId, limit, projectId }).items;
 }
 
-export function recordSkillInvocation(input: Omit<SkillInvocation, "id" | "createdAt" | "itemTitles" | "itemIds"> & { items: LearnedItem[] }) {
+export function recordSkillInvocation(input: Omit<SkillInvocation, "id" | "createdAt" | "itemTitles" | "itemIds" | "itemKinds"> & { items: LearnedItem[] }) {
   if (typeof window === "undefined" || !input.items.length) return;
   const record: SkillInvocation = {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -294,6 +295,7 @@ export function recordSkillInvocation(input: Omit<SkillInvocation, "id" | "creat
     projectId: input.projectId,
     itemIds: input.items.map((item) => item.id),
     itemTitles: input.items.map((item) => item.title),
+    itemKinds: input.items.map((item) => item.kind),
     channel: input.channel,
     createdAt: new Date().toISOString(),
   };
