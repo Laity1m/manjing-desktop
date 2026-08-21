@@ -66,19 +66,47 @@ test("projects a draggable 2.5D stage and camera into deterministic screen ancho
   assert.equal(after["乙"].x, before["乙"].x);
   assert.ok(after["甲"].bounds.xMin < after["甲"].bounds.xMax);
   assert.equal(layout.frozen, true);
+  assert.equal(layout.enabled, false);
+  assert.equal(layout.confirmed, false);
 });
 
-test("locks fixed scene objects with the cast and inherits them inside one environment", async () => {
-  const { assignSpatialLayouts, projectStageObjects } = await loadSpatialModule();
+test("does not mistake ordinary props for fixed stage anchors", async () => {
+  const { assignSpatialLayouts, spatialLayoutSummary } = await loadSpatialModule();
   const scenes = assignSpatialLayouts([
     { environmentKey: "study", characters: ["苏梨"], visual: "苏梨站在书桌旁 [道具:书桌,官印]" },
     { environmentKey: "study", characters: ["苏梨"], visual: "苏梨继续说话" },
   ]);
-  assert.ok(scenes[0].stageLayout.objects["书桌"]);
-  assert.ok(scenes[0].stageLayout.objects["官印"]);
+  assert.deepEqual(scenes[0].stageLayout.objects, {});
+  assert.deepEqual(scenes[1].stageLayout.objects, {});
+  assert.equal(spatialLayoutSummary(scenes[0]), "");
+});
+
+test("removes legacy auto-placed prop coordinates without activating draft positions", async () => {
+  const { assignSpatialLayouts, defaultStageLayout, spatialLayoutSummary } = await loadSpatialModule();
+  const legacy = defaultStageLayout(["苏梨"]);
+  delete legacy.version;
+  legacy.enabled = true;
+  legacy.confirmed = undefined;
+  legacy.objects = { "洗得发白的官服": { x: 0.5, y: 0.3, facing: 180, size: 1 } };
+  const [scene] = assignSpatialLayouts([{ environmentKey: "room", characters: ["苏梨"], visual: "苏梨在房内", stageLayout: legacy }]);
+  assert.deepEqual(scene.stageLayout.objects, {});
+  assert.equal(scene.stageLayout.confirmed, undefined);
+  assert.equal(spatialLayoutSummary(scene), "");
+});
+
+test("only a confirmed fixed-fixture layout is injected and inherited", async () => {
+  const { assignSpatialLayouts, defaultStageLayout, projectStageObjects, spatialLayoutSummary } = await loadSpatialModule();
+  const layout = defaultStageLayout(["苏梨"]);
+  layout.enabled = true;
+  layout.confirmed = true;
+  layout.objects["固定书桌"] = { x: 0.24, y: 0.36, facing: 180, size: 1 };
+  const scenes = assignSpatialLayouts([
+    { environmentKey: "study", characters: ["苏梨"], visual: "苏梨站在书桌旁 [固定物体:固定书桌]", stageLayout: layout },
+    { environmentKey: "study", characters: ["苏梨"], visual: "苏梨继续说话" },
+  ]);
   assert.deepEqual(scenes[1].stageLayout.objects, scenes[0].stageLayout.objects);
-  assert.equal(scenes[1].objectSpatialLayout["书桌"].x, scenes[0].objectSpatialLayout["书桌"].x);
-  const before = projectStageObjects(scenes[0].stageLayout)["书桌"].x;
-  scenes[0].stageLayout.objects["书桌"].x += 0.1;
-  assert.notEqual(projectStageObjects(scenes[0].stageLayout)["书桌"].x, before);
+  assert.match(spatialLayoutSummary(scenes[0]), /USER-CONFIRMED/);
+  const before = projectStageObjects(scenes[0].stageLayout)["固定书桌"].x;
+  scenes[0].stageLayout.objects["固定书桌"].x += 0.1;
+  assert.notEqual(projectStageObjects(scenes[0].stageLayout)["固定书桌"].x, before);
 });

@@ -2695,6 +2695,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   }
 
   function updateStageLayout(scene: Scene, layout: StageLayout) {
+    const names = new Set(scene.characters);
+    const stageLayout = { ...layout, actors: Object.fromEntries(Object.entries(layout.actors).filter(([name]) => names.has(name))), objects: { ...(layout.objects || {}) }, camera: { ...layout.camera } };
+    setScenes((items) => items.map((item) => item.id === scene.id ? { ...item, stageLayout, spatialLayout: projectStageLayout(stageLayout), objectSpatialLayout: projectStageObjects(stageLayout) } : item));
+    recordActivity("director", stageLayout.enabled && stageLayout.confirmed ? `已确认“${scene.title}”的 2.5D 舞台坐标；只作用于当前镜头` : `“${scene.title}”的 2.5D 坐标仍是草稿，不会提交给视频模型`, "done");
+    invalidateExport();
+  }
+
+  function applyStageLayoutToEnvironment(scene: Scene, layout: StageLayout) {
+    if (!layout.enabled || layout.confirmed !== true) return;
     const environment = String(scene.environmentKey || scene.environmentBible || scene.visual || scene.title).trim().toLocaleLowerCase("zh-CN");
     setScenes((items) => items.map((item) => {
       const itemEnvironment = String(item.environmentKey || item.environmentBible || item.visual || item.title).trim().toLocaleLowerCase("zh-CN");
@@ -2703,24 +2712,23 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const stageLayout = { ...layout, actors: Object.fromEntries(Object.entries(layout.actors).filter(([name]) => names.has(name))), objects: { ...(layout.objects || {}) }, camera: { ...layout.camera } };
       return { ...item, stageLayout, spatialLayout: projectStageLayout(stageLayout), objectSpatialLayout: projectStageObjects(stageLayout) };
     }));
-    recordActivity("director", `已更新“${scene.environmentKey || scene.title}”的 2.5D 舞台坐标与相机投影，并同步到同场景后续镜头`, "done");
+    recordActivity("director", `用户已把“${scene.environmentKey || scene.title}”的确认布局同步到同场景镜头`, "done");
     invalidateExport();
   }
 
   function stageObjectNamesForScene(scene: Scene) {
     const text = [scene.visual, scene.action, scene.startState, scene.endState].filter(Boolean).join(" ");
-    const labeled = labeledVisualAssets(text, "道具");
-    const analyzed = propAssets.filter((prop) => text.toLocaleLowerCase("zh-CN").includes(prop.name.toLocaleLowerCase("zh-CN"))).map((prop) => prop.name);
-    return [...new Set([...labeled, ...analyzed])].slice(0, 12);
+    const fixed: string[] = [];
+    for (const match of text.matchAll(/\[(?:固定物体|场景锚点|固定陈设|fixture)[：:]([^\]]+)\]/gi)) fixed.push(...String(match[1] || "").split(/[，,、]/));
+    return [...new Set(fixed.map((name) => name.trim()).filter(Boolean))].slice(0, 12);
   }
 
   function sceneWithFixedObjectAnchors(scene: Scene) {
     const names = stageObjectNamesForScene(scene);
     if (!names.length && !Object.keys(scene.stageLayout?.objects || {}).length) return scene;
-    const defaults = defaultStageLayout([], names).objects;
     const stageLayout = scene.stageLayout
-      ? { ...scene.stageLayout, actors: { ...scene.stageLayout.actors }, objects: { ...defaults, ...(scene.stageLayout.objects || {}) }, camera: { ...scene.stageLayout.camera } }
-      : defaultStageLayout(scene.characters, names);
+      ? { ...scene.stageLayout, actors: { ...scene.stageLayout.actors }, objects: { ...(scene.stageLayout.objects || {}) }, camera: { ...scene.stageLayout.camera } }
+      : defaultStageLayout(scene.characters);
     return { ...scene, stageLayout, spatialLayout: projectStageLayout(stageLayout), objectSpatialLayout: projectStageObjects(stageLayout) };
   }
 
@@ -7247,7 +7255,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label>
               <label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label>
               <label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label>
-              <StageLayoutEditor characters={selectedScene.characters} objects={stageObjectNamesForScene(selectedScene)} value={selectedScene.stageLayout} onChange={(layout) => updateStageLayout(selectedScene, layout)} />
+              <StageLayoutEditor characters={selectedScene.characters} objects={stageObjectNamesForScene(selectedScene)} value={selectedScene.stageLayout} onChange={(layout) => updateStageLayout(selectedScene, layout)} onApplyToEnvironment={(layout) => applyStageLayoutToEnvironment(selectedScene, layout)} />
               <div className="editor-grid"><label>2.5D 动态<select value={selectedScene.motion || "push"} onChange={(event) => updateScene(selectedScene.id, { motion: event.target.value as MotionPreset })}>{MOTION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>转场<select value={selectedScene.transition || "fade"} onChange={(event) => updateScene(selectedScene.id, { transition: event.target.value as TransitionPreset })}>{TRANSITION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>画面滤镜<select value={selectedScene.filter || "none"} onChange={(event) => updateScene(selectedScene.id, { filter: event.target.value as VisualFilter })}><option value="none">原色</option><option value="warm">暖调电影感</option><option value="cool">冷调悬疑</option><option value="mono">黑白漫画</option></select></label><label>字幕位置<select value={selectedScene.subtitlePosition || "bottom"} onChange={(event) => updateScene(selectedScene.id, { subtitlePosition: event.target.value as SubtitlePosition })}><option value="top">顶部</option><option value="center">中央</option><option value="bottom">底部</option></select></label></div>
               <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={15} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(15, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
               <div className="subtitle-switch"><div><b>显示本镜字幕</b><span>关闭后对白仍保留在剧本中</span></div><button className={`toggle ${selectedScene.subtitleEnabled !== false ? "on" : ""}`} onClick={() => updateScene(selectedScene.id, { subtitleEnabled: selectedScene.subtitleEnabled === false })}><i /></button></div>

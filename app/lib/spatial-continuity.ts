@@ -32,7 +32,10 @@ export type StageCamera = {
 };
 
 export type StageLayout = {
+  version?: 2;
   enabled: boolean;
+  /** True only after the user explicitly accepts the map. Inferred/default coordinates are drafts. */
+  confirmed?: boolean;
   frozen: boolean;
   actors: Record<string, StageActor>;
   objects: Record<string, StageObject>;
@@ -90,7 +93,9 @@ function clamp(value: number, minimum: number, maximum: number) {
 function scriptedObjectNames(scene: SpatialScene) {
   const text = [scene.visual, scene.action, scene.startState, scene.endState].filter(Boolean).join(" ");
   const values: string[] = [];
-  for (const match of text.matchAll(/\[道具[：:]([^\]]+)\]/gi)) values.push(...String(match[1] || "").split(/[，,、]/));
+  // Only immovable environment fixtures belong on the stage map. A normal prop,
+  // costume or handheld item is referenced by the video model but has no fixed world coordinate.
+  for (const match of text.matchAll(/\[(?:固定物体|场景锚点|固定陈设|fixture)[：:]([^\]]+)\]/gi)) values.push(...String(match[1] || "").split(/[，,、]/));
   return [...new Set(values.map(cleanName).filter(Boolean))].slice(0, 12);
 }
 
@@ -108,7 +113,7 @@ export function defaultStageLayout(characters: string[] = [], objects: string[] 
     facing: 180,
     size: 1,
   }]));
-  return { enabled: true, frozen: true, actors, objects: stageObjects, camera: { x: 0.5, y: 0.92, angle: -90, fieldOfView: 58, elevation: 0.18 } };
+  return { version: 2, enabled: false, confirmed: false, frozen: true, actors, objects: stageObjects, camera: { x: 0.5, y: 0.92, angle: -90, fieldOfView: 58, elevation: 0.18 } };
 }
 
 /** Converts a director's top-down stage map into normalized screen coordinates. */
@@ -184,11 +189,14 @@ export function assignSpatialLayouts<T extends SpatialScene>(scenes: T[]): T[] {
     const inheritedStage = scene.stageLayout || environmentStages.get(environment);
     const workingStage = inheritedStage ? {
       ...inheritedStage,
+      version: 2 as const,
       actors: { ...inheritedStage.actors },
-      objects: { ...(inheritedStage.objects || {}) },
+      // v1 created arbitrary prop coordinates automatically. Discard those
+      // legacy objects unless the whole map had been explicitly confirmed.
+      objects: inheritedStage.version === 2 || inheritedStage.confirmed === true ? { ...(inheritedStage.objects || {}) } : {},
       camera: { ...inheritedStage.camera },
     } : undefined;
-    if (workingStage?.enabled) {
+    if (workingStage?.enabled && workingStage.confirmed === true) {
       const missing = (scene.characters || []).map(cleanName).filter(Boolean).filter((name) => !workingStage.actors[name]);
       const occupied = Object.values(workingStage.actors).map((actor) => actor.x);
       const slots = [0.5, 0.36, 0.64, 0.22, 0.78, 0.43, 0.57];
@@ -245,21 +253,33 @@ export function assignSpatialLayouts<T extends SpatialScene>(scenes: T[]): T[] {
       occupied.push(x);
       registry.set(name, anchor);
     });
-    const stageLayout = stageLayoutFromSpatial(current);
-    stageLayout.objects = defaultStageLayout([], scriptedObjectNames(scene)).objects;
-    environmentStages.set(environment, stageLayout);
-    return { ...scene, stageLayout, spatialLayout: projectStageLayout(stageLayout), objectSpatialLayout: projectStageObjects(stageLayout) };
+    // Keep an unconfirmed per-shot draft if one exists, but never promote or
+    // inherit it as the environment truth. Only a user-confirmed layout enters
+    // environmentStages (handled by the active branch above).
+    const stageLayout = workingStage ? {
+      ...workingStage,
+      actors: {
+        ...Object.fromEntries(Object.entries(stageLayoutFromSpatial(current).actors)),
+        ...workingStage.actors,
+      },
+      objects: { ...(workingStage.objects || {}) },
+      camera: { ...workingStage.camera },
+    } : stageLayoutFromSpatial(current);
+    // Keep the textual/inherited anchor provenance while the stage is only a
+    // visual draft. Projection becomes authoritative only after confirmation.
+    return { ...scene, stageLayout, spatialLayout: current, objectSpatialLayout: {} };
   });
 }
 
 export function positionLockRequested(scene: SpatialScene) {
-  if (scene.stageLayout?.enabled && scene.stageLayout.frozen) return true;
+  if (scene.stageLayout?.enabled && scene.stageLayout.confirmed === true && scene.stageLayout.frozen) return true;
   const text = [scene.videoRevisionRequest, ...(scene.consistencyReport?.findings || [])].filter(Boolean).join(" ");
   return /(?:位置|站位|构图|左右关系|前后景|screen position).{0,24}(?:锁定|固定|不变|不要变|保持|按照|依照|一致|变动|变化|漂移)|(?:锁定|固定|保持|按照|依照).{0,24}(?:位置|站位|构图|左右关系|前后景)/i.test(text);
 }
 
 export function spatialLayoutSummary(scene: SpatialScene) {
-  const prefix = scene.stageLayout?.enabled ? `2.5D TOP-DOWN STAGE PROJECTION; camera=(x=${scene.stageLayout.camera.x.toFixed(2)}, y=${scene.stageLayout.camera.y.toFixed(2)}, angle=${scene.stageLayout.camera.angle.toFixed(0)}deg, FOV=${scene.stageLayout.camera.fieldOfView.toFixed(0)}deg); ` : "";
+  if (!scene.stageLayout?.enabled || scene.stageLayout.confirmed !== true) return "";
+  const prefix = `USER-CONFIRMED 2.5D TOP-DOWN STAGE PROJECTION; camera=(x=${scene.stageLayout.camera.x.toFixed(2)}, y=${scene.stageLayout.camera.y.toFixed(2)}, angle=${scene.stageLayout.camera.angle.toFixed(0)}deg, FOV=${scene.stageLayout.camera.fieldOfView.toFixed(0)}deg); `;
   const actors = Object.entries(scene.spatialLayout || {}).map(([name, anchor]) => `${name}: normalized center (x=${anchor.x.toFixed(2)}, y=${anchor.y.toFixed(2)}), scale=${anchor.scale.toFixed(2)}, allowed x=[${anchor.bounds.xMin.toFixed(2)},${anchor.bounds.xMax.toFixed(2)}], y=[${anchor.bounds.yMin.toFixed(2)},${anchor.bounds.yMax.toFixed(2)}], scale=[${anchor.bounds.scaleMin.toFixed(2)},${anchor.bounds.scaleMax.toFixed(2)}], ${anchor.depth}, facing ${anchor.facing}`).join(" | ");
   const objects = Object.entries(scene.objectSpatialLayout || {}).map(([name, anchor]) => `${name} FIXED OBJECT: center (x=${anchor.x.toFixed(2)}, y=${anchor.y.toFixed(2)}), apparent size=${anchor.scale.toFixed(2)}, allowed x=[${anchor.bounds.xMin.toFixed(2)},${anchor.bounds.xMax.toFixed(2)}], y=[${anchor.bounds.yMin.toFixed(2)},${anchor.bounds.yMax.toFixed(2)}], must not teleport, rotate, resize, duplicate or swap sides`).join(" | ");
   return prefix + [actors, objects].filter(Boolean).join(" || ");
