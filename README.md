@@ -68,7 +68,7 @@ v0.0.1 使用三层制作上下文：
 ## 安装
 
 1. 打开 [v0.0.1 Release](https://github.com/Laity1m/manjing-desktop/releases/tag/v0.0.1)。
-2. 下载 `漫镜-0.0.1-Windows-x64.exe`。
+2. 下载 `Manjing-0.0.1-Windows-x64.exe`。
 3. 安装后在“模型中心”配置自己的接口和密钥。
 4. 在“项目”中导入总剧本，选择剧集进入工作台。
 

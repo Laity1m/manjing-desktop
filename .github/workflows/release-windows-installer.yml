@@ -64,7 +64,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          $installer = Get-ChildItem -LiteralPath "windows-app/release" -Filter "漫镜-0.0.1-Windows-x64.exe" |
+          $installer = Get-ChildItem -LiteralPath "windows-app/release" -Filter "Manjing-0.0.1-Windows-x64.exe" |
             Where-Object { $_.Name -notlike "*uninstaller*" } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1

@@ -6,7 +6,7 @@
 
 ## 下载
 
-下载 Release Assets 中的 `漫镜-0.0.1-Windows-x64.exe`。
+下载 Release Assets 中的 `Manjing-0.0.1-Windows-x64.exe`。
 
 ## 本版本重点
 
