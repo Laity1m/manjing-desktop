@@ -552,7 +552,7 @@ async function invokeMcp(input, fetchImpl = fetch) {
   if (!endpoint) throw Object.assign(new Error("MCP 需要填写 HTTPS 地址或本机 localhost 地址"), { statusCode: 400 });
   const apiKey = String(input?.apiKey || "").trim();
   let sessionId = "";
-  const initialized = await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "manjing-desktop", version: "1.4.5" } } }, sessionId, fetchImpl);
+  const initialized = await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "manjing-desktop", version: "0.0.1" } } }, sessionId, fetchImpl);
   sessionId = initialized.sessionId;
   try { await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId, fetchImpl); } catch {}
   const listed = await mcpRequest(endpoint, apiKey, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId, fetchImpl);

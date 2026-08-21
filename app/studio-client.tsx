@@ -1,10 +1,10 @@
 "use client";
 
-import { appendSeriesProductionRecord, completeSeriesEpisode, isGenericNonAssetCharacter, isNonCharacterLabel } from "./lib/series-project";
+import { appendSeriesProductionRecord, completeSeriesEpisode, isGenericNonAssetCharacter, isNonCharacterLabel, recordSeriesShotEvent, syncSeriesNarrativeMemory } from "./lib/series-project";
 
 import StudioProjectBinding from "./components/StudioProjectBinding";
 
-import { agentContext, markContextUsed } from "./agent-system/learning-store";
+import { recordSkillInvocation, resolveAgentContext } from "./agent-system/learning-store";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -641,9 +641,12 @@ const IMAGE_SKILLS_BY_PURPOSE: Record<ImageSkillPurpose, string[]> = {
 
 function configuredImageSkillPrompt(purpose: ImageSkillPurpose) {
   const wanted = new Set(IMAGE_SKILLS_BY_PURPOSE[purpose]);
-  const skills = agentContext("image", 250).filter((item) => wanted.has(item.id));
+  const resolution = resolveAgentContext({ agentId: "image", task: `image_${purpose}`, limit: 50, maxCharacters: 30000 });
+  const skills = resolution.items.filter((item) => wanted.has(item.id));
   return {
     ids: skills.map((item) => item.id),
+    skills,
+    projectId: resolution.projectId,
     content: skills.map((item) => item.content.trim()).filter(Boolean).join("\n"),
   };
 }
@@ -652,7 +655,7 @@ function characterSheetPrompt(styleName: string, character: Pick<CharacterAsset,
   const identity = String(character.identityName || character.name).trim();
   const look = characterAssetNaming(character).lookName;
   const aesthetic = configuredImageSkillPrompt("character");
-  if (aesthetic.ids.length) markContextUsed(aesthetic.ids);
+  recordSkillInvocation({ agentId: "image", task: "image_character", projectId: aesthetic.projectId, channel: "image-prompt", items: aesthetic.skills });
   return `Create one polished 16:9 production Canonical character card for ${identity}, role: ${character.role}. Current episode look: ${look}. Script facts: ${character.appearance}. Visual medium: ${characterVisualPrompt(styleName)}. ${screenCastingBeautyContract(styleName)} ${characterAestheticDirection(styleName)}. Curated facial design ${stableReuseToken(identity)}: ${characterFaceSignature(identity)}. ${aesthetic.content || "角色必须好看、耐看、符合剧情身份且不与其他角色同脸。"}
 
 FIXED FOUR-ZONE LAYOUT: pure white seamless background, flat even studio illumination, no cast shadow and no environmental distraction. The left 35%-40% of the canvas is one large eye-level strict frontal head-and-shoulders portrait: complete clear facial features, direct focused gaze, relaxed neutral expression, both eyes and both jaw sides visible, face sharp and unobstructed. The right 60%-65% is a vertically ordered three-view turnaround of the exact same person: top = front full-body, middle = 45-degree side full-body, bottom = back full-body. Every full-body view uses the same natural slight T-pose, same height and head-to-body ratio, complete hands and feet, no cropping, no action pose and no perspective distortion. All four zones must depict one identity with identical age, skin tone, skull and hair silhouette, hairline, hairstyle and exact ${look} costume construction, colors, materials and accessories. The frontal close-up is the facial identity authority; relative face attention priority 1.2. The three-view turnaround is the body, hair and costume authority; relative multiview attention priority 1.05. Provider guidance must remain at or below 1.5; these are relative workflow priorities and must not be serialized as unsupported API fields. Use refined color harmony, believable materials and natural anatomy. No extra person, alternate face, left-right inconsistency, head tilt, hair over an eye, hand near face, props, scenery, furniture, text, watermark, labels, border decoration, chibi proportions or cropped limbs. Different cast members must differ in skull silhouette, eyes, nose, mouth, brows, age rhythm and primary memory feature. Extreme high/low-angle or rear three-quarter shots still require an additional matching-angle user reference; this card reduces drift but cannot guarantee engine-level identity invariance.`;
@@ -1493,6 +1496,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const next = { ...memory, updatedAt: new Date().toISOString() };
     setScriptMemory(next);
     try { window.localStorage.setItem(`manjing-script-memory-v1:${activeAssetProjectId()}`, JSON.stringify(next)); } catch { /* Current state still retains the memory. */ }
+    const seriesContext = activeSeriesContext();
+    if (seriesContext.projectId) syncSeriesNarrativeMemory(seriesContext.projectId, memory);
     return next;
   }
 
@@ -2050,6 +2055,19 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setActivityLog((items) => [{ id: uid(), role, message, state, time: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) }, ...items].slice(0, 30));
   }
 
+  useEffect(() => {
+    const showSkillUsage = (event: Event) => {
+      const detail = (event as CustomEvent<{ agentId?: string; task?: string; itemTitles?: string[] }>).detail;
+      const role = detail?.agentId as AgentRole;
+      if (!AGENT_ROLES.some((item) => item.id === role) || !detail.itemTitles?.length) return;
+      const names = detail.itemTitles.slice(0, 3).join("、");
+      const overflow = detail.itemTitles.length > 3 ? ` 等 ${detail.itemTitles.length} 项` : "";
+      recordActivity(role, `本次“${detail.task || "任务"}”实际调用 Skill/记忆：${names}${overflow}`, "done");
+    };
+    window.addEventListener("manjing-skill-invocation", showSkillUsage);
+    return () => window.removeEventListener("manjing-skill-invocation", showSkillUsage);
+  }, []);
+
   function invalidateExport() {
     if (exportUrl) URL.revokeObjectURL(exportUrl);
     setExportUrl("");
@@ -2576,11 +2594,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function customApiText(role: "director" | "writer" | "prompt" | "editor", payload: Record<string, unknown>) {
     const config = agentConfigs[role];
-    // The prompt controller already receives a curated skill summary in its system
-    // prompt. Appending the full skill bodies again can multiply the request size and
-    // make otherwise healthy OpenAI-compatible endpoints miss the UI deadline.
-    const learned = payload.task === "compile_video_prompt" ? [] : agentContext(role).slice(0, 8);
-    const learnedContext = learned.length ? `\n\n以下是用户已审核启用的岗位技能与记忆，请在适用时运用，并避免机械照抄：\n${learned.map((item) => `- [${item.kind === "skill" ? "技能" : "记忆"}] ${item.title}：${item.content.slice(0, 1200)}`).join("\n")}` : "";
+    const task = String(payload.task || "text_generation");
+    const skillsInjected = payload.skillsInjected === true;
+    const resolution = skillsInjected ? { items: [], text: "", projectId: activeAssetProjectId() } : resolveAgentContext({ agentId: role, task, projectId: activeAssetProjectId(), query: `${String(payload.system || "")} ${String(payload.prompt || "")}`, limit: 8, maxCharacters: 10000 });
+    const learnedContext = resolution.text ? `\n\n以下是本项目当前任务实际检索到的岗位技能与记忆，请在适用时运用，并避免机械照抄：\n${resolution.text}` : "";
     if (!CUSTOM_TEXT_ADAPTERS.includes(config.adapter)) throw new Error(`${agentName(role)}不支持当前文本任务`);
     if (!validAgentEndpoint(config.endpoint)) throw new Error(`${agentName(role)}需要填写 HTTPS API 地址或本机 localhost 地址`);
     const response = await fetch("/api/desktop/invoke", {
@@ -2602,13 +2619,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const data = await response.json() as { text?: string };
     const text = data.text;
     if (!text) throw new Error(`${agentName(role)}没有返回文本结果`);
-    markContextUsed(learned.map((item) => item.id));
+    recordSkillInvocation({ agentId: role, task, projectId: resolution.projectId, channel: config.adapter, items: resolution.items });
     return text;
   }
 
   async function webhookMedia(role: "image" | "video" | "voice", payload: Record<string, unknown>) {
     const memoryRole = role === "image" ? "director" : role;
-    const learned = agentContext(memoryRole).slice(0, 8).map((item) => ({ type: item.kind, title: item.title, content: item.content }));
+    const resolution = resolveAgentContext({ agentId: memoryRole, task: `${role}_generation`, projectId: activeAssetProjectId(), query: JSON.stringify(payload).slice(0, 5000), limit: 8, maxCharacters: 9000 });
+    const learned = resolution.items.map((item) => ({ type: item.kind, title: item.title, content: item.content }));
     const learnedPayload = learned.length ? { ...payload, agentLearning: learned } : payload;
     if (role === "video" && (/^agnes-video-/i.test(agentConfigs.video.model) || /agnes-ai\.com/i.test(agentConfigs.video.endpoint))) {
       const response = await fetch("/api/desktop/video", {
@@ -2624,6 +2642,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (!mediaResponse.ok) throw new Error("Agnes generated the video, but the download failed");
       const blob = await mediaResponse.blob();
       if (!blob.type.startsWith("video/")) throw new Error("Agnes returned a non-video file");
+      recordSkillInvocation({ agentId: memoryRole, task: `${role}_generation`, projectId: resolution.projectId, channel: "agnes-webhook", items: resolution.items });
       return { url: URL.createObjectURL(blob), blob, remoteUrl: data.videoUrl || "" };
     }
     const response = await callAgentWebhook(role, learnedPayload);
@@ -2641,16 +2660,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
     const expected = role === "image" ? "image/" : role === "video" ? "video/" : "audio/";
     if (!blob.type.startsWith(expected)) throw new Error(`${agentName(role)}返回的文件类型不正确`);
+    recordSkillInvocation({ agentId: memoryRole, task: `${role}_generation`, projectId: resolution.projectId, channel: "webhook", items: resolution.items });
     return { url: URL.createObjectURL(blob), blob, remoteUrl };
   }
 
   async function startHorde(action: "story" | "director" | "assets" | "image", payload: Record<string, unknown>) {
+    const role = String(payload.role || (action === "director" ? "director" : action === "image" ? "image" : "writer"));
+    const resolution = resolveAgentContext({ agentId: role, task: `horde_${action}`, projectId: activeAssetProjectId(), query: `${String(payload.story || "")} ${String(payload.prompt || "")}`, limit: 6, maxCharacters: 6000 });
     const response = await fetch("/api/horde", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, ...payload }),
+      body: JSON.stringify({ action, ...payload, skillContext: resolution.text }),
     });
     if (!response.ok) throw new Error(await responseError(response));
+    recordSkillInvocation({ agentId: role, task: `horde_${action}`, projectId: resolution.projectId, channel: "horde", items: resolution.items });
     return (await response.json()) as { id: string; kind: "text" | "image" };
   }
 
@@ -2674,9 +2697,11 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     throw new Error(options.timeoutMessage || "生成等待超时，请稍后重试");
   }
 
-  async function pollinationsText(role: "director" | "writer" | "prompt" | "editor", system: string, user: string) {
+  async function pollinationsText(role: "director" | "writer" | "prompt" | "editor", system: string, user: string, task = "text_generation", skillsInjected = false) {
     const key = agentKey(role);
     if (!key.startsWith("pk_")) throw new Error(`${agentName(role)}需要 Pollinations 发布密钥`);
+    const resolution = skillsInjected ? { items: [], text: "", projectId: activeAssetProjectId() } : resolveAgentContext({ agentId: role, task, projectId: activeAssetProjectId(), query: `${system} ${user}`, limit: 8, maxCharacters: 10000 });
+    const resolvedSystem = resolution.text ? `${system}\n\n本项目为当前任务检索到的岗位技能与记忆：\n${resolution.text}` : system;
     const response = await fetch("https://gen.pollinations.ai/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
@@ -2686,7 +2711,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         safe: true,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: system },
+          { role: "system", content: resolvedSystem },
           { role: "user", content: user },
         ],
       }),
@@ -2695,6 +2720,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = data.choices?.[0]?.message?.content;
     if (!content) throw new Error("云端模型没有返回剧本");
+    recordSkillInvocation({ agentId: role, task, projectId: resolution.projectId, channel: "pollinations", items: resolution.items });
     return content;
   }
 
@@ -3200,19 +3226,20 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       recordActivity("prompt", `镜头 ${sceneIndex + 1} 已由本地镜头总控完成资产绑定与提示词编译`, "done");
       return `${deterministic} Voice direction: ${vocalDirection}`;
     }
-    const learned = agentContext("prompt").slice(0, 6);
+    const promptResolution = resolveAgentContext({ agentId: "prompt", task: "compile_video_prompt", projectId: activeAssetProjectId(), query: `${scene.title} ${scene.visual} ${scene.action} ${scene.camera}`, limit: 6, maxCharacters: 7000 });
+    const learned = promptResolution.items;
     const system = `你是漫镜的镜头总控 Agent，位于导演与视频 Agent 之间。你不改写剧情，只负责绑定 Canonical 资产、继承 Start/End State、整合表演与运镜，并针对目标视频模型编译最终提示词。只返回 JSON：{"prompt":"最终视频提示词","negativePrompt":"必须避免的问题","assetBindings":["实际使用的资产ID"],"continuityCheck":"状态继承检查"}。提示词必须是一个连续镜头，禁止虚构未提供的资产。${learned.length ? `\n已启用技能：\n${learned.map((item) => `- ${item.title}：${item.content.slice(0, 900)}`).join("\n")}` : ""}`;
     const user = JSON.stringify({ targetAdapter: agentConfigs.video.adapter, targetModel: agentConfigs.video.model, duration: scene.duration, aspect, styleBible, productionStandard: { transitionRule: continuityRule, physicalContinuity, performanceLock, identityReanchor, spatialReanchor, frameContinuityMode, frameContinuityTradeoff, motionTreatment: cameraPlan, colorContinuity: "strongly preserve style, exposure, white balance, contrast and saturation; verify drift during review", stateHandoffSeconds: 0.5 }, shot: { title: scene.title, visual: scene.visual, action: scene.action, camera: cameraPlan, continuity: scene.continuity, startState: scene.startState || previousScene?.endState, endState: scene.endState, speaker: scene.speaker, dialogue: scene.dialogue, voiceMode: voiceover.mode, emotion: scene.emotion }, assetBindings, deterministicFallback: deterministic });
     try {
       setStatusText(`${agentName("prompt")}正在为镜头 ${sceneIndex + 1} 绑定资产并编译最终提示词`);
       const raw = CUSTOM_TEXT_ADAPTERS.includes(config.adapter)
-        ? await withStageTimeout(customApiText("prompt", { task: "compile_video_prompt", system, prompt: user }), 195000, "镜头总控等待超过 195 秒")
-        : await withStageTimeout(pollinationsText("prompt", system, user), 120000, "镜头总控等待超过 120 秒");
+        ? await withStageTimeout(customApiText("prompt", { task: "compile_video_prompt", system, prompt: user, skillsInjected: true }), 195000, "镜头总控等待超过 195 秒")
+        : await withStageTimeout(pollinationsText("prompt", system, user, "compile_video_prompt", true), 120000, "镜头总控等待超过 120 秒");
       const jsonText = raw.replace(/```json/gi, "").replace(/```/g, "").match(/\{[\s\S]*\}/)?.[0] || raw;
       const parsed = JSON.parse(jsonText) as { prompt?: string; negativePrompt?: string };
       const compiled = String(parsed.prompt || "").trim();
       if (!compiled) throw new Error("镜头总控没有返回最终提示词");
-      markContextUsed(learned.map((item) => item.id));
+      recordSkillInvocation({ agentId: "prompt", task: "compile_video_prompt", projectId: promptResolution.projectId, channel: config.adapter, items: learned });
       recordActivity("prompt", `镜头 ${sceneIndex + 1} 的资产、状态和运镜提示词已编译`, "done");
       return `${styleBible} ${performanceLock} ${identityReanchor} ${spatialReanchor} ${frameContinuityTradeoff} ${priorFailureConstraints} ${compiled}${parsed.negativePrompt ? ` Avoid: ${parsed.negativePrompt}` : ""} Avoid: ${styleNegative}. Voice direction: ${vocalDirection}. Physical continuity constraints: ${physicalContinuity}`;
     } catch (reason) {
@@ -3958,6 +3985,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     setStatusText("LibTV 正在建立完整漫剧项目");
     recordActivity("director", "LibTV 总控开始拆解故事与制作目标");
     recordActivity("writer", "LibTV 编剧开始生成剧本、分镜和提示词");
+    const libtvSkillResolutions = (["director", "writer", "prompt", "image", "video", "voice", "editor"] as AgentRole[]).map((role) => ({ role, resolution: resolveAgentContext({ agentId: role, task: "libtv_full_production", projectId: activeAssetProjectId(), query: `${projectTitle} ${story} ${style}`, limit: 2, maxCharacters: 2400 }) }));
+    const libtvSkillBrief = libtvSkillResolutions.flatMap(({ role, resolution }) => resolution.items.map((item) => `[${agentName(role)}] ${item.title}：${item.content.slice(0, 600)}`)).join("\n");
     const message = [
       "请生成一部完整、真正会动的 AI 漫剧，不要只生成静态漫画。",
       `项目标题：${projectTitle || "漫镜作品"}`,
@@ -3969,6 +3998,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         ? "请完成剧本、固定角色设定、连续分镜、角色一致性图片、人物动态视频、中文配音、字幕、配乐和剪辑成片。人物说话时口型与配音同步。"
         : `不要生成任何人物对白、旁白或人声音轨；输出无配音成片。${bgmEnabled ? "可以保留无歌词背景音乐和环境音。" : "同时不要生成背景音乐。"}`,
       "镜头必须有动作、表情、运镜和连续表演。输出完整视频，并保留可下载的中间图片和视频素材。",
+      libtvSkillBrief ? `当前项目为各岗位实际检索到的 Skill/记忆：\n${libtvSkillBrief}` : "",
     ].join("\n");
     try {
       const created = await fetch("/api/libtv", {
@@ -3977,6 +4007,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
         body: JSON.stringify({ action: "create", accessKey: libtvAccessKey.trim(), message }),
       });
       if (!created.ok) throw new Error(await responseError(created));
+      for (const { role, resolution } of libtvSkillResolutions) recordSkillInvocation({ agentId: role, task: "libtv_full_production", projectId: resolution.projectId, channel: "libtv", items: resolution.items });
       const task = await created.json() as { sessionId?: string; projectUrl?: string };
       if (!task.sessionId) throw new Error("LibTV 没有返回任务编号");
       setLibtvSessionId(task.sessionId);
@@ -5231,6 +5262,26 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       });
       if (voiceEnabled && sceneVoiceover(scene).mode === "onscreen_dialogue" && !canonicalVoiceAudioRef.current.has(sceneVoiceover(scene).speaker)) {
         await extractGeneratedVideoVoice(scene, scene.candidateVideoUrl).catch((reason) => { recordActivity("voice", `“${scene.title}”批准后音色提取失败：${reason instanceof Error ? reason.message : "音轨不可读"}`, "warning"); return null; });
+      }
+      const seriesContext = activeSeriesContext();
+      if (seriesContext.projectId) {
+        const depthValue = (value?: SpatialAnchor["depth"]) => value === "foreground" ? 0.25 : value === "background" ? 0.75 : 0.5;
+        recordSeriesShotEvent(seriesContext.projectId, {
+          episodeId: seriesContext.episodeId,
+          episodeNumber: seriesContext.episodeNumber,
+          shotId: scene.id,
+          shotTitle: scene.title,
+          environmentKey: scene.environmentKey || "",
+          characters: scene.characters.map((name) => {
+            const anchor = scene.spatialLayout?.[name];
+            return { name, lookName: scene.characterLooks?.[name] || "基础版", ...(anchor ? { position: { x: anchor.x, y: anchor.y, depth: depthValue(anchor.depth) }, facing: anchor.facing } : {}) };
+          }),
+          props: labeledVisualAssets(`${scene.visual} ${scene.action}`, "道具"),
+          action: scene.action,
+          endState: scene.endState || scene.action,
+          approvedVideoAssetId: approvedAssetId,
+        });
+        recordActivity("director", `已把“${scene.title}”的人物位置、造型、道具和结束状态写入项目事件账本`, "done");
       }
       recordActivity("director", `“${scene.title}”待复核候选已由用户人工批准并进入成片`, "warning");
       const nextPlan = planSequentialVideo(scenes.map((item) => item.id === scene.id ? { ...item, videoUrl: scene.candidateVideoUrl, candidateVideoUrl: undefined, videoReviewDecision: "approved" as const, status: "ready" } : item));

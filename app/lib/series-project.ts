@@ -40,6 +40,21 @@ export type SeriesProductionRecord = {
   status: "completed" | "failed";
 };
 
+export type SeriesShotEvent = {
+  id: string;
+  episodeId?: string;
+  episodeNumber?: number;
+  shotId: string;
+  shotTitle: string;
+  environmentKey: string;
+  characters: Array<{ name: string; lookName: string; position?: { x: number; y: number; depth: number }; facing?: string }>;
+  props: string[];
+  action: string;
+  endState: string;
+  approvedVideoAssetId?: string;
+  approvedAt: string;
+};
+
 export type SeriesProject = {
   version: 1;
   id: string;
@@ -51,6 +66,7 @@ export type SeriesProject = {
   episodes: SeriesEpisode[];
   characters: SeriesCharacter[];
   memories: SeriesMemory[];
+  events?: SeriesShotEvent[];
   productions?: SeriesProductionRecord[];
 };
 
@@ -202,6 +218,40 @@ export function appendSeriesProductionRecord(projectId: string, record: Omit<Ser
   saveSeriesProjects(next);
 }
 
+export function recordSeriesShotEvent(projectId: string, event: Omit<SeriesShotEvent, "id" | "approvedAt">) {
+  if (!projectId.trim() || !event.shotId.trim()) return;
+  const projects = loadSeriesProjects();
+  const now = new Date().toISOString();
+  const next = projects.map((project) => {
+    if (project.id !== projectId) return project;
+    const record: SeriesShotEvent = { ...event, id: uid("event"), approvedAt: now };
+    const existing = (project.events || []).filter((item) => !(item.episodeId === event.episodeId && item.shotId === event.shotId));
+    return { ...project, updatedAt: now, events: [record, ...existing].slice(0, 500) };
+  });
+  saveSeriesProjects(next);
+}
+
+export function syncSeriesNarrativeMemory(projectId: string, memory: { synopsis: string; background: string }) {
+  if (!projectId.trim()) return;
+  const projects = loadSeriesProjects();
+  const now = new Date().toISOString();
+  const next = projects.map((project) => {
+    if (project.id !== projectId) return project;
+    const upsert = (items: SeriesMemory[], title: string, type: SeriesMemory["type"], content: string) => {
+      const normalized = content.trim();
+      if (!normalized) return items;
+      const existing = items.findIndex((item) => item.title === title);
+      if (existing >= 0) return items.map((item, index) => index === existing ? { ...item, content: normalized, locked: true } : item);
+      return [...items, { id: uid("memory"), type, title, content: normalized, locked: true }];
+    };
+    let memories = project.memories;
+    memories = upsert(memories, "AI确认剧本简介", "background", memory.synopsis);
+    memories = upsert(memories, "AI确认背景故事与世界记忆", "background", memory.background);
+    return { ...project, updatedAt: now, memories };
+  });
+  saveSeriesProjects(next);
+}
+
 export function completeSeriesEpisode(projectId: string, episodeId: string | undefined, endState: string) {
   if (!projectId.trim() || !episodeId?.trim()) return;
   const projects = loadSeriesProjects();
@@ -236,6 +286,7 @@ export function saveSeriesProjects(projects: SeriesProject[]) {
 export function buildEpisodeContext(project: SeriesProject, episode: SeriesEpisode) {
   const previous = project.episodes.filter((item) => item.number < episode.number).sort((a, b) => b.number - a.number)[0];
   const names = project.characters.filter((item) => episode.content.includes(item.name));
+  const relevantEvents = (project.events || []).filter((item) => item.episodeId === episode.id || (previous && item.episodeId === previous.id)).slice(0, 24);
   return [
     `系列项目：${project.name}`,
     `当前制作：第 ${episode.number} 集 · ${episode.title}`,
@@ -244,6 +295,8 @@ export function buildEpisodeContext(project: SeriesProject, episode: SeriesEpiso
     "【本集相关角色圣经】",
     ...(names.length ? names : project.characters.slice(0, 8)).map((item) => `${item.name}：${item.description}；关系：${item.relationship}`),
     previous ? `【上一集结束状态】\n${previous.endState}` : "【上一集结束状态】\n首集，按项目 Canonical 资产建立初始状态",
+    "【已批准制作事件账本】",
+    ...(relevantEvents.length ? relevantEvents.map((item) => `${item.episodeNumber ? `第${item.episodeNumber}集` : "本项目"} ${item.shotTitle}：场景=${item.environmentKey || "未指定"}；人物=${item.characters.map((character) => `${character.name}/${character.lookName}`).join("、") || "无"}；动作=${item.action}；结束=${item.endState}`) : ["尚无已批准镜头事件，按剧本和 Canonical 资产建立初始状态"]),
     "【本集完整剧本】",
     episode.content,
   ].join("\n\n");

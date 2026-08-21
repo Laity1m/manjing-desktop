@@ -23,6 +23,8 @@ const eslintConfig = defineConfig([
     "dist/**",
     ".wrangler/**",
     "windows-app/release/**",
+    "windows-app/release-*/**",
+    ".vendor-review/**",
     "next-env.d.ts",
   ]),
 ]);

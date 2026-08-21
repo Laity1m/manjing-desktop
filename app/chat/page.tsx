@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import SiteNav from "../components/SiteNav";
-import { AGENT_PROFILES, type LearnedItem, agentContext, createLearnedItem, markContextUsed, mergeLearnedItems, readLearnedItems, writeLearnedItems } from "../agent-system/learning-store";
+import { AGENT_PROFILES, type LearnedItem, createLearnedItem, mergeLearnedItems, readLearnedItems, recordSkillInvocation, resolveAgentContext, writeLearnedItems } from "../agent-system/learning-store";
 
 type Message = { from: "user" | "agent"; text: string; error?: boolean };
 type AgentChats = Record<string, Message[]>;
@@ -162,7 +162,8 @@ export default function ChatPage() {
     setBusy(true);
     const controller = new AbortController();
     requestControllerRef.current = controller;
-    const used = agentContext(agentId).filter((item) => item.status === "approved" && item.enabled).slice(0, 10);
+    const resolution = resolveAgentContext({ agentId, task: "agent_chat", query: value, limit: 10, maxCharacters: 10000 });
+    const used = resolution.items;
     const config = conversationConfig(agentId, readAgentConfigs());
     const history = messages.slice(-12).map((item) => `${item.from === "user" ? "用户" : agent.name}：${item.text}`).join("\n");
     const learned = used.length ? used.map((item) => `- [${item.kind === "skill" ? "技能" : "记忆"}] ${item.title}：${item.content.slice(0, 1200)}`).join("\n") : "暂无已启用的岗位技能或长期记忆。";
@@ -181,7 +182,7 @@ export default function ChatPage() {
       const targets = agentId === "producer" ? dispatchProducerKnowledge(value) : [];
       const dispatchNote = targets.length ? `\n\n已派送到：${targets.join("、")}。你可以在“技能与记忆”中编辑、停用或删除。` : "";
       saveMessages([...pending, { from: "agent", text: `${data.text.trim()}${dispatchNote}` }]);
-      markContextUsed(used.map((item) => item.id));
+      recordSkillInvocation({ agentId, task: "agent_chat", projectId: resolution.projectId, channel: config.adapter || "chat", items: used });
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === "AbortError") {
         saveMessages([...pending, { from: "agent", text: "本次回复已停止。你可以修改问题后继续发送。" }]);

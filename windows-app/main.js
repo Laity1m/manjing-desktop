@@ -34,7 +34,7 @@ protocol.registerSchemesAsPrivileged([
 
 // 默认保留 GPU 加速以保证视频预览、Canvas 合成与多路解码性能。
 // 极少数旧显卡或远程桌面白屏时，可显式传入 --software-rendering 启动兼容模式。
-if (process.platform === "win32" && process.argv.includes("--software-rendering")) {
+if (process.platform === "win32" && (isTest || process.argv.includes("--software-rendering"))) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("disable-gpu-compositing");

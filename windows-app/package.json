@@ -24,7 +24,7 @@
   "build": {
     "appId": "com.manjing.desktop",
     "productName": "漫镜",
-    "artifactName": "漫镜-${version}-企业可信人物自动接入-${arch}.${ext}",
+    "artifactName": "漫镜-${version}-Windows-${arch}.${ext}",
     "asar": true,
     "compression": "maximum",
     "directories": {

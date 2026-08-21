@@ -1,5 +1,5 @@
 const HORDE_API = "https://aihorde.net/api/v2";
-const CLIENT_AGENT = "ManjingStudio-Windows:2.1:desktop";
+const CLIENT_AGENT = "ManjingStudio-Windows:0.0.1:desktop";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function json(data: unknown, status = 200) {
@@ -53,6 +53,8 @@ export async function POST(request: Request) {
     const body = (await request.json()) as Record<string, unknown>;
     const action = body.action;
     const story = String(body.story || "").trim().slice(0, action === "assets" ? 12000 : 1200);
+    const skillContext = String(body.skillContext || "").trim().slice(0, 6000);
+    const skillInstruction = skillContext ? `Approved project skills and memory for this task:\n${skillContext}` : "";
 
     if (action === "assets") {
       if (story.length < 8) return json({ error: "剧本至少需要 8 个字" }, 400);
@@ -62,6 +64,7 @@ export async function POST(request: Request) {
         "Exclude narrators, voice-over-only speakers, generic crowds, ordinary furniture, and incidental decoration unless the script gives them visual story importance.",
         "Do not generate images. Return ONLY one minified JSON object, no markdown.",
         'Use compact schema: {"c":[{"n":"name","r":"role","a":"fixed visible age, face, hair, clothing and state","why":"asset reason"}],"p":[{"n":"name","d":"fixed shape, material, color, scale and state","level":"hero|recurring|story","why":"asset reason"}]}',
+        skillInstruction,
         `Screenplay:\n${story}`,
       ].join("\n");
       const requestedModel = String(body.model || "").trim().slice(0, 160);
@@ -93,6 +96,7 @@ export async function POST(request: Request) {
         "Return ONLY one minified JSON object on a single line. Use Simplified Chinese. No markdown and no explanation.",
         "Keep every value concise. Use at most 2 characters. Establish fixed appearances, dramatic conflict, concrete acting and a closing hook.",
         'Compact schema: {"t":"标题","m":"配乐","c":[{"n":"姓名","r":"身份","a":"外观","v":"nova"}],"s":[{"t":"镜头","c":["姓名"],"h":"景别","v":"场景","a":"动作","k":"运镜","p":"说话者","e":"情绪","d":"台词","x":"音效","u":6}]}',
+        skillInstruction,
         `故事：${story}`,
       ].join("\n");
       const requestedModel = String(body.model || "").trim().slice(0, 160);
@@ -134,6 +138,7 @@ export async function POST(request: Request) {
         "You are the supervising director of a Chinese AI motion-comic production.",
         `Review the writer draft for exactly ${count} scenes and style ${style}. Fix JSON syntax, character consistency, dramatic pacing, visual prompts and the ending hook.`,
         "Return ONLY the complete minified JSON object. Keep the same compact schema and use Simplified Chinese. No markdown or explanation.",
+        skillInstruction,
         `原故事：${story}`,
         `编剧初稿：${draft}`,
       ].join("\n");
@@ -165,6 +170,7 @@ export async function POST(request: Request) {
       if (sourceImage && (sourceImage.length > 12_000_000 || !/^[a-z0-9+/=\r\n]+$/i.test(sourceImage))) return json({ error: "人物身份参考图格式无效或文件过大" }, 400);
       const fullPrompt = [
         prompt,
+        skillInstruction,
         "cinematic Chinese manhua panel, professional composition, expressive characters, coherent anatomy, dramatic lighting, highly detailed, no text, no caption",
         "### low quality, blurry, watermark, logo, letters, text, deformed hands, extra fingers, duplicate people",
       ].join(", ");

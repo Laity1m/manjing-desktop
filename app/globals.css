@@ -1619,7 +1619,7 @@ footer p { flex: 1; }
   .video-result-stage { max-width: 340px; margin: 0 auto; }
 }
 
-/* 1.4.4 agent chat and capability vault */
+/* Agent chat and capability vault */
 .agent-chat-page, .skill-vault-page { min-height: 100vh; background: radial-gradient(circle at 82% 12%, rgba(199,117,69,.12), transparent 28%), #f4f0e9; }
 .agent-chat-shell { width: min(1500px, 96vw); height: calc(100dvh - 106px); min-height: 0; margin: 12px auto; display: grid; grid-template-columns: 250px minmax(0,1fr) 270px; overflow: hidden; border: 1px solid #dcd4ca; border-radius: 22px; background: #fffdfa; box-shadow: 0 24px 70px rgba(47,38,31,.1); }
 .agent-roster { min-height: 0; display: flex; flex-direction: column; border-right: 1px solid #e5ded6; padding: 24px 14px; background: #ede7de; }

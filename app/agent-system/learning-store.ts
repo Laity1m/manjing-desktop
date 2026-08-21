@@ -76,6 +76,7 @@ export const AGENT_PROFILES: AgentProfile[] = [
 const STORE_KEY = "manjing-agent-learning-v145";
 const PRESET_KEY = "manjing-agent-preset-skills-v5";
 const IMPORTED_PRESET_KEY = "manjing-agent-imported-skills-v1";
+const SKILL_INVOCATION_KEY = "manjing-agent-skill-invocations-v1";
 let learnedItemsCache: LearnedItem[] | null = null;
 let importedSkillsLoading = false;
 
@@ -214,14 +215,94 @@ export function mergeLearnedItems(current: LearnedItem[], incoming: LearnedItem[
   return [...merged.values()];
 }
 
-export function agentContext(agentId: string, limit = 20, projectId = "") {
+export type AgentContextRequest = {
+  agentId: string;
+  task?: string;
+  projectId?: string;
+  query?: string;
+  limit?: number;
+  maxCharacters?: number;
+};
+
+export type SkillInvocation = {
+  id: string;
+  agentId: string;
+  task: string;
+  projectId: string;
+  itemIds: string[];
+  itemTitles: string[];
+  channel: string;
+  createdAt: string;
+};
+
+function relevanceTerms(value: string) {
+  return [...new Set(value.toLocaleLowerCase("zh-CN").match(/[\u3400-\u9fff]{2,}|[a-z][a-z0-9_-]{2,}/gi) || [])].slice(0, 80);
+}
+
+export function activeLearningProjectId() {
+  if (typeof window === "undefined") return "";
+  try {
+    const active = JSON.parse(localStorage.getItem("manjing-active-series-context-v1") || "{}") as { projectId?: string };
+    return String(active.projectId || "").trim();
+  } catch { return ""; }
+}
+
+export function resolveAgentContext(request: AgentContextRequest) {
   const now = Date.now();
+  const agentId = request.agentId;
+  const projectId = String(request.projectId || activeLearningProjectId()).trim();
+  const limit = Math.max(0, Math.min(50, request.limit || 20));
+  const maxCharacters = Math.max(1000, Math.min(30000, request.maxCharacters || 9000));
   const compatibleAgentIds = agentId === "image" ? new Set(["image", "storyboard"]) : agentId === "storyboard" ? new Set(["storyboard", "image"]) : agentId === "prompt" ? new Set(["prompt", "storyboard", "video"]) : new Set([agentId]);
-  return readLearnedItems()
+  const terms = relevanceTerms(`${request.task || ""} ${request.query || ""}`);
+  const ranked = readLearnedItems()
     .filter((item) => item.status === "approved" && item.enabled && !item.archivedAt)
     .filter((item) => compatibleAgentIds.has(item.agentId) || item.scope === "user" || (item.scope === "project" && item.projectId === projectId))
-    .sort((a, b) => contextScore(b, now) - contextScore(a, now))
-    .slice(0, limit);
+    .map((item) => {
+      const haystack = `${item.title} ${item.tags.join(" ")} ${item.content}`.toLocaleLowerCase("zh-CN");
+      const relevance = terms.reduce((score, term) => score + (haystack.includes(term) ? Math.min(20, 4 + term.length) : 0), 0);
+      const scopeBoost = item.scope === "project" && item.projectId === projectId ? 80 : item.scope === "agent" && compatibleAgentIds.has(item.agentId) ? 25 : 0;
+      return { item, score: contextScore(item, now) + relevance + scopeBoost };
+    })
+    .sort((a, b) => b.score - a.score);
+  const items: LearnedItem[] = [];
+  let usedCharacters = 0;
+  for (const entry of ranked) {
+    if (items.length >= limit) break;
+    const cost = entry.item.title.length + entry.item.content.length;
+    if (items.length && usedCharacters + cost > maxCharacters) continue;
+    items.push(entry.item);
+    usedCharacters += cost;
+  }
+  return {
+    items,
+    projectId,
+    text: items.map((item) => `- [${item.kind === "skill" ? "技能" : "记忆"}] ${item.title}：${item.content.slice(0, 1600)}`).join("\n"),
+  };
+}
+
+export function agentContext(agentId: string, limit = 20, projectId = "") {
+  return resolveAgentContext({ agentId, limit, projectId }).items;
+}
+
+export function recordSkillInvocation(input: Omit<SkillInvocation, "id" | "createdAt" | "itemTitles" | "itemIds"> & { items: LearnedItem[] }) {
+  if (typeof window === "undefined" || !input.items.length) return;
+  const record: SkillInvocation = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    agentId: input.agentId,
+    task: input.task,
+    projectId: input.projectId,
+    itemIds: input.items.map((item) => item.id),
+    itemTitles: input.items.map((item) => item.title),
+    channel: input.channel,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    const current = JSON.parse(localStorage.getItem(SKILL_INVOCATION_KEY) || "[]") as SkillInvocation[];
+    localStorage.setItem(SKILL_INVOCATION_KEY, JSON.stringify([record, ...(Array.isArray(current) ? current : [])].slice(0, 300)));
+    window.dispatchEvent(new CustomEvent("manjing-skill-invocation", { detail: record }));
+  } catch { /* Invocation visibility must never block generation. */ }
+  markContextUsed(record.itemIds);
 }
 
 export function markContextUsed(ids: string[]) {
