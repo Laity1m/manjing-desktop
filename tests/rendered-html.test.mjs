@@ -137,7 +137,8 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /normalizeImageBlobForAspect/);
   assert.match(page, /width: options\.imagePurpose === "character-card" \? "1792" : mediaAspect === "9:16" \? "720" : "1280"/);
   assert.match(page, /height: options\.imagePurpose === "character-card" \? "1024" : mediaAspect === "9:16" \? "1280" : "720"/);
-  assert.match(page, /references: await videoReferences\(scene, previousScene/);
+  assert.match(page, /videoReferences\(scene, previousScene, preparedCharacters, preparedProps, sceneIndex\)/);
+  assert.match(page, /pollinationsMedia\("video", prompt, sceneIndex, \{ references,/);
   assert.match(page, /canvas\.toBlob\(resolve, "image\/jpeg", 0\.94\)/);
   assert.match(page, /function characterSheetPrompt/);
   assert.match(page, /left 35%-40% of the canvas is one large eye-level strict frontal head-and-shoulders portrait/);
@@ -152,6 +153,17 @@ test("improves the free image and motion pipeline without presenting it as nativ
   assert.match(page, /function drawMovingShot/);
   assert.match(horde, /width: aspect === "9:16" \? 448 : 704/);
   assert.match(horde, /height: aspect === "9:16" \? 704 : 384/);
+});
+
+test("pauses every paid video request in an editable assisted-production console", async () => {
+  const page = await readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8");
+  assert.match(page, /useState<ProductionMode>\("assisted"\)/);
+  assert.match(page, /最终 Seedance 提示词/);
+  assert.match(page, /本次全能参考/);
+  assert.match(page, /确认并提交本镜/);
+  assert.match(page, /模型请求（已隐藏密钥和原始媒体地址）/);
+  assert.match(page, /productionMode === "assisted"/);
+  assert.match(page, /useApprovedDraft \? approvedDraft\.references/);
 });
 
 test("ships a visual style library whose live-action presets stay photorealistic", async () => {

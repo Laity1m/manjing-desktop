@@ -74,7 +74,7 @@ export const AGENT_PROFILES: AgentProfile[] = [
 ];
 
 const STORE_KEY = "manjing-agent-learning-v145";
-const PRESET_KEY = "manjing-agent-preset-skills-v5";
+const PRESET_KEY = "manjing-agent-preset-skills-v6";
 const IMPORTED_PRESET_KEY = "manjing-agent-imported-skills-v1";
 const SKILL_INVOCATION_KEY = "manjing-agent-skill-invocations-v1";
 let learnedItemsCache: LearnedItem[] | null = null;
@@ -240,6 +240,28 @@ function relevanceTerms(value: string) {
   return [...new Set(value.toLocaleLowerCase("zh-CN").match(/[\u3400-\u9fff]{2,}|[a-z][a-z0-9_-]{2,}/gi) || [])].slice(0, 80);
 }
 
+function requiredDefaultSkillIds(agentId: string, task: string) {
+  const key = `${agentId}:${task}`;
+  const table: Record<string, string[]> = {
+    "writer:storyboard": ["preset-storyboard-seedance-action-budget"],
+    "director:review_storyboard": ["preset-director-seedance-reference-plan"],
+    "prompt:compile_video_prompt": ["preset-prompt-seedance-engineered-instruction", "preset-storyboard-seedance-action-budget", "preset-video-seedance-reference-and-repair"],
+    "editor:edit_plan": ["preset-editor-seedance-continuation-choice"],
+  };
+  if (task === "libtv_full_production") {
+    const byRole: Record<string, string> = {
+      director: "preset-director-seedance-reference-plan",
+      writer: "preset-storyboard-seedance-action-budget",
+      prompt: "preset-prompt-seedance-engineered-instruction",
+      image: "preset-image-original-character-face-design",
+      video: "preset-video-seedance-reference-and-repair",
+      editor: "preset-editor-seedance-continuation-choice",
+    };
+    return new Set(byRole[agentId] ? [byRole[agentId]] : []);
+  }
+  return new Set(table[key] || []);
+}
+
 export function activeLearningProjectId() {
   if (typeof window === "undefined") return "";
   try {
@@ -254,8 +276,13 @@ export function resolveAgentContext(request: AgentContextRequest) {
   const projectId = String(request.projectId || activeLearningProjectId()).trim();
   const limit = Math.max(0, Math.min(50, request.limit || 20));
   const maxCharacters = Math.max(1000, Math.min(30000, request.maxCharacters || 9000));
-  const compatibleAgentIds = agentId === "image" ? new Set(["image", "storyboard"]) : agentId === "storyboard" ? new Set(["storyboard", "image"]) : agentId === "prompt" ? new Set(["prompt", "storyboard", "video"]) : new Set([agentId]);
+  const compatibleAgentIds = agentId === "image" ? new Set(["image", "storyboard"])
+    : agentId === "storyboard" ? new Set(["storyboard", "writer", "image"])
+      : agentId === "writer" ? new Set(["writer", "storyboard"])
+        : agentId === "prompt" ? new Set(["prompt", "storyboard", "video"])
+          : new Set([agentId]);
   const terms = relevanceTerms(`${request.task || ""} ${request.query || ""}`);
+  const requiredDefaults = requiredDefaultSkillIds(agentId, request.task || "");
   const ranked = readLearnedItems()
     .filter((item) => item.status === "approved" && item.enabled && !item.archivedAt)
     .filter((item) => compatibleAgentIds.has(item.agentId) || item.scope === "user" || (item.scope === "project" && item.projectId === projectId))
@@ -263,7 +290,8 @@ export function resolveAgentContext(request: AgentContextRequest) {
       const haystack = `${item.title} ${item.tags.join(" ")} ${item.content}`.toLocaleLowerCase("zh-CN");
       const relevance = terms.reduce((score, term) => score + (haystack.includes(term) ? Math.min(20, 4 + term.length) : 0), 0);
       const scopeBoost = item.scope === "project" && item.projectId === projectId ? 80 : item.scope === "agent" && compatibleAgentIds.has(item.agentId) ? 25 : 0;
-      return { item, score: contextScore(item, now) + relevance + scopeBoost };
+      const requiredBoost = requiredDefaults.has(item.id) ? 500 : 0;
+      return { item, score: contextScore(item, now) + relevance + scopeBoost + requiredBoost };
     })
     .sort((a, b) => b.score - a.score);
   const items: LearnedItem[] = [];

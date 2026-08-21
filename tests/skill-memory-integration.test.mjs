@@ -30,6 +30,30 @@ test("approved shots write a project event ledger consumed by episode context", 
   assert.match(series, /syncSeriesNarrativeMemory/);
 });
 
+test("classifies the supplied character and Seedance knowledge into retrievable department defaults", async () => {
+  const [presets, learning, studio] = await Promise.all([
+    readFile(new URL("../app/agent-system/preset-skills.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/agent-system/learning-store.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/studio-client.tsx", import.meta.url), "utf8"),
+  ]);
+  for (const id of [
+    "director-seedance-reference-plan",
+    "storyboard-seedance-action-budget",
+    "prompt-seedance-engineered-instruction",
+    "image-original-character-face-design",
+    "video-seedance-reference-and-repair",
+    "editor-seedance-continuation-choice",
+  ]) assert.match(presets, new RegExp(`id: "${id}"`));
+  assert.match(presets, /一个主要五官记忆点加两个辅助特征/);
+  assert.match(presets, /少写含目标错误动作的大段禁止项/);
+  assert.match(presets, /不得提交 first_frame\/last_frame 控制/);
+  assert.match(learning, /agentId === "writer" \? new Set\(\["writer", "storyboard"\]\)/);
+  assert.match(learning, /requiredDefaultSkillIds/);
+  assert.match(learning, /preset-prompt-seedance-engineered-instruction/);
+  assert.match(learning, /requiredBoost = requiredDefaults\.has\(item\.id\) \? 500 : 0/);
+  assert.match(studio, /preset-image-original-character-face-design/);
+});
+
 test("public documentation is v0.0.1-only and every README image exists", async () => {
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
   const notes = await readFile(new URL("../RELEASE_NOTES_0.0.1.md", import.meta.url), "utf8");

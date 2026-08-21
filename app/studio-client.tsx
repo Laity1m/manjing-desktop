@@ -157,6 +157,30 @@ type CameraCoverageAlternative = {
   imageUrl: string;
   sourceTailFrameUrl: string;
 };
+type VideoReference = {
+  kind: "image" | "video" | "audio";
+  role: "reference_image" | "reference_video" | "reference_audio";
+  url: string;
+  name: string;
+  referenceText?: string;
+  libraryAssetId?: string;
+  identityKey?: string;
+  lookName?: string;
+};
+type MediaReference = string | VideoReference;
+type ProductionMode = "assisted" | "autopilot" | "manual";
+type ShotSubmissionDraft = {
+  sceneId: string;
+  sceneIndex: number;
+  prompt: string;
+  references: VideoReference[];
+  model: string;
+  adapter: string;
+  duration: number;
+  aspect: string;
+  resolution: string;
+  preparedAt: string;
+};
 type Scene = {
   id: string;
   title: string;
@@ -666,7 +690,7 @@ function characterVisualPrompt(name: string) {
 type ImageSkillPurpose = "character" | "frame" | "quality";
 
 const IMAGE_SKILLS_BY_PURPOSE: Record<ImageSkillPurpose, string[]> = {
-  character: ["preset-image-character-casting-beauty", "preset-image-aesthetic-art-direction"],
+  character: ["preset-image-character-casting-beauty", "preset-image-original-character-face-design", "preset-image-aesthetic-art-direction"],
   frame: ["preset-image-aesthetic-art-direction", "preset-image-reference-identity-lock"],
   quality: ["preset-image-human-preference-quality-gate"],
 };
@@ -1400,6 +1424,9 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
   const [seedanceModel, setSeedanceModel] = useState("doubao-seedance-2-0-260128");
   const [videoResolution, setVideoResolution] = useState<"480p" | "720p" | "1080p">("720p");
   const [frameContinuityMode, setFrameContinuityMode] = useState<FrameContinuityMode>("identity-first");
+  const [productionMode, setProductionMode] = useState<ProductionMode>("assisted");
+  const [shotSubmissionDraft, setShotSubmissionDraft] = useState<ShotSubmissionDraft | null>(null);
+  const [shotDraftLoading, setShotDraftLoading] = useState(false);
   const [importMessage, setImportMessage] = useState("可按需导入，已具备的环节会自动跳过");
   const [scriptImported, setScriptImported] = useState(false);
   const [scriptMemory, setScriptMemory] = useState<ScriptNarrativeMemory>({ synopsis: "", background: "", updatedAt: "" });
@@ -1626,6 +1653,15 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       if (saved?.synopsis || saved?.background) setScriptMemory(saved);
     } catch { /* A new analysis will rebuild the memory. */ }
   }, [scriptImported]);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("manjing-production-mode-v1");
+    if (saved === "assisted" || saved === "autopilot" || saved === "manual") setProductionMode(saved);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("manjing-production-mode-v1", productionMode);
+  }, [productionMode]);
 
   const totalDuration = useMemo(() => scenes.reduce((sum, item) => sum + item.duration, 0), [scenes]);
   const productionDuration = targetDuration || 30;
@@ -2147,6 +2183,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   function updateScene(id: string, patch: Partial<Scene>) {
     setScenes((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    setShotSubmissionDraft((draft) => draft?.sceneId === id ? null : draft);
     invalidateExport();
   }
 
@@ -3152,18 +3189,6 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return saved;
   }
 
-  type VideoReference = {
-    kind: "image" | "video" | "audio";
-    role: "reference_image" | "reference_video" | "reference_audio";
-    url: string;
-    name: string;
-    referenceText?: string;
-    libraryAssetId?: string;
-    identityKey?: string;
-    lookName?: string;
-  };
-  type MediaReference = string | VideoReference;
-
   type SceneVoiceover = { script: string; speaker: string; mode: "onscreen_dialogue" | "inner_monologue" | "voice_over" | "none" };
 
   function sceneVoiceover(scene: Scene): SceneVoiceover {
@@ -4048,12 +4073,60 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     return { frames, report, accepted: videoConsistencyAccepted(report, castForScene.length > 0) };
   }
 
-  async function generateInspectedVideoWithOneRepair(scene: Scene, sceneIndex: number, previousScene: Scene | undefined, preparedCharacters: CharacterAsset[], preparedProps: PropAsset[]) {
+  async function prepareShotSubmission(scene: Scene, preparedCharacters?: CharacterAsset[], preparedProps?: PropAsset[]) {
+    if (shotDraftLoading) return;
+    setShotDraftLoading(true);
+    setError("");
+    try {
+      const sceneIndex = Math.max(0, scenes.findIndex((item) => item.id === scene.id));
+      const previousScene = sceneIndex > 0 ? scenes[sceneIndex - 1] : undefined;
+      const cast = preparedCharacters || (await preflightReusableVideoAssets(scenes.length ? scenes : [scene], characters)).cast;
+      const props = preparedProps || propAssets;
+      setStatusText(`正在编译第 ${sceneIndex + 1} 镜的提示词与全能参考清单，尚未提交付费生成`);
+      const [prompt, references] = await Promise.all([
+        compileShotMotionPrompt(scene, sceneIndex, previousScene),
+        videoReferences(scene, previousScene, cast, props, sceneIndex),
+      ]);
+      setShotSubmissionDraft({
+        sceneId: scene.id,
+        sceneIndex,
+        prompt,
+        references,
+        model: agentConfigs.video.model,
+        adapter: agentConfigs.video.adapter,
+        duration: scene.duration,
+        aspect,
+        resolution: videoResolution,
+        preparedAt: new Date().toISOString(),
+      });
+      setSelected(sceneIndex);
+      setPhase("ready");
+      setStatusText(`第 ${sceneIndex + 1} 镜已进入生成前控制台：请检查提示词和 ${references.length} 项全能参考后再提交`);
+      recordActivity("video", `“${scene.title}”生成方案已准备，等待用户确认；尚未调用视频模型`, "warning");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法准备本镜生成方案");
+      setPhase("ready");
+    } finally {
+      setShotDraftLoading(false);
+    }
+  }
+
+  async function submitShotSubmission() {
+    const draft = shotSubmissionDraft;
+    if (!draft) return;
+    const scene = scenes.find((item) => item.id === draft.sceneId);
+    if (!scene) { setShotSubmissionDraft(null); return; }
+    await generateVideo(scene, draft);
+  }
+
+  async function generateInspectedVideoWithOneRepair(scene: Scene, sceneIndex: number, previousScene: Scene | undefined, preparedCharacters: CharacterAsset[], preparedProps: PropAsset[], approvedDraft?: ShotSubmissionDraft) {
     const visibleCast = charactersForScene(preparedCharacters, scene).filter(isVisualCharacterAsset);
     let attemptScene = scene;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const prompt = await compileShotMotionPrompt(attemptScene, sceneIndex, previousScene);
-      const clip = await pollinationsMedia("video", prompt, sceneIndex, { references: await videoReferences(scene, previousScene, preparedCharacters, preparedProps, sceneIndex), duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
+      const useApprovedDraft = attempt === 1 && approvedDraft?.sceneId === scene.id;
+      const prompt = useApprovedDraft ? approvedDraft.prompt : await compileShotMotionPrompt(attemptScene, sceneIndex, previousScene);
+      const references = useApprovedDraft ? approvedDraft.references : await videoReferences(scene, previousScene, preparedCharacters, preparedProps, sceneIndex);
+      const clip = await pollinationsMedia("video", prompt, sceneIndex, { references, duration: scene.duration, resumeKey: scene.id, voiceover: sceneVoiceover(scene) });
       const durableCandidate = await persistSceneVideoAsset(scene, clip.url, "candidate");
       const inspection = await withStageTimeout(inspectGeneratedVideo(attemptScene, durableCandidate.url, visibleCast, previousScene, attempt), 120000, "视频已生成，但一致性检查等待超过 120 秒；请重试该镜头");
       const canAutoRepair = !inspection.accepted && inspection.report.mode === "vision" && attempt === 1;
@@ -4362,6 +4435,13 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
 
   async function generateAll() {
     if (story.trim().length < 8 || !["idle", "ready", "error"].includes(phase)) return;
+    if (productionMode === "manual") {
+      setPhase("ready");
+      setStatusText("人工模式已进入工作区：请逐项编辑资产、分镜和媒体，不会自动提交任何模型任务");
+      recordActivity("director", "人工制作模式已启用，自动流水线未启动", "warning");
+      document.querySelector(".timeline-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
     if (scriptImported) {
       if (assetAnalysisState === "analyzing") {
         setError("AI 仍在分析剧本人物与道具，请等待资产框架建立完成");
@@ -4864,6 +4944,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               recordActivity("director", `“${scene.title}”正在等待多机位选择，尚未提交视频生成`, "warning");
               return;
             }
+            if (productionMode === "assisted") {
+              work = work.map((item) => item.id === scene.id ? { ...item, status: "ready" as SceneStatus } : item);
+              publishScenes(work);
+              await prepareShotSubmission(scene, cast, videoPropAssets);
+              return;
+            }
             const { clip, durableCandidate, inspection } = await generateInspectedVideoWithOneRepair(scene, index, previousScene, cast, videoPropAssets);
             if (!inspection.accepted) {
               const message = `五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，已拒绝进入资产库和成片`;
@@ -5227,6 +5313,12 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           work = work.map((item) => item.id === scene.id ? { ...item, status: "animating" as SceneStatus } : item);
           publishScenes(work);
           const previousScene = sceneIndex > 0 ? work[sceneIndex - 1] : undefined;
+          if (productionMode === "assisted") {
+            work = work.map((item) => item.id === scene.id ? { ...item, status: "ready" as SceneStatus } : item);
+            publishScenes(work);
+            await prepareShotSubmission(scene, preparedCharacters, propAssets);
+            return;
+          }
           const { clip, durableCandidate, inspection } = await generateInspectedVideoWithOneRepair(scene, sceneIndex, previousScene, preparedCharacters, propAssets);
           if (!inspection.accepted) {
             const message = `五点视频一致性检查仅 ${inspection.report.overall} 分或存在单项硬失败，补跑结果已拒绝`;
@@ -5386,7 +5478,7 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
     }
   }
 
-  async function generateVideo(scene: Scene) {
+  async function generateVideo(scene: Scene, approvedDraft?: ShotSubmissionDraft) {
     if (sceneActionRef.current) return;
     if (agentConfigs.video.adapter === "browser") {
       setConfiguringRole("video");
@@ -5407,6 +5499,10 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       setError("请先配置视频 AI 的 Webhook");
       return;
     }
+    if (productionMode === "assisted" && (!approvedDraft || approvedDraft.sceneId !== scene.id)) {
+      await prepareShotSubmission(scene);
+      return;
+    }
     const actionId = `video:${scene.id}`;
     const actionRun = runRef.current;
     const previousCandidateUrl = scene.candidateVideoUrl;
@@ -5421,7 +5517,8 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
       const preparedCharacters = videoPreflight.cast;
       const sceneIndex = scenes.findIndex((item) => item.id === scene.id);
       const previousScene = sceneIndex > 0 ? scenes[sceneIndex - 1] : undefined;
-      const { clip, durableCandidate, inspection } = await generateInspectedVideoWithOneRepair(scene, Math.max(0, sceneIndex), previousScene, preparedCharacters, propAssets);
+      if (approvedDraft) setShotSubmissionDraft(null);
+      const { clip, durableCandidate, inspection } = await generateInspectedVideoWithOneRepair(scene, Math.max(0, sceneIndex), previousScene, preparedCharacters, propAssets, approvedDraft);
       if (!inspection.accepted) {
         patchSceneReview(scene.id, { videoUrl: undefined, remoteVideoUrl: undefined, candidateVideoUrl: durableCandidate.url, candidateVideoAssetId: durableCandidate.id, videoReviewDecision: "pending", consistencyReport: inspection.report, consistencyDecision: "reject", status: "error" });
         if (previousCandidateUrl?.startsWith("blob:") && previousCandidateUrl !== durableCandidate.url) URL.revokeObjectURL(previousCandidateUrl);
@@ -7140,8 +7237,14 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
           <p className="opensource-note"><b>免费指代码或模型可自托管，不代表显卡与第三方服务免费。</b>VibeVoice Realtime 目前主要面向英文单角色；中文多角色优先使用 CosyVoice。MoneyPrinterTurbo 和大型视频模型需要本机 FFmpeg、模型与相应算力，所有开源节点均为可选。</p>
         </div>
 
+        <div className="production-mode-panel">
+          <div><b>制作方式</b><span>默认半自动：AI 负责分析和编译，人负责确认关键提交</span></div>
+          <div className="production-mode-options">
+            {([['assisted', '半自动导演模式', '逐镜查看并修改最终提示词、全能参考和请求参数后再提交'], ['autopilot', '自动流水线', '沿用逐镜审核，但生成前不再等待人工确认'], ['manual', '人工制作', '不启动自动流水线，只使用资产、分镜和剪辑工具']] as const).map(([value, label, note]) => <button type="button" key={value} className={productionMode === value ? "active" : ""} onClick={() => { setProductionMode(value); setShotSubmissionDraft(null); }}><b>{label}</b><span>{note}</span></button>)}
+          </div>
+        </div>
         <div className="generate-row">
-          <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑</small></button>
+          <button className="generate-button" onClick={generateAll} disabled={busy || story.trim().length < 8}><span>✦</span>{busy ? "AI 制片组正在协作" : productionMode === "assisted" ? "创建半自动制作任务" : productionMode === "manual" ? "进入人工制作工作区" : nativeVideoEnabled ? "让 AI 制片组生成漫剧" : "让免费 AI 制片组生成样片"}<small>{productionMode === "assisted" ? "分析与资产可自动执行；每个视频提交前由你检查" : productionMode === "manual" ? "不会自动调用模型或产生付费请求" : "导演审片 + 编剧分镜 + 图像 + 视频 + 配音 + 剪辑"}</small></button>
           {busy && <button className="cancel-button" onClick={cancelGeneration}>{phase === "exporting" ? "停止合成" : "停止"}</button>}
         </div>
         {(phase !== "idle" || error) && <div className={`job-status ${error ? "has-error" : ""}`}><div className="status-copy"><div><b>{error || statusText}</b><span>{activePortraitBlock ? "方舟真人安全拦截不是网络故障；授权完成前已禁止重复付费提交。" : error ? "已完成成果仍然保留，可重新运行中断的岗位。" : `${visibleProgress}%`}</span></div>{activePortraitBlock ? <button type="button" className="job-retry-button portrait-center-button" onClick={openTrustedPortraitCenter} disabled={busy}>处理可信人物（{activePortraitBlock.blockedReferences.length || 1}）</button> : error && failedRole ? <button type="button" className="job-retry-button" onClick={() => void rerunRole(failedRole)} disabled={busy}>{retryingRole === failedRole ? "重新运行中…" : `重新运行${AGENT_ROLES.find((role) => role.id === failedRole)?.title}`}</button> : null}{!error && nativeVideoEnabled && phase === "ready" && sequentialVideoPlan.kind === "generate" && <button type="button" className="job-retry-button" onClick={() => void rerunRole("video")} disabled={busy}>继续生成第 {sequentialVideoPlan.index + 1} 镜</button>}</div><div className="status-bar"><i style={{ width: `${visibleProgress}%` }} /></div><div className="status-steps"><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>编剧</span><span className={["story", "characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>导演</span><span className={["characters", "images", "video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>生图</span><span className={["video", "voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>{nativeVideoEnabled ? "视频" : "运镜"}</span><span className={["voice", "music", "exporting", "ready"].includes(phase) ? "active" : ""}>配音</span><span className={["exporting", "ready"].includes(phase) ? "active" : ""}>剪辑</span></div></div>}
@@ -7255,6 +7358,16 @@ export default function StudioClient({ surface = "studio" }: { surface?: "studio
               <label>场景与构图<textarea value={selectedScene.visual} onChange={(event) => updateScene(selectedScene.id, { visual: event.target.value })} /></label>
               <label>人物动作与表演<textarea value={selectedScene.action} onChange={(event) => updateScene(selectedScene.id, { action: event.target.value })} /></label>
               <label>角色台词<textarea value={selectedScene.dialogue} onChange={(event) => updateScene(selectedScene.id, { dialogue: event.target.value })} /></label>
+              {productionMode !== "autopilot" && <section className="shot-submission-console">
+                <div className="shot-console-heading"><div><b>生成前控制台</b><span>模型不会在你确认前收到本镜请求</span></div>{shotSubmissionDraft?.sceneId === selectedScene.id && <em>已编译 · 未提交</em>}</div>
+                {shotSubmissionDraft?.sceneId === selectedScene.id ? <>
+                  <div className="shot-request-meta"><span>模型 <b>{shotSubmissionDraft.model}</b></span><span>时长 <b>{shotSubmissionDraft.duration}s</b></span><span>画幅 <b>{shotSubmissionDraft.aspect}</b></span><span>清晰度 <b>{shotSubmissionDraft.resolution}</b></span></div>
+                  <label>最终 Seedance 提示词<textarea className="final-video-prompt" value={shotSubmissionDraft.prompt} onChange={(event) => setShotSubmissionDraft((draft) => draft && draft.sceneId === selectedScene.id ? { ...draft, prompt: event.target.value } : draft)} /></label>
+                  <div className="shot-reference-list"><b>本次全能参考（{shotSubmissionDraft.references.length}）</b>{shotSubmissionDraft.references.length ? <div>{shotSubmissionDraft.references.map((reference, index) => <span key={`${reference.kind}-${reference.name}-${index}`}><i>@{reference.kind === "image" ? "Image" : reference.kind === "video" ? "Video" : "Audio"}</i>{reference.name}</span>)}</div> : <p>本镜没有可绑定的媒体参考，请确认是否符合预期。</p>}</div>
+                  <details className="shot-request-json"><summary>查看模型请求（已隐藏密钥和原始媒体地址）</summary><pre>{JSON.stringify({ adapter: shotSubmissionDraft.adapter, model: shotSubmissionDraft.model, duration: shotSubmissionDraft.duration, aspect: shotSubmissionDraft.aspect, resolution: shotSubmissionDraft.resolution, prompt: shotSubmissionDraft.prompt, references: shotSubmissionDraft.references.map(({ kind, role, name, libraryAssetId, identityKey, lookName }) => ({ kind, role, name, libraryAssetId, identityKey, lookName })) }, null, 2)}</pre></details>
+                  <div className="shot-console-actions"><button type="button" className="secondary" onClick={() => void prepareShotSubmission(selectedScene)} disabled={shotDraftLoading || busy}>{shotDraftLoading ? "重新编译中…" : "按当前分镜重新编译"}</button><button type="button" onClick={() => void submitShotSubmission()} disabled={busy || shotDraftLoading || !shotSubmissionDraft.prompt.trim()}>确认并提交本镜</button></div>
+                </> : <div className="shot-console-empty"><p>{productionMode === "manual" ? "人工模式不会自动编译；需要时可单独准备本镜请求。" : "流水线运行到本镜时会在这里暂停，你也可以现在先编译检查。"}</p><button type="button" onClick={() => void prepareShotSubmission(selectedScene)} disabled={shotDraftLoading || busy}>{shotDraftLoading ? "正在编译…" : "编译本镜生成方案"}</button></div>}
+              </section>}
               <StageLayoutEditor characters={selectedScene.characters} objects={stageObjectNamesForScene(selectedScene)} value={selectedScene.stageLayout} onChange={(layout) => updateStageLayout(selectedScene, layout)} onApplyToEnvironment={(layout) => applyStageLayoutToEnvironment(selectedScene, layout)} />
               <div className="editor-grid"><label>2.5D 动态<select value={selectedScene.motion || "push"} onChange={(event) => updateScene(selectedScene.id, { motion: event.target.value as MotionPreset })}>{MOTION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>转场<select value={selectedScene.transition || "fade"} onChange={(event) => updateScene(selectedScene.id, { transition: event.target.value as TransitionPreset })}>{TRANSITION_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>画面滤镜<select value={selectedScene.filter || "none"} onChange={(event) => updateScene(selectedScene.id, { filter: event.target.value as VisualFilter })}><option value="none">原色</option><option value="warm">暖调电影感</option><option value="cool">冷调悬疑</option><option value="mono">黑白漫画</option></select></label><label>字幕位置<select value={selectedScene.subtitlePosition || "bottom"} onChange={(event) => updateScene(selectedScene.id, { subtitlePosition: event.target.value as SubtitlePosition })}><option value="top">顶部</option><option value="center">中央</option><option value="bottom">底部</option></select></label></div>
               <div className="editor-grid"><label>镜头时长<input type="number" min={1} max={15} step={0.5} value={selectedScene.duration} onChange={(event) => updateScene(selectedScene.id, { duration: Math.max(1, Math.min(15, Number(event.target.value))) })} /></label><label>视频速度<input type="number" min={0.5} max={2} step={0.1} value={selectedScene.speed || 1} onChange={(event) => updateScene(selectedScene.id, { speed: Math.max(0.5, Math.min(2, Number(event.target.value))) })} /></label><label>配音音量<input type="range" min={0} max={2} step={0.05} value={selectedScene.volume ?? 1} onChange={(event) => updateScene(selectedScene.id, { volume: Number(event.target.value) })} /></label><label>运镜强度<input type="range" min={0.35} max={1.8} step={0.05} value={selectedScene.motionIntensity || 1} onChange={(event) => updateScene(selectedScene.id, { motionIntensity: Number(event.target.value) })} /></label></div>
